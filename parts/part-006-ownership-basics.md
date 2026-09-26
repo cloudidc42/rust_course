@@ -498,9 +498,13 @@ error[E0040]: explicit use of destructor method
  --> src/main.rs:3:7
   |
 3 |     a.drop();
-  |     -^^^^--- explicit destructor calls not allowed
-  |     |
-  |     help: consider using `drop` function: `drop(a)`
+  |       ^^^^ explicit destructor calls not allowed
+  |
+help: consider using `drop` function
+  |
+3 -     a.drop();
+3 +     drop(a);
+  |
 ```
 
 Rust ห้ามเรียก `.drop()` ตรง ๆ เพราะจะทำให้เกิดความเสี่ยง**double-drop** ได้ (เรียก destructor เอง แล้ว Rust ก็ยัง

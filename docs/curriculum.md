@@ -20,7 +20,7 @@
 
 | # | ชื่อบท | สถานะ |
 |---|---|---|
-| 6 | Ownership เบื้องต้น (move, copy, drop) | ⏳ |
+| 6 | Ownership เบื้องต้น (move, copy, drop) | ✅ |
 | 7 | Borrowing และ References (&, &mut, borrow checker) | ✅ |
 | 8 | Slices (&str, &[T]) | ✅ |
 | 9 | Structs (tuple struct, unit struct, methods, impl) | ✅ |

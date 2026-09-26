@@ -305,13 +305,13 @@ fn main() {
 error[E0597]: `s2` does not live long enough
   --> src/main.rs:14:31
    |
-13 |         let s2 = String::from("Rust");
+13 |         let s2 = String::from("Rust"); // s2 มีอายุสั้นกว่า — จะถูก drop เมื่อจบ block นี้
    |             -- binding `s2` declared here
-14 |         result = longest(&s1, &s2);
+14 |         result = longest(&s1, &s2);    // ❌ ลองดูว่า compiler ยอมให้ทำแบบนี้หรือไม่
    |                               ^^^ borrowed value does not live long enough
 15 |     }
    |     - `s2` dropped here while still borrowed
-16 |     println!("ประโยคที่ยาวกว่าคือ: {result}");
+16 |     println!("ประโยคที่ยาวกว่าคือ: {result}"); // ใช้ result หลังจาก s2 ถูก drop ไปแล้ว
    |                                 ------ borrow later used here
 ```
 
@@ -723,11 +723,11 @@ error[E0597]: `novel` does not live long enough
    |
 18 |         let novel = String::from("Call me Ishmael. Some years ago never mind.");
    |             ----- binding `novel` declared here
-19 |         excerpt = Excerpt::new(&novel);
+19 |         excerpt = Excerpt::new(&novel); // excerpt.part ยืมมาจาก novel
    |                                ^^^^^^ borrowed value does not live long enough
-20 |     }
+20 |     } // novel หมดอายุตรงนี้ — ถูก drop
    |     - `novel` dropped here while still borrowed
-21 |     println!("{}", excerpt.part);
+21 |     println!("{}", excerpt.part); // ❌ excerpt ยังพยายามใช้ reference ที่ชี้ไปยัง novel ที่ตายไปแล้ว
    |                    ------------ borrow later used here
 ```
 
@@ -774,16 +774,16 @@ fn main() {
 
 ```
 error[E0597]: `s2` does not live long enough
-  --> src/main.rs:11:47
+  --> src/main.rs:12:47
    |
-10 |         let s2 = String::from("อายุสั้น");
+11 |         let s2 = String::from("อายุสั้น");
    |             -- binding `s2` declared here
-11 |         pair = PairSame { first: &s1, second: &s2 };
+12 |         pair = PairSame { first: &s1, second: &s2 };
    |                                               ^^^ borrowed value does not live long enough
-12 |         let _ = &pair;
-13 |     }
+13 |         let _ = &pair;
+14 |     } // s2 หมดอายุตรงนี้
    |     - `s2` dropped here while still borrowed
-14 |     println!("{}", pair.first);
+15 |     println!("{}", pair.first); // ❌ ล้มเหลว แม้เราจะใช้แค่ pair.first ที่มาจาก s1 (อายุยืน) เท่านั้นก็ตาม!
    |                    ---------- borrow later used here
 ```
 
@@ -1376,7 +1376,7 @@ fn main() {
 
 ```
 error[E0106]: missing lifetime specifier
- --> src/main.rs:1:34
+ --> src/main.rs:1:33
   |
 1 | fn shorter(x: &str, y: &str) -> &str {
   |               ----     ----     ^ expected named lifetime parameter
@@ -1419,15 +1419,16 @@ fn main() {
 
 ```
 error[E0597]: `s2` does not live long enough
-  --> src/main.rs:11:32
+  --> src/main.rs:14:36
    |
-10 |         let s2 = String::from("อายุสั้น");
+11 |         let s2 = String::from("อายุสั้น");
    |             -- binding `s2` declared here
-11 |         result = always_first(&s1, &s2);
+...
+14 |         result = always_first(&s1, &s2);
    |                                    ^^^ borrowed value does not live long enough
-12 |     }
+15 |     }
    |     - `s2` dropped here while still borrowed
-13 |     println!("{result}");
+16 |     println!("{result}");
    |                ------ borrow later used here
 ```
 

@@ -1447,6 +1447,8 @@ note: candidate #1 is defined in an impl for the type `Customer`
 
 แบบฝึกหัดทุกข้อต้องการ workspace ที่มีอย่างน้อย 2 crate (proc-macro crate + consumer crate) ตามโครงสร้างในหัวข้อ 44.6 เสมอ — ไม่มีทางลัดใดที่ทำให้ทดสอบ derive macro ของตัวเองได้ในไฟล์เดียว (ตามที่พิสูจน์ไว้ในหัวข้อ 44.3) ยกเว้นการทดสอบ logic ล้วน ๆ ด้วยเทคนิคจากหัวข้อ 44.6.1
 
+ทำตามลำดับข้อ 1 ถึง 4 ไปเรื่อย ๆ เพราะแต่ละข้อสร้างบนพื้นฐานของข้อก่อนหน้า — ข้อ 3-4 จะยากขึ้นมากถ้าข้าม syntax ของ `syn::Type`/`syn::Fields` ที่ฝึกมาจากข้อ 1-2
+
 1. **[ง่าย]** สร้าง workspace ใหม่ที่มี proc-macro crate ชื่อ `hello_derive` ที่ implement `#[derive(SayHello)]` — เมื่อ derive กับ struct ใดก็ตาม ให้ generate เมธอด `fn say_hello(&self)` ที่พิมพ์ `"สวัสดีจาก <ชื่อ struct>!"` (ไม่ต้องอ่าน field เลย ใช้แค่ `input.ident`) ทดสอบด้วย struct 2 ตัวที่ชื่อต่างกันใน consumer crate แยก แล้วยืนยันว่า output ถูกต้องสำหรับทั้งสองตัว เช่น `#[derive(SayHello)] struct Robot;` แล้วเรียก `Robot.say_hello()` ควรได้ผลลัพธ์ `สวัสดีจาก Robot!`
    (hint: เริ่มจากโครงสร้าง `describe_derive` ในบทเรียน แต่ตัด logic การอ่าน field ทั้งหมดออก เหลือแค่ `#struct_name` ตัวเดียวใน `quote!` — สังเกตว่าโจทย์นี้ใช้ได้กับ struct แบบไหนก็ได้แม้แต่ unit struct อย่าง `struct Robot;` เพราะไม่ต้องอ่าน `Fields` เลย)
 
@@ -1489,6 +1491,8 @@ note: candidate #1 is defined in an impl for the type `Customer`
 ใน **Part 45** เราจะกลับมาที่ derive macro อีกครั้งเพื่อเจาะลึกเทคนิคขั้นสูงกว่านี้ที่บทนี้ยังไม่ได้แตะ: การอ่าน **attribute บน field** ที่ผู้ใช้กำหนดเอง (เช่น `#[describe(skip)]` เพื่อบอกให้ macro ข้าม field บางตัว — เทคนิคเดียวกับที่ `serde` ใช้ทำ `#[serde(rename = "...")]`), การรองรับ **generic parameter** ใน struct ที่ derive อยู่อย่างถูกต้อง (ต้องส่ง `impl<T> ... for Name<T>` พร้อม bound ที่เหมาะสม), และการรองรับ **enum** ที่มี variant หลากหลายรูปแบบ (ไม่ใช่แค่ struct แบบที่บทนี้โฟกัส) — เทคนิคเหล่านี้คือสิ่งที่ทำให้ derive macro ระดับ production อย่าง `serde`/`thiserror` ใช้งานได้ครอบคลุมสถานการณ์ที่หลากหลายอย่างที่คุณเห็นในโลกจริง
 
 พื้นฐานที่แน่นจากบทนี้ — pipeline `syn` → วิเคราะห์ → `quote!` → `.into()`, การจัดการ error ด้วย `syn::Error`, และวิธีจัดโครงสร้าง crate ให้ถูกต้อง — จะไม่เปลี่ยนแปลงเลยใน Part 45 มันจะยังเป็นแกนหลักเดิมทุกประการ เพียงแต่ตัวอย่างจะซับซ้อนขึ้นและ AST ที่ต้องอ่านจะมีรายละเอียดมากขึ้นเท่านั้น
+
+หลังจาก Part 45 ปิดโมดูล proc macro ทั้งสองบทนี้ หลักสูตรจะเปลี่ยนทิศทางไปสู่โลกของ **asynchronous programming** เริ่มจาก **Async/Await เบื้องต้น** ใน Part 46 — และคุณจะพบว่า `#[tokio::main]` ที่เป็น attribute macro ตัวแรกที่บทนี้ทำให้คุณอ่านเข้าใจได้ คือประตูสู่โลกนั้นพอดี
 
 ---
 

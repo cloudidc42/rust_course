@@ -51,7 +51,7 @@
 | 29 | Smart Pointers: Weak<T>, Cow<T>, interior mutability patterns | ✅ |
 | 30 | Error Handling ขั้นสูง (custom error types, From/Into, error chains) | ✅ |
 | 31 | thiserror และ anyhow ในโปรเจกต์จริง | ✅ |
-| 32 | Testing: Unit Tests (#[test], assert!, mocking เบื้องต้น) | ⏳ |
+| 32 | Testing: Unit Tests (#[test], assert!, mocking เบื้องต้น) | ✅ |
 | 33 | Testing: Integration Tests และการจัดระเบียบ test suite | ✅ |
 | 34 | Documentation: rustdoc, doc tests, docs.rs | ✅ |
 | 35 | Cargo ขั้นสูง (features, profiles, workspaces จริง, cargo.lock) | ✅ |

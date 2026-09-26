@@ -2043,4 +2043,4 @@ public API เท่านั้น) และการจัดระเบี�
 
 ---
 
-**Part ก่อนหน้า:** [thiserror และ anyhow ในโปรเจกต์จริง](part-031-thiserror-anyhow.md) | **Part ถัดไป:** [Testing: Integration Tests และ Test Organization](part-033-testing-integration.md)
+**Part ก่อนหน้า:** [thiserror และ anyhow ในโปรเจกต์จริง](part-031-thiserror-anyhow.md) | **Part ถัดไป:** [Testing: Integration Tests และการจัดระเบียบ Test Suite](part-033-testing-integration.md)

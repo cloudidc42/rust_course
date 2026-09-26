@@ -1114,7 +1114,7 @@ use syn::{parse_macro_input, DeriveInput};
 pub fn derive_describe(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     // ...
-    # unimplemented!()
+    unimplemented!()
 }
 ```
 
@@ -1297,7 +1297,7 @@ use proc_macro::TokenStream;
 #[proc_macro_derive(Describe)]
 pub fn derive_describe(input: TokenStream) -> TokenStream {
     // ...
-    # unimplemented!()
+    unimplemented!()
 }
 
 // ฟังก์ชัน helper ธรรมดาที่ตั้งใจให้ consumer เรียกใช้ตรง ๆ ด้วย
@@ -1369,7 +1369,7 @@ use syn::{parse_macro_input, DeriveInput};
 fn derive_describe(input: TokenStream) -> TokenStream {   // <-- ไม่มี pub
     let input = parse_macro_input!(input as DeriveInput);
     // ...
-    # unimplemented!()
+    unimplemented!()
 }
 ```
 
@@ -1448,6 +1448,8 @@ note: candidate #1 is defined in an impl for the type `Customer`
 แบบฝึกหัดทุกข้อต้องการ workspace ที่มีอย่างน้อย 2 crate (proc-macro crate + consumer crate) ตามโครงสร้างในหัวข้อ 44.6 เสมอ — ไม่มีทางลัดใดที่ทำให้ทดสอบ derive macro ของตัวเองได้ในไฟล์เดียว (ตามที่พิสูจน์ไว้ในหัวข้อ 44.3) ยกเว้นการทดสอบ logic ล้วน ๆ ด้วยเทคนิคจากหัวข้อ 44.6.1
 
 ทำตามลำดับข้อ 1 ถึง 4 ไปเรื่อย ๆ เพราะแต่ละข้อสร้างบนพื้นฐานของข้อก่อนหน้า — ข้อ 3-4 จะยากขึ้นมากถ้าข้าม syntax ของ `syn::Type`/`syn::Fields` ที่ฝึกมาจากข้อ 1-2
+
+ทุกครั้งที่แก้โค้ดของ proc macro แล้วรัน `cargo build`/`cargo test` ไม่ตรงกับที่คาด ให้กลับไปอ่านหัวข้อ 44.8 (debug ด้วย `cargo expand`/`eprintln!`) และหัวข้อ 44.11 (quick reference) ก่อนเสมอ ก่อนจะไล่หา bug ด้วยการเดา
 
 1. **[ง่าย]** สร้าง workspace ใหม่ที่มี proc-macro crate ชื่อ `hello_derive` ที่ implement `#[derive(SayHello)]` — เมื่อ derive กับ struct ใดก็ตาม ให้ generate เมธอด `fn say_hello(&self)` ที่พิมพ์ `"สวัสดีจาก <ชื่อ struct>!"` (ไม่ต้องอ่าน field เลย ใช้แค่ `input.ident`) ทดสอบด้วย struct 2 ตัวที่ชื่อต่างกันใน consumer crate แยก แล้วยืนยันว่า output ถูกต้องสำหรับทั้งสองตัว เช่น `#[derive(SayHello)] struct Robot;` แล้วเรียก `Robot.say_hello()` ควรได้ผลลัพธ์ `สวัสดีจาก Robot!`
    (hint: เริ่มจากโครงสร้าง `describe_derive` ในบทเรียน แต่ตัด logic การอ่าน field ทั้งหมดออก เหลือแค่ `#struct_name` ตัวเดียวใน `quote!` — สังเกตว่าโจทย์นี้ใช้ได้กับ struct แบบไหนก็ได้แม้แต่ unit struct อย่าง `struct Robot;` เพราะไม่ต้องอ่าน `Fields` เลย)

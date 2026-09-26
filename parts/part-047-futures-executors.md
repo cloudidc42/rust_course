@@ -856,7 +856,178 @@ async fn ticker_equivalent(label: &'static str, interval: Duration, total_ticks:
 การเห็นทั้งสองเวอร์ชันเคียงข้างกันคือบทพิสูจน์ที่ชัดเจนที่สุดของทั้งบทนี้: **`.await` ไม่ใช่มายากล มันคือ syntax
 sugar เหนือลูป `poll()` ที่เขียนด้วยมือได้ทุกตัวอักษร**
 
-### 47.10 บทพิสูจน์: รันหลาย Future พร้อมกันบน Thread เดียว
+### 47.10 การ Desugar `async fn` ด้วยมือแบบเต็มรูปแบบ: จาก Pseudocode สู่โค้ดที่ Compile และรันได้จริง
+
+หัวข้อ 47.7 แสดง pseudocode ของ state machine ที่ compiler สร้างให้ `async fn` ไว้แล้ว แต่บอกไว้ตรง ๆ ว่า "นี่คือ
+pseudocode ไม่ใช่โค้ดที่เขียนเองได้" — ทีนี้มาพิสูจน์ให้เห็นว่ามัน**เขียนเองได้จริง 100%** โดยเขียน enum
+state machine ตัวจริง (ไม่ใช่ pseudocode อีกต่อไป) ที่ทำงานเทียบเท่ากับ `async fn` นี้ทุกประการ:
+
+```rust
+// เป้าหมาย: เขียน enum + impl Future ที่เทียบเท่ากับ async fn นี้แบบเป๊ะ ๆ
+//
+// async fn greet_slowly(name: String) -> String {
+//     Delay::new(Duration::from_millis(200)).await;
+//     format!("สวัสดี, {name}!")
+// }
+```
+
+`async fn` ตัวนี้มีจุด `.await` เดียว แปลว่า state machine ของมันต้องมีอย่างน้อยสามสถานะ: **ยังไม่เริ่ม** (มีแค่
+`name` ที่รับมาจาก argument), **กำลังรอ delay** (ต้องเก็บทั้ง `name` ที่ยังต้องใช้ต่อ**และ** `delay` ที่กำลังรอ
+พร้อมกัน — สังเกตว่าถ้า `name` ถูกยืมเป็น reference แทนการเก็บทั้งค่า สถานะนี้จะกลายเป็น self-referential ทันที
+ตามที่อธิบายไว้ในหัวข้อ 47.7 แต่ในตัวอย่างนี้เราเก็บ `name: String` เป็นเจ้าของตรง ๆ ไม่ใช่ reference จึงไม่มีปัญหา
+self-referential เกิดขึ้นเลย — เป็นตัวอย่างที่จงใจเลือกให้เข้าใจโครงสร้าง state machine ก่อน โดยยังไม่ต้องพัวพัน
+กับ `unsafe`/`Pin::get_unchecked_mut`), และ **จบแล้ว**:
+
+```rust
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+enum GreetSlowly {
+    Start { name: String },
+    WaitingDelay { name: String, delay: Delay },
+    Done,
+}
+
+impl GreetSlowly {
+    fn new(name: String) -> Self {
+        GreetSlowly::Start { name }
+    }
+}
+
+impl Future for GreetSlowly {
+    type Output = String;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            // ถ้าอยู่ใน state ที่กำลังรอ delay ให้ poll มันก่อน ถ้ายัง Pending ก็คืน Pending ทันที
+            if let GreetSlowly::WaitingDelay { delay, .. } = &mut *self {
+                match Pin::new(delay).poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(()) => {} // delay เสร็จแล้ว ตกลงไปเปลี่ยน state ข้างล่าง
+                }
+            }
+
+            // ย้าย state ปัจจุบันไปเป็น Done ชั่วคราว (mem::replace) เพื่อดึงข้อมูลข้างในออกมาแบบ by-value
+            match std::mem::replace(&mut *self, GreetSlowly::Done) {
+                GreetSlowly::Start { name } => {
+                    let delay = Delay::new(Duration::from_millis(200));
+                    *self = GreetSlowly::WaitingDelay { name, delay };
+                }
+                GreetSlowly::WaitingDelay { name, .. } => {
+                    return Poll::Ready(format!("สวัสดี, {name}!"));
+                }
+                GreetSlowly::Done => panic!("polled after completion"),
+            }
+        }
+    }
+}
+
+fn main() {
+    let result = block_on(GreetSlowly::new("Rustacean".to_string()));
+    println!("{result}");
+}
+```
+
+ผลลัพธ์จริง (compile และรันจริงแล้ว):
+
+```
+สวัสดี, Rustacean!
+```
+
+**อ่านทีละส่วนของ `poll()` อย่างละเอียด เพราะนี่คือคำตอบที่แท้จริงที่สุดของ "state machine คืออะไร":**
+
+- **`loop { ... }` รอบนอก**: ทำไม `poll()` ต้องมีลูปทั้งที่ปกติเราคิดว่า "poll หนึ่งครั้ง = เดินหนึ่งสถานะ"? เพราะ
+  เมื่อ state เปลี่ยนจาก `Start` ไป `WaitingDelay` (สร้าง `Delay` ใหม่ที่ยังไม่เคยถูก poll เลย) เราต้อง**poll
+  มันทันทีในการเรียกเดียวกัน** ไม่ใช่คืน `Pending` แล้วรอ `.poll()` รอบถัดไปเปล่า ๆ (ถ้าทำแบบนั้นจะไม่มีใครมา
+  poll ต่อ เพราะยังไม่มีการเรียก `cx.waker()` ที่ผูกกับ delay ตัวใหม่เลย) — compiler จริงก็ทำแบบเดียวกันนี้ทุก
+  ประการ: state machine เดินหน้าไปเรื่อย ๆ ในการ `poll()` เดียวจนกว่าจะเจอจุดที่**คืน Pending จริง ๆ** (จาก
+  sub-future ที่ถูก poll แล้วยังไม่พร้อม) หรือจนกว่าจะถึงจุดสิ้นสุด (`Ready`)
+- **`if let GreetSlowly::WaitingDelay { delay, .. } = &mut *self`**: ยืม `delay` แบบ mutable จาก enum ปัจจุบัน
+  เพื่อ poll มัน — สังเกตว่านี่คือจุดเดียวกันเป๊ะกับที่ `Ticker::poll()` (หัวข้อ 47.9) ทำกับ `current_delay` ของ
+  มันเอง เพราะโดยเนื้อแท้แล้ว `Ticker` ก็คือ state machine ที่เขียนด้วยมือแบบเดียวกันนี้ เพียงแต่ไม่ได้ใช้ enum
+  ตรง ๆ (ใช้ `Option<Delay>` แทน ซึ่งเทียบเท่ากับ enum สองสถานะ)
+- **`std::mem::replace(&mut *self, GreetSlowly::Done)`**: เทคนิคสำคัญที่ต้องรู้เมื่อเขียน state machine ด้วยมือ
+  — เราต้อง**ดึงข้อมูลออกจาก enum แบบ by-value** (เอา `String name` ออกมาเป็นเจ้าของตรง ๆ ไม่ใช่ borrow) เพื่อ
+  ย้ายมันไปยัง state ถัดไป แต่ Rust ไม่อนุญาตให้ "ดึงค่าออกจาก enum ที่ยัง borrow อยู่" ตรง ๆ (เพราะจะทำให้ enum
+  อยู่ในสถานะไม่สมบูรณ์ชั่วขณะ) `mem::replace` แก้ปัญหานี้โดยเขียนค่าใหม่ (`Done`) แทนที่ตำแหน่งเดิมพร้อมกับคืนค่า
+  เก่าออกมาเป็น owned value ในขั้นตอนเดียวแบบ atomic (ไม่มีช่วงเวลาที่ enum อยู่ในสถานะไม่สมบูรณ์เลย) — compiler
+  จริงใช้เทคนิคเดียวกันนี้เบื้องหลัง (จริง ๆ แล้วซับซ้อนกว่านี้เล็กน้อยในรายละเอียดของการจัดการ layout แต่หลักการ
+  "ย้ายข้อมูลออกจาก state เก่าไปสู่ state ใหม่แบบปลอดภัย" เหมือนกันทุกประการ)
+- **`GreetSlowly::Done => panic!("polled after completion")`**: ตามธรรมเนียมของ `Future` (เหมือนกับที่ Part 25
+  บอกว่า `Iterator` "ไม่ควร" ถูกเรียก `next()` ต่อหลังได้ `None`) — การ poll future ต่อหลังจากมันคืน `Ready` ไป
+  แล้วถือเป็นการใช้งานผิด (misuse) ที่ trait ไม่ได้ห้ามในระดับ type system แต่ implementation มีสิทธิ์ทำอะไรก็ได้
+  รวมถึง panic เพราะไม่มี "state ถัดไป" ให้เดินต่อแล้วจริง ๆ
+
+การเห็น state machine ตัวนี้เขียนด้วยมือแบบเต็มรูปแบบคือคำตอบสุดท้ายของคำถามที่ Part 46 เปิดไว้ตั้งแต่ต้น: "state
+machine ที่ `async fn` สร้างให้คืออะไรกันแน่" — คำตอบคือ**enum ธรรมดาที่มีสถานะเท่ากับจำนวนจุด `.await` บวกหนึ่ง
+(สถานะเริ่มต้น) และ `poll()` ที่เดินหน้า state ไปเรื่อย ๆ ในลูป จนกว่าจะเจอ sub-future ที่ยัง `Pending` จริง หรือ
+จนกว่าจะถึงจุดสิ้นสุดของฟังก์ชัน** ไม่มีอะไรพิเศษไปกว่านี้เลย — ความซับซ้อนที่เพิ่มขึ้นในโค้ดจริงของ compiler มาจาก
+การรองรับหลายจุด `.await` พร้อมกัน, การจัดการ borrow ที่ซับซ้อนกว่า (ซึ่งอาจทำให้ต้องใช้ `Pin` แบบเต็มรูปแบบตามหัวข้อ
+47.7), และการ optimize ขนาดของ enum ให้เล็กที่สุด (compiler คำนวณ layout ให้ field ที่ไม่ได้ใช้ร่วมกันในหลาย state
+ใช้พื้นที่หน่วยความจำซ้อนกันได้ คล้ายกับ union) — แต่**แนวคิดหลัก**เหมือนกับ `GreetSlowly` ข้างบนทุกประการ
+
+### 47.11 ทางลัดจาก std: `poll_fn`, `ready`, และ `pending`
+
+การเขียน `struct` + `impl Future` เต็มรูปแบบทุกครั้งที่ต้องการ future ง่าย ๆ ตัวหนึ่งดูจะเป็นภาระมากเกินไปสำหรับ
+งานเล็ก ๆ — โมดูล `std::future` มีฟังก์ชันสำเร็จรูปสามตัวที่ช่วยลดภาระนี้ได้มาก โดยยังคงเป็น `std` ล้วน ๆ ไม่ต้อง
+พึ่ง crate เสริมใด ๆ:
+
+**`std::future::ready(value)`** — สร้าง future ที่ `Poll::Ready(value)` ทันทีตั้งแต่ poll แรก (เทียบเท่ากับ
+`ReadyNow` ที่เขียนเองในหัวข้อ 47.2 แต่ไม่ต้องประกาศ struct เอง):
+
+```rust
+use std::future;
+
+let value = block_on(future::ready(7));
+println!("ready() ให้ผลลัพธ์: {value}"); // ready() ให้ผลลัพธ์: 7
+```
+
+**`std::future::poll_fn(closure)`** — สร้าง future จาก closure ที่มีลายเซ็นเหมือน `poll()` ตรง ๆ
+(`FnMut(&mut Context<'_>) -> Poll<T>`) โดยไม่ต้องประกาศ struct หรือ `impl Future` เองเลย เหมาะกับ future แบบง่าย ๆ
+ที่ไม่มี state ซับซ้อนพอจะคุ้มค่ากับการเขียน struct แยก:
+
+```rust
+use std::future;
+use std::task::Poll;
+
+let mut calls = 0;
+let counting = future::poll_fn(move |cx| {
+    calls += 1;
+    println!("poll_fn ถูกเรียกครั้งที่ {calls}");
+    if calls >= 3 {
+        Poll::Ready(calls)
+    } else {
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+});
+
+let final_count = block_on(counting);
+println!("poll_fn จบด้วยค่า: {final_count}");
+```
+
+ผลลัพธ์จริง (compile และรันจริงแล้ว):
+
+```
+poll_fn ถูกเรียกครั้งที่ 1
+poll_fn ถูกเรียกครั้งที่ 2
+poll_fn ถูกเรียกครั้งที่ 3
+poll_fn จบด้วยค่า: 3
+```
+
+สังเกตว่า `poll_fn` ให้เขียน `PollCounter` (หัวข้อ 47.4) แบบเดียวกันได้ในบรรทัดเดียว โดยที่ closure `move |cx| { ...
+}` **คือ** `poll()` ตรง ๆ (`calls` ที่ capture ด้วย `move` ทำหน้าที่แทน field `count` ของ struct) — `poll_fn` มี
+ประโยชน์มากที่สุดตอนเขียน future ชั่วคราวที่ใช้ครั้งเดียวในโค้ดจริง (เช่นใน test หรือ glue code ระหว่าง API) ไม่คุ้ม
+ที่จะแยกเป็น type ของตัวเอง
+
+**`std::future::pending::<T>()`** — สร้าง future ที่คืน `Poll::Pending` **เสมอ** ไม่มีทางเสร็จเลย มีประโยชน์เฉพาะ
+ทางมาก ๆ เช่นใช้เป็น "placeholder" ใน `select!` (จะเจอเวอร์ชันเต็มใน Part 48-50) ตอนที่กิ่งหนึ่งไม่มีอะไรให้รอจริง
+แต่ต้องมี type ให้ตรงกับกิ่งอื่น ๆ — ไม่ควรใช้ตรง ๆ ใน `block_on` เพราะจะทำให้โปรแกรมค้างตลอดไปเหมือนกับดักข้อ 4
+ท้ายบท (เพียงแต่ครั้งนี้เป็นพฤติกรรมที่**ตั้งใจ**ให้เกิดขึ้น ไม่ใช่บั๊ก)
+
+### 47.12 บทพิสูจน์: รันหลาย Future พร้อมกันบน Thread เดียว
 
 ถึงเวลาพิสูจน์ทุกอย่างที่บทนี้อธิบายมา — spawn สาม task ที่แตกต่างกันเข้า executor ที่สร้างในหัวข้อ 47.8 แล้วดูว่า
 มันทำงาน**พร้อมกันจริง**บน thread เดียวหรือไม่:
@@ -921,7 +1092,7 @@ task พร้อมกันหลักสิบ หลักร้อย ก�
 (เช่น web server ที่รับ connection พร้อมกันจำนวนมาก) การสร้าง OS thread ต่อ connection จะทำให้ระบบล้มก่อนถึงเป้า
 ไกลมาก — นี่คือปัญหาที่ async model ถูกออกแบบมาแก้โดยเฉพาะ
 
-### 47.11 Combinator โดยไม่ต้องมี Runtime เต็มรูปแบบ: `futures::future::join`/`select`
+### 47.13 Combinator โดยไม่ต้องมี Runtime เต็มรูปแบบ: `futures::future::join`/`select`
 
 executor ที่เขียนเองในหัวข้อ 47.8 มีไว้เพื่อ**เรียน**กลไกเบื้องหลัง ในโค้ดที่ต้องรวม future หลายตัวแบบง่าย ๆ
 (ไม่ต้อง spawn เป็น task อิสระ แค่ต้องการ "รอทั้งสองให้จบ" หรือ "รอตัวไหนจบก่อนก็เอา") มี crate มาตรฐานชื่อ
@@ -1000,7 +1171,7 @@ fn main() {
 — นี่คือสิ่งที่ crate อย่าง `futures` มีไว้ให้ (จัดการรายละเอียดทั้งหมดที่บทนี้เพิ่งอธิบายไปให้เบื้องหลัง) ซึ่งพา
 เราไปสู่หัวข้อสุดท้ายของบทนี้โดยตรง
 
-### 47.12 ทำไมไม่มีใครเขียน Future/Executor เองในโปรดักชันจริง
+### 47.14 ทำไมไม่มีใครเขียน Future/Executor เองในโปรดักชันจริง
 
 หลังจากเขียน `Delay`, `Ticker`, `PollCounter`, executor เต็มรูปแบบ และเห็นมันทำงานถูกต้องด้วยตาตัวเองแล้ว คำถาม
 ธรรมชาติคือ: "แล้วทำไมโปรเจกต์จริงถึงไม่เขียนแบบนี้เอง แต่ไปพึ่ง Tokio (Part 48) กันหมด?"

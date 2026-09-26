@@ -550,6 +550,18 @@ async fn main() {
 (`.await`) ไม่ใช่การบล็อก OS thread — task อื่นที่ไม่เกี่ยวข้องกับ `config` เลยยังทำงานคู่ขนานได้สบายในระหว่าง
 ที่ reader 3/4 กำลัง "รอ" อยู่
 
+**ข้อควรระวังอีกจุดที่ควรรู้ไว้เกี่ยวกับ `tokio::sync::RwLock`**: มันไม่มี method ให้ "ยกระดับ" จาก read lock
+เป็น write lock ตรง ๆ ในที่เดียว (ไม่มี `upgradeable_read()` แบบที่บางไลบรารีภาษาอื่นมี) — ถ้าโค้ดต้องอ่านค่า
+ก่อนเพื่อตัดสินใจว่าจะเขียนหรือไม่ (เช่น pattern "get-or-compute" ในหัวข้อแบบฝึกหัดท้ายบท) ต้องปล่อย read lock
+ก่อนแล้วขอ write lock ใหม่แยกกันเสมอ ซึ่งเปิดช่องให้เกิด **race ระหว่างสองขั้นตอน** ได้ (task อื่นอาจแซงเข้ามา
+เขียนค่าไปแล้วระหว่างที่ปล่อย read lock กับขอ write lock) — ต้อง design ให้ทนต่อสถานการณ์นี้เสมอ (เช่นเช็คซ้ำ
+อีกครั้งหลังได้ write lock มาแล้ว ก่อนคำนวณค่าใหม่) นอกจากนี้ `tokio::sync::RwLock` (เหมือนกับ
+`std::sync::RwLock` ใน Part 39.8) **ไม่ได้การันตีความเป็นธรรม (fairness) ระหว่าง reader กับ writer อย่างเข้มงวด**
+ในทุก platform — ถ้ามี reader มาขอ read lock ถี่มากอย่างต่อเนื่องไม่หยุด writer ที่รออยู่อาจถูก "แซง" ไปเรื่อย ๆ
+(เรียกว่า **writer starvation**) แม้ implementation ของ Tokio จะพยายามลดปัญหานี้ให้น้อยที่สุดก็ตาม ถ้าระบบมีการ
+เขียนที่สำคัญมากและต้องมั่นใจว่าจะได้ทำงานภายในเวลาที่คาดการณ์ได้ ควรพิจารณาออกแบบให้จำกัดความถี่ของการอ่านหรือ
+ใช้เครื่องมืออื่นเสริม (เช่น `Semaphore` ควบคุมจำนวน reader พร้อมกัน) แทนการพึ่ง `RwLock` เพียงอย่างเดียว
+
 ### 50.8 `tokio::sync::mpsc`: Async Channel กับ Backpressure แบบไม่บล็อก Thread
 
 Part 38 สอน `std::sync::mpsc` ในฐานะเครื่องมือหลักของ message-passing concurrency — `tx.send(value)`,
@@ -673,6 +685,43 @@ lock ถูกปล่อย**ทันที**หลังจากได้ `
 กันใช้ไม่ได้เลย เพราะต้องรอ worker ตัวแรกประมวลผล job เสร็จก่อนเสมอ ทำให้ worker pool ทำงานแบบ **serial** (ทีละ
 ตัว) ทั้งที่ตั้งใจให้ทำงานคู่ขนานกัน 3 ตัว — นี่คือตัวอย่างที่จับต้องได้ของกฎ "critical section ให้สั้นที่สุด"
 จาก Part 39.4 ที่ยังคงสำคัญเท่าเดิมในโลก async
+
+**สำหรับกรณีที่ต้องการ channel แบบไม่จำกัดขนาดจริง ๆ** (ยอมรับความเสี่ยงเรื่อง memory ไม่มีเพดานตามที่ Part
+38.7 เตือนไว้ เพื่อแลกกับการไม่มีวันบล็อกฝั่งส่งเลย) `tokio::sync::mpsc` มีฟังก์ชันแยกชื่อไปเลยคือ
+`mpsc::unbounded_channel()` — สังเกตว่า `UnboundedSender::send()` **ไม่ต้อง `.await`** (ต่างจาก
+`Sender::send()` ของ bounded channel) เพราะไม่มีทางที่การส่งจะ "ต้องรอ" ได้เลยไม่ว่ากรณีใด:
+
+```rust
+use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<i32>();
+
+    // unbounded_send ไม่ต้อง .await เลย -- ไม่มีบัฟเฟอร์ให้เต็ม จึงไม่มีทางต้องรอ (แลกกับไม่มี backpressure)
+    for i in 1..=5 {
+        tx.send(i).unwrap();
+    }
+    drop(tx);
+
+    let mut total = 0;
+    while let Some(v) = rx.recv().await {
+        total += v;
+    }
+    println!("รวมค่าทั้งหมด: {total}");
+}
+```
+
+ผลลัพธ์ (รันจริง):
+
+```
+รวมค่าทั้งหมด: 15
+```
+
+การที่ชื่อฟังก์ชันต้องเขียนยาวขึ้นเป็น `unbounded_channel()` (ไม่ใช่แค่ `channel()` โดยไม่ระบุ capacity แบบ
+`std::sync::mpsc::channel()` ใน Part 38.2) เป็นการออกแบบที่ตั้งใจ: **บังคับให้ผู้เขียนโค้ดต้องเลือกอย่างชัดเจน
+ว่าจะรับความเสี่ยงเรื่อง unbounded memory หรือไม่ ไม่ให้เผลอใช้แบบไม่จำกัดขนาดไปโดยไม่ตั้งใจ** เหมือนที่อาจ
+เกิดขึ้นได้ง่ายกับ `std::sync::mpsc::channel()` ที่ไม่มี bound เป็นค่าเริ่มต้น
 
 ### 50.9 `tokio::sync::oneshot`: ถาม-ตอบครั้งเดียวระหว่าง Task
 
@@ -1065,7 +1114,128 @@ request ที่เหลือทุกตัว (3, 5, 6, 7, 8) ต้อง�
 request จะเสร็จครบ โดยที่**ไม่มี worker thread ไหนถูกยึดไว้เฉย ๆ ระหว่างที่ request 3/5/6/7/8 กำลัง "รอตั๋ว"
 อยู่เลย** เพราะ `.acquire().await` เป็น async เช่นเดียวกับ primitive อื่น ๆ ทั้งหมดในบทนี้
 
-### 50.13 ตารางเปรียบเทียบ: `std::sync` เทียบกับ `tokio::sync`
+**`Semaphore` ยังมี method ที่มีประโยชน์อีกสองตัวที่ควรรู้จักไว้**: `.add_permits(n)` เพิ่มจำนวนตั๋วระหว่างทาง
+ได้ (เช่นเมื่อ resource จริงที่กำลัง "จำลอง" ด้วย permit เพิ่มขึ้นจริง ๆ ระหว่างที่โปรแกรมกำลังรันอยู่) และ
+`.close()` ปิด semaphore อย่างถาวร — ทุก `.acquire().await` ที่กำลังรออยู่หรือเรียกมาใหม่หลังจากนั้นจะได้
+`Err(AcquireError)` กลับมาทันที (คล้ายกับการปิด channel ที่เรียนมาก่อนหน้านี้ในบทนี้ — เป็นสัญญาณแบบเดียวกันว่า
+"เลิกให้บริการแล้วอย่างถาวร"):
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+
+#[tokio::main]
+async fn main() {
+    let semaphore = Arc::new(Semaphore::new(1));
+    println!("ตั๋วเริ่มต้น: {}", semaphore.available_permits());
+
+    semaphore.add_permits(2); // เพิ่มตั๋วระหว่างทางได้ (เช่นเมื่อ resource เพิ่มขึ้นจริง)
+    println!("หลัง add_permits(2): {}", semaphore.available_permits());
+
+    let permit = semaphore.acquire().await.unwrap();
+    println!("ได้ตั๋วมา 1 ใบ เหลือ: {}", semaphore.available_permits());
+    drop(permit);
+    println!("คืนตั๋วแล้ว เหลือ: {}", semaphore.available_permits());
+
+    semaphore.close(); // ปิดสำหรับตลอดไป -- ไม่มีใครขอตั๋วเพิ่มได้อีก
+    let result = semaphore.acquire().await;
+    match result {
+        Ok(_) => println!("ไม่ควรได้ตั๋วอีกหลังปิดแล้ว"),
+        Err(e) => println!("ขอตั๋วหลัง close() แล้ว: {e}"),
+    }
+}
+```
+
+ผลลัพธ์ (รันจริง):
+
+```
+ตั๋วเริ่มต้น: 1
+หลัง add_permits(2): 3
+ได้ตั๋วมา 1 ใบ เหลือ: 2
+คืนตั๋วแล้ว เหลือ: 3
+ขอตั๋วหลัง close() แล้ว: semaphore closed
+```
+
+`.close()` มีประโยชน์มากในสถานการณ์ **graceful shutdown**: เมื่อระบบต้องการปิดตัวอย่างสุภาพ (ไม่รับ connection
+ใหม่อีกแล้ว แต่ปล่อยให้ connection ที่ทำงานอยู่ทำงานให้จบก่อน) การเรียก `semaphore.close()` ทำให้ทุก task ที่
+กำลังรอ `.acquire().await` อยู่ (เช่น connection ใหม่ที่เพิ่งมา) ได้รับ `Err` และเลิกรอทันที โดยไม่กระทบ permit
+ที่ถูกถือครองอยู่แล้วก่อนหน้านั้นเลยแม้แต่นิดเดียว
+
+### 50.13 Synchronous vs Asynchronous `send`: จุดที่สับสนบ่อยที่สุดของ `tokio::sync`
+
+ก่อนไปดูตารางเปรียบเทียบรวบยอด มีจุดสำคัญจุดหนึ่งที่ผู้เรียนสับสนกันบ่อยมากจนควรแยกมาพูดให้ชัดเจนต่างหาก:
+**ไม่ใช่ทุก method ของ `tokio::sync` ที่ต้อง `.await`** — มีแค่บาง method เท่านั้นที่เป็น `async fn` จริง ๆ
+ส่วนที่เหลือเป็นฟังก์ชัน synchronous ธรรมดาที่ทำงานจบในตัวทันที ทำไมถึงต่างกัน? คำตอบเชื่อมกับกลไกภายในของแต่
+ละ primitive ตรง ๆ: **method ไหนที่ "อาจต้องรอ" จริง ๆ (อาจถูกพักได้) จะเป็น `async fn` — method ไหนที่ "ทำเสร็จ
+ทันทีเสมอไม่มีทางต้องรอ" จะเป็นฟังก์ชันธรรมดา**
+
+```rust
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
+
+#[tokio::main]
+async fn main() {
+    // mpsc::Sender::send ต้อง .await เพราะ bounded channel อาจทำให้ต้องรอที่ว่าง (backpressure)
+    let (tx1, mut rx1) = mpsc::channel::<i32>(1);
+    tx1.send(1).await.unwrap();
+    println!("mpsc: send ต้อง .await -> ส่งสำเร็จ, ได้รับ: {:?}", rx1.recv().await);
+
+    // oneshot::Sender::send ไม่ต้อง .await -- มันแค่เขียนค่าลงที่เดียวและปลุก receiver ทันที ไม่มีทางรอ
+    let (tx2, rx2) = oneshot::channel::<i32>();
+    let send_result: Result<(), i32> = tx2.send(2); // ไม่มี .await เลย
+    println!("oneshot: send ไม่ต้อง .await -> ผลลัพธ์การส่ง: {:?}", send_result);
+    println!("oneshot: ได้รับ: {:?}", rx2.await);
+
+    // broadcast::Sender::send ก็ไม่ต้อง .await -- มันแค่เขียนลง ring buffer แล้วปลุกทุก receiver ทันที
+    let (tx3, mut rx3) = broadcast::channel::<i32>(4);
+    let send_result3 = tx3.send(3); // ไม่มี .await เลย คืน Result<usize, SendError<T>> (usize = จำนวน receiver ที่ยังเปิดอยู่)
+    println!("broadcast: send ไม่ต้อง .await -> ส่งถึง {:?} receiver", send_result3);
+    println!("broadcast: ได้รับ: {:?}", rx3.recv().await);
+
+    // watch::Sender::send ก็ไม่ต้อง .await เช่นกัน -- แค่เขียนทับค่าล่าสุด
+    let (tx4, rx4) = watch::channel::<i32>(0);
+    let send_result4 = tx4.send(4); // ไม่มี .await เลย
+    println!("watch: send ไม่ต้อง .await -> ผลลัพธ์การส่ง: {:?}", send_result4);
+    println!("watch: ค่าปัจจุบัน: {:?}", *rx4.borrow());
+}
+```
+
+ผลลัพธ์ (รันจริง):
+
+```
+mpsc: send ต้อง .await -> ส่งสำเร็จ, ได้รับ: Some(1)
+oneshot: send ไม่ต้อง .await -> ผลลัพธ์การส่ง: Ok(())
+oneshot: ได้รับ: Ok(2)
+broadcast: send ไม่ต้อง .await -> ส่งถึง Ok(1) receiver
+broadcast: ได้รับ: Ok(3)
+watch: send ไม่ต้อง .await -> ผลลัพธ์การส่ง: Ok(())
+watch: ค่าปัจจุบัน: 4
+```
+
+**อธิบายเหตุผลของแต่ละตัว ทีละ primitive:**
+
+- **`mpsc::Sender::send()` ต้อง `.await`** — เพราะ `tokio::sync::mpsc::channel(capacity)` เป็น bounded channel
+  เสมอ (หัวข้อ 50.8) ถ้าบัฟเฟอร์เต็มพอดี การส่งจะต้อง**รอ**จนกว่า consumer จะดึงข้อความออกไปก่อนสักชิ้นหนึ่ง —
+  มันเป็น operation ที่ "อาจต้องรอ" ได้จริง จึงต้องเป็น `async fn`
+- **`oneshot::Sender::send()` ไม่ต้อง `.await`** — เพราะ oneshot มี "ช่อง" ให้เก็บค่าได้แค่ 1 ค่าเท่านั้นและ
+  ไม่มีแนวคิดเรื่อง "เต็มแล้วต้องรอ" เลย (มันถูกออกแบบมาให้ใช้ครั้งเดียว ณ compile time อยู่แล้วตามหัวข้อ 50.9)
+  การส่งจึงจบทันทีเสมอ ไม่มีทางต้องรอ — สังเกตว่ามันคืน `Result<(), T>` แบบ synchronous ตรง ๆ (`Err(T)` เกิดขึ้น
+  ถ้า `Receiver` ถูก drop ไปแล้ว ก็คืนค่าเดิมกลับมาให้ ตามหลักการเดียวกับ `SendError<T>` ของ `std::sync::mpsc`
+  ใน Part 38.2 ที่ไม่ยอมให้ค่าที่ส่งไม่สำเร็จสูญหายไปเฉย ๆ)
+- **`broadcast::Sender::send()` ไม่ต้อง `.await`** — เพราะ `broadcast` เลือก trade-off แบบ "ไม่มี backpressure
+  เลย" (หัวข้อ 50.10): ถ้าบัฟเฟอร์ภายในเต็ม มันจะทิ้งข้อความเก่าที่สุดออกไปแทนการรอ (ทำให้ receiver ที่ตามไม่ทัน
+  ได้ `Lagged(n)` ในครั้งถัดไปที่ `.recv()`) — เพราะไม่มีทางต้องรอ มันจึงเป็นฟังก์ชันธรรมดา คืน
+  `Result<usize, SendError<T>>` ที่ `usize` บอกจำนวน receiver ที่ยัง subscribe อยู่ ณ ขณะส่ง (มีประโยชน์เผื่อ
+  อยากรู้ว่ามีใครฟังอยู่จริงหรือไม่)
+- **`watch::Sender::send()` ไม่ต้อง `.await`** — เพราะ `watch` เก็บได้แค่ค่าเดียวเสมอ (หัวข้อ 50.11) การส่งคือ
+  การ "เขียนทับ" ค่าเดิมตรง ๆ ไม่มีบัฟเฟอร์ให้เต็มเลย จึงไม่มีทางต้องรอเช่นกัน
+
+จำกฎนี้ไว้แทนการท่องจำเป็นตัว ๆ: **ถามตัวเองว่า "operation นี้มีทางที่จะต้องรอจริงไหม (เช่น บัฟเฟอร์เต็ม, ยังไม่
+มีข้อมูล)"** — ถ้ามี มันจะเป็น `async fn` ที่ต้อง `.await` ถ้าไม่มีทางเกิดขึ้นได้เลยไม่ว่ากรณีใด มันจะเป็น
+ฟังก์ชันธรรมดา และลืม `.await` ตรงจุดที่ต้องมี (ตามที่เตือนไว้ในกับดักที่พบบ่อยข้อ 4) หรือเผลอเขียน `.await`
+ตรงจุดที่ไม่มีให้ (ซึ่งจะเจอ compile error `no method named 'await' found` ทันที เพราะ type นั้นไม่ implement
+`Future`) เป็นความผิดพลาดที่พบบ่อยมากตอนสลับไปมาระหว่าง primitive ต่าง ๆ ในบทนี้
+
+### 50.14 ตารางเปรียบเทียบ: `std::sync` เทียบกับ `tokio::sync`
 
 รวบทุกอย่างที่เรียนมาในบทนี้เป็นตารางเดียว เพื่อใช้อ้างอิงเร็ว ๆ เวลาต้องเลือก primitive ในโค้ดจริง:
 
@@ -1086,7 +1256,7 @@ request จะเสร็จครบ โดยที่**ไม่มี worke
 ของอะไรบางอย่างที่มีอยู่แล้ว แต่เพราะมันคือ primitive ใหม่ที่ออกแบบมาสำหรับรูปแบบปัญหาที่พบบ่อยเป็นพิเศษในโลก
 async/concurrent จนสมควรมี type สำเร็จรูปให้ใช้เลย
 
-### 50.14 ตัวอย่างจริง: Chat Server เวอร์ชัน Production-Quality (`broadcast` + `Semaphore`)
+### 50.15 ตัวอย่างจริง: Chat Server เวอร์ชัน Production-Quality (`broadcast` + `Semaphore`)
 
 ถึงเวลานำทุกอย่างที่เรียนมารวมกันเป็นตัวอย่างเดียวที่สมบูรณ์ — สร้าง chat server ผ่าน TCP จริง (ต่อยอดจาก
 `TcpListener`/`TcpStream` ของ Part 49) ที่แก้ปัญหาทั้งสองข้อที่ Part 49 ร่างไว้แบบง่าย ๆ ให้ถูกต้องแบบ
@@ -1412,8 +1582,54 @@ pattern จากหัวข้อ 50.8) ต้องห่อด้วย `Arc
 
 `broadcast::Receiver::recv()` มี `Err` สองความหมายต่างกันโดยสิ้นเชิง (หัวข้อ 50.10): `Closed` (จบจริง) กับ
 `Lagged(n)` (แค่ตกข้อความไปบางส่วน ยังรับต่อได้ปกติ) **วิธีแก้**: `match` แยกทั้งสอง variant เสมอเหมือนในตัวอย่าง
-chat server ของหัวข้อ 50.14 — จัดการ `Lagged` ด้วยการ log/แจ้งเตือนแล้ว **ทำงานต่อ** (loop กลับไป `.recv()`
+chat server ของหัวข้อ 50.15 — จัดการ `Lagged` ด้วยการ log/แจ้งเตือนแล้ว **ทำงานต่อ** (loop กลับไป `.recv()`
 ใหม่) ไม่ใช่ `break`/panic ออกจาก loop ไปเหมือนเจอ `Closed`
+
+### 7. ลืม `drop()` ตัวต้นฉบับของ `mpsc::Sender` — channel ไม่ปิดแม้ clone ทุกตัวจะถูก drop ไปแล้ว
+
+นี่คือ pitfall เดียวกันเป๊ะกับที่ Part 38.5 เตือนไว้สำหรับ `std::sync::mpsc` — และยังคงเป็นกับดักที่พบบ่อยที่สุด
+อันหนึ่งใน `tokio::sync::mpsc` เช่นกัน เพราะกลไก "channel จะปิดก็ต่อเมื่อ `Sender` ทุกตัวถูก drop จนหมดสิ้น"
+เหมือนกันทุกประการ:
+
+```rust
+use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() {
+    let (tx, mut rx) = mpsc::channel::<i32>(8);
+
+    let mut worker_handles = vec![];
+    for id in 1..=3 {
+        let tx_clone = tx.clone();
+        worker_handles.push(tokio::spawn(async move {
+            for i in 0..2 {
+                tx_clone.send(id * 10 + i).await.unwrap();
+            }
+        }));
+    }
+    // ★ ลืม drop(tx) ตัวต้นฉบับ -- channel จะไม่ปิดแม้ clone ทุกตัวจะถูก drop ไปแล้วก็ตาม
+
+    for h in worker_handles {
+        h.await.unwrap();
+    }
+
+    while let Some(v) = rx.recv().await {
+        println!("ได้รับ: {v}");
+    }
+    println!("loop จบแล้ว (ไม่ควรพิมพ์ถึงตรงนี้เลย)");
+}
+```
+
+รันจริงด้วย `timeout 3 ./program` แล้วพิมพ์ค่าได้ครบทั้ง 6 ค่าจริง (`10, 11, 20, 21, 30, 31` ตามลำดับที่แต่ละ
+worker แข่งกันส่ง) แต่หลังจากนั้น**ค้างตลอดไปและถูก kill (exit code 124)** — บรรทัด `"loop จบแล้ว..."` ไม่
+ปรากฏเลย เพราะแม้ `tx_clone` ของทั้ง 3 worker จะถูก drop อัตโนมัติไปแล้วตอน task จบ (หลัง `worker_handles`
+ทุกตัว `.await` เสร็จ) **`tx` ตัวต้นฉบับใน `main` ก็ยังมีชีวิตอยู่** (ไม่เคยถูก `.clone()` ทิ้งไปไหน แค่ยังไม่ถูก
+ใช้ต่อเฉย ๆ) — channel จึงยังไม่ปิด และ `rx.recv().await` ที่เหลืออยู่จะ**คืนสิทธิ์การรันให้ executor รอไปเรื่อย
+ๆ อย่างไม่มีที่สิ้นสุด** (ต่างจาก Part 38.5 ที่ `for received in rx` แบบ OS thread บล็อก thread ทั้งเส้นไปเลย
+— ในเวอร์ชัน async นี้ executor ยังทำงานปกติ แค่ task นี้ตัวเดียวไม่มีวันคืบหน้าต่อ) **วิธีแก้**: เหมือนกับ
+Part 38.5 ทุกประการ — `drop(tx);` ตัวต้นฉบับทันทีหลังจาก `.clone()` ให้ทุก worker ครบแล้ว (หรือให้ `tx` ตัว
+ต้นฉบับหลุด scope ไปเองก่อนถึงจุดที่เริ่มวน `rx.recv().await`) เพื่อให้ channel ปิดได้จริงเมื่อ `Sender` ทุกตัว
+(รวมตัวต้นฉบับ) หมดอายุลงจริง ๆ
 
 ## แบบฝึกหัด (Exercises)
 
@@ -1443,7 +1659,7 @@ chat server ของหัวข้อ 50.14 — จัดการ `Lagged` �
    ปัญหานี้อย่างไรด้วยเครื่องมือที่เรียนมาในบทนี้ เช่น `tokio::sync::Mutex` หรือ `tokio::sync::Semaphore`
    ประกอบเพิ่มเข้าไป)
 
-4. **(ประยุกต์ใช้งานจริง)** ขยายตัวอย่าง chat server ในหัวข้อ 50.14 ให้รองรับ **"ห้องแชทหลายห้อง"** (multiple
+4. **(ประยุกต์ใช้งานจริง)** ขยายตัวอย่าง chat server ในหัวข้อ 50.15 ให้รองรับ **"ห้องแชทหลายห้อง"** (multiple
    chat rooms) — ให้แต่ละห้องมี `broadcast::Sender<String>` และ `Semaphore` ของตัวเอง (เก็บอยู่ใน
    `HashMap<String, RoomState>` โดย `RoomState` เก็บทั้งสองอย่างนี้) ผู้ใช้ที่เชื่อมต่อเข้ามาต้องส่งชื่อห้องที่
    ต้องการเข้าเป็นบรรทัดแรกก่อน (เช่น `"JOIN general"`) จากนั้นข้อความทั้งหมดที่ตามมาจะถูก broadcast แค่ภายใน

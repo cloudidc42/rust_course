@@ -93,6 +93,23 @@ executor จะปลุก task ที่รอไว้ให้ทำงา�
 ขนาดที่เล็กและง่ายกว่ามาก) — เริ่มจาก async file I/O เป็นตัวอุ่นเครื่องก่อน เพราะมัน "ง่ายกว่า" networking มาก
 (ไม่มีปัญหาเรื่อง connection, ไม่มีปัญหาเรื่อง framing) แต่ใช้ traitชุดเดียวกันเป๊ะ ๆ กับที่ TCP จะใช้ต่อไป
 
+#### เทียบกับภาษาอื่น: ปัญหาเดียวกัน คำตอบคล้ายกัน แค่คนละคำศัพท์
+
+ถ้าคุณเคยเขียนภาษาอื่นที่เน้น networking มาก่อน แนวคิด "task เบา ๆ จำนวนมากรอ I/O พร้อมกันบน thread จำนวนน้อย" ของ
+Tokio ไม่ใช่เรื่องใหม่ในโลกโปรแกรมมิ่งเลย มันแค่เป็นคำตอบเดียวกันกับปัญหาเดียวกันที่ภาษาอื่นเคยแก้มาก่อน ด้วยคำศัพท์
+และกลไกที่ต่างออกไป:
+
+| ภาษา/แพลตฟอร์ม | ชื่อกลไก | ทำงานคล้าย Tokio task ยังไง | ต่างจาก Tokio ยังไง |
+|---|---|---|---|
+| **Node.js** | Event loop + callback/`Promise`/`async function` | เป็น single-threaded event loop ตัวเดียวที่รอ I/O event แล้วเรียก callback กลับ — แนวคิด "ไม่บล็อก thread หลักตอนรอ I/O" เหมือนกัน | Node.js มี **thread เดียว** จัดการ event loop ทั้งหมด (งาน CPU-heavy ต้องแยกไป Worker Thread) ส่วน Tokio แบบ multi-thread runtime (Part 48) กระจาย task ไปรันบนหลาย OS thread พร้อมกันได้จริง ใช้ CPU หลาย core ได้เต็มที่กว่า |
+| **Go** | Goroutine + channel | Goroutine ก็เป็น "green thread" น้ำหนักเบาเหมือน Tokio task และ Go runtime ก็มี scheduler คอยสลับงานตอนมี I/O บล็อกคล้ายกันมาก | Go ทำให้ goroutine "ดูเหมือน" เขียนโค้ดแบบ blocking ปกติได้เลย (ไม่มี `.await` ให้เห็น) เพราะ Go runtime แทรกจุดสลับงานให้อัตโนมัติจากคอมไพเลอร์/runtime เอง ส่วน Rust เลือกให้ `.await` ปรากฏชัดเจนในโค้ด (explicit) เพื่อให้รู้ตำแหน่งที่ task อาจถูกสลับได้แน่ชัด ตรงกับหลักการของ Rust ที่เน้นให้ต้นทุนที่มองไม่เห็นน้อยที่สุด (zero-cost/explicit abstraction) |
+| **Java (ก่อน virtual threads)** | Thread pool + `CompletableFuture` | ความคิดเรื่อง "อย่าเปิด thread ต่อ connection" คล้ายกัน เพราะ Java thread ก็หนักเกือบเท่า OS thread | ต้องเขียนโค้ดแบบ callback chain (`.thenApply()`, `.thenCompose()`) ซึ่งอ่านยากกว่า `async`/`.await` ของ Rust ที่ยังเขียนได้เหมือนโค้ด synchronous ปกติ (แก้ปัญหา "callback hell" แบบเดียวกับที่ Node.js ใช้ `async function` แก้) |
+
+จุดที่ Rust/Tokio ต่างจากทุกภาษาข้างบนอย่างมีนัยสำคัญที่สุดคือ **compiler ตรวจสอบความถูกต้องของ concurrency ให้ตั้งแต่
+compile time ผ่าน trait `Send`/`Sync`** (Part 40) — ภาษาอื่นส่วนใหญ่ตรวจพบปัญหาแบบ data race หรือใช้ค่าข้าม thread
+ผิดวิธีได้แค่ตอน runtime (หรือไม่ตรวจเลย) แต่ Rust จะปฏิเสธไม่ให้ compile โค้ดที่มีความเสี่ยงแบบนั้นตั้งแต่แรก (จะเห็น
+ตัวอย่างจริงของเรื่องนี้ในกับดักที่ 5 ท้ายบท)
+
 ### 49.2 Async File I/O: ตัวอุ่นเครื่องก่อนเข้าเน็ตเวิร์ก
 
 Tokio มีโมดูล `tokio::fs` ที่เป็นเวอร์ชัน async ของ `std::fs` (ที่ Part 12 แนะนำไว้ตอนพูดถึง `std::fs::File` และ
@@ -178,6 +195,53 @@ trait เดียวกันเป๊ะ):
 | `.write(buf)` | `AsyncWriteExt` | เขียนบางส่วนของ `buf` (อาจไม่ครบ) คืนค่าจำนวน byte ที่เขียนสำเร็จ |
 | `.write_all(buf)` | `AsyncWriteExt` | เขียนให้ครบทั้ง `buf` (วน loop ให้เองจนครบ) |
 | `.flush()` | `AsyncWriteExt` | บอกให้ระบายข้อมูลที่อาจยัง buffer ค้างอยู่ออกไปจริง ๆ |
+
+#### ตัวอย่าง "ผิด": ลืม `use` extension trait
+
+ก่อนไปต่อ ลองดูสิ่งที่เกิดขึ้นถ้าลืม `use tokio::io::AsyncReadExt;` — เพราะนี่คือ error ที่ผู้เริ่มต้นเขียน Tokio
+เจอบ่อยที่สุดเป็นอันดับต้น ๆ:
+
+```rust
+use tokio::fs::File;
+// ลืม: use tokio::io::AsyncReadExt;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let mut file = File::open("/tmp/greeting.txt").await?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await?; // เรียก method ที่มาจาก AsyncReadExt โดยไม่ import
+    println!("{contents}");
+    Ok(())
+}
+```
+
+error จริงจาก compiler:
+
+```
+error[E0599]: no method named `read_to_string` found for struct `tokio::fs::File` in the current scope
+    --> src/main.rs:8:10
+     |
+   8 |     file.read_to_string(&mut contents).await?;
+     |          ^^^^^^^^^^^^^^
+     |
+    ::: tokio-1.53.1/src/io/util/async_read_ext.rs:1404:12
+     |
+1404 |         fn read_to_string<'a>(&'a mut self, dst: &'a mut String) -> ReadToString<'a, Self>
+     |            -------------- the method is available for `tokio::fs::File` here
+     |
+     = help: items from traits can only be used if the trait is in scope
+help: trait `AsyncReadExt` which provides `read_to_string` is implemented but not in scope; perhaps you want to import it
+     |
+   1 + use tokio::io::AsyncReadExt;
+     |
+```
+
+error message นี้จริง ๆ แล้ว**อธิบายวิธีแก้ไว้ให้เสร็จเลย** ("the method is available for `tokio::fs::File` here"
+พร้อม `help: ... perhaps you want to import it") เพราะ compiler ของ Rust รู้ว่า `File` implement `AsyncRead`
+(trait หลักระดับต่ำ) อยู่แล้ว แค่ extension trait ที่เติม method สะดวก ๆ ยังไม่ถูก `use` เข้ามาในขอบเขต (scope)
+เท่านั้น — นี่คือข้อดีของการออกแบบแบบ extension trait ที่ Part 25/26 เคยพูดถึงตอนเรียน `Iterator`: มันทำให้ compiler
+ช่วยแนะแนวทางแก้ปัญหาได้ตรงจุดมาก เพราะรู้ชัดว่า trait ไหนที่ขาดไป ต่างจาก error แบบ "method not found" ทั่วไปที่ไม่รู้
+ต้นเหตุ
 
 การอ่าน/เขียนไฟล์คือสนามฝึกที่ปลอดภัยที่สุดสำหรับ trait สองตัวนี้ เพราะ**ไม่มีความซับซ้อนเรื่อง connection หรือ
 message boundary** เลย — คุณรู้แน่ ๆ ว่าไฟล์มีจุดเริ่มต้นและจุดสิ้นสุด (EOF) ที่ชัดเจน ต่างจาก TCP socket ที่เราจะเจอ
@@ -282,6 +346,53 @@ Part 48: task ของ Tokio เบามาก การมี task เป็�
 (จะเจาะลึกในหัวข้อกับดักท้ายบท) เพราะถ้าไม่เช็ค การอ่านค่า 0 byte ซ้ำ ๆ วนไปเรื่อย ๆ ใน loop โดยไม่หยุด จะทำให้เกิด
 **busy loop กิน CPU 100%** ทันที (เพราะ `.read()` บน connection ที่ปิดแล้วจะ return `Ok(0)` ทันทีแบบไม่รอเลย ต่างจาก
 ตอน connection ยังเปิดอยู่แต่ไม่มีข้อมูลใหม่ที่จะรอแบบ async จริง)
+
+#### เกร็ดเพิ่มเติม: เลือก Address ที่ Bind และ Error `AddrInUse`
+
+สังเกตว่าตัวอย่างทั้งบทนี้ bind ที่ **`127.0.0.1`** (loopback address) เสมอ ไม่ใช่ `0.0.0.0` — ทั้งสองมีความหมายต่างกัน
+ที่ควรรู้ก่อนจะเอาโค้ดไปใช้งานจริงนอกเหนือจากการทดสอบบนเครื่องเดียว:
+
+- **`127.0.0.1`** (หรือ `localhost`): รับ connection **จากเครื่องตัวเองเท่านั้น** เหมาะกับการพัฒนา/ทดสอบ หรือ service
+  ภายในที่ไม่ต้องการให้เครื่องอื่นในเครือข่ายเข้าถึงได้เลย
+- **`0.0.0.0`**: รับ connection จาก **ทุก network interface ของเครื่อง** (ทุก IP ที่เครื่องมี ไม่ใช่แค่ loopback) —
+  นี่คือค่าที่ต้องใช้ถ้าต้องการให้เครื่องอื่นในเครือข่าย (หรือ internet ถ้าเครื่องมี public IP) เชื่อมต่อเข้ามาได้จริง
+  เช่น deploy web server ขึ้น production
+
+ข้อผิดพลาดที่พบบ่อยเมื่อทดสอบซ้ำ ๆ ระหว่างพัฒนา คือรัน server ตัวใหม่ทับ port เดิมที่ยังมี process เก่าถือ (bind) อยู่
+โดยไม่รู้ตัว (เช่น ลืมปิด `cargo run` ตัวเก่าก่อนรันตัวใหม่):
+
+```rust
+use tokio::net::TcpListener;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let addr = "127.0.0.1:17899";
+    let _listener1 = TcpListener::bind(addr).await?;
+    println!("listener1 bound ok");
+
+    // ลอง bind port เดิมซ้ำอีกครั้งในขณะที่ listener1 ยังไม่ถูก drop
+    match TcpListener::bind(addr).await {
+        Ok(_) => println!("listener2 bound ok (ไม่ควรเกิด)"),
+        Err(e) => println!("listener2 bind error: {e} (kind: {:?})", e.kind()),
+    }
+
+    Ok(())
+}
+```
+
+ผลลัพธ์จริง:
+
+```
+listener1 bound ok
+listener2 bind error: Address already in use (os error 98) (kind: AddrInUse)
+```
+
+`io::Error` ของ Rust มี method `.kind()` ที่คืนค่าเป็น `std::io::ErrorKind` (enum ที่ Part 12 แนะนำไว้แล้วว่า
+`io::Error` ครอบข้อมูลไว้มากกว่าแค่ข้อความ) ทำให้โค้ดสามารถแยกแยะประเภทของ error ได้โดยไม่ต้อง parse string ข้อความ
+error เอง — `ErrorKind::AddrInUse` ในกรณีนี้บอกตรง ๆ ว่า "port ที่ต้องการ bind ถูกใช้งานอยู่แล้วโดย process อื่น
+(หรือ instance เก่าของโปรแกรมเราเอง)" วิธีแก้เมื่อพัฒนาบนเครื่องตัวเองคือปิด process เก่าก่อน (หรือใช้เครื่องมือ
+เช่น `lsof -i :PORT` บน Linux/macOS เพื่อหาว่า process ไหนถือ port นั้นอยู่) — ใน production จริง error นี้มักบ่งบอก
+ว่ามีการ deploy ซ้อนกันผิดพลาด หรือ service ตัวเก่ายังไม่ถูกปิดสมบูรณ์ก่อนตัวใหม่จะเริ่ม
 
 ### 49.5 รันจริง: Echo Server คุยกับ Echo Client ผ่าน TCP บน localhost
 
@@ -1008,6 +1119,211 @@ task ต่อหนึ่ง connection, ใช้ channel ส่งข้อ�
 channel ซึ่งเป็นชนิดข้อมูลที่ Tokio สร้างมาเพื่อแก้ปัญหา "กระจายข้อความหนึ่งชุดไปยังหลายผู้รับ" นี้โดยเฉพาะ ซึ่งจะทำให้
 โค้ด chat server แบบนี้เขียนได้กระชับกว่านี้อีกมาก (ไม่ต้องจัดการ `Vec` ของ sender ด้วยมือเองเลย)
 
+### 49.13 กรณีศึกษาโลกจริง: ระบบจองที่นั่งอย่างง่ายผ่าน TCP (Simple Ticket Booking Server)
+
+ตัวอย่างทั้งหมดในบทนี้จนถึงตอนนี้เน้นที่กลไก networking เอง (echo, framing, chat) — มาปิดท้ายด้วยตัวอย่างที่ใกล้เคียง
+กับงานจริงมากขึ้น: **ระบบจองที่นั่ง** ผ่าน TCP ที่ใช้ทั้ง newline-delimited protocol (หัวข้อ 49.7) และ `Arc<Mutex<T>>`
+(หัวข้อ 49.9) ร่วมกัน แต่คราวนี้ `Mutex` ปกป้อง **สถานะทางธุรกิจจริง** (ที่นั่งไหนถูกจองไปแล้วบ้าง) ไม่ใช่แค่รายชื่อ
+sender เหมือนตัวอย่าง chat — และที่สำคัญที่สุดคือมันสาธิตให้เห็น **เหตุผลที่ต้องมี `Mutex`** อย่างเป็นรูปธรรม:
+ป้องกัน**การจองที่นั่งเดียวกันซ้ำสองครั้ง** เมื่อมีสอง client พยายามจองที่นั่งเดียวกัน "พร้อมกัน"
+
+โปรโตคอลง่าย ๆ ที่ออกแบบขึ้น (newline-delimited ตามหัวข้อ 49.7): ส่งคำสั่งเป็นข้อความหนึ่งบรรทัดต่อครั้ง
+
+- `BOOK <หมายเลขที่นั่ง>` — ขอจองที่นั่งหมายเลขนั้น ได้คำตอบกลับเป็น `OK: seat N booked` ถ้าจองสำเร็จ, `TAKEN: seat N
+  already booked` ถ้ามีคนจองไปก่อนแล้ว, หรือ `ERROR: invalid seat` ถ้าหมายเลขที่นั่งไม่มีอยู่จริง
+- `STATUS` — ขอดูรายชื่อที่นั่งที่ยังว่างอยู่ทั้งหมด
+
+```rust
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+
+const TOTAL_SEATS: u32 = 10;
+
+// สถานะทางธุรกิจที่แบ่งปันกันทุก connection: เซ็ตของหมายเลขที่นั่งที่ถูกจองไปแล้ว
+type BookedSeats = Arc<Mutex<HashSet<u32>>>;
+
+async fn handle_booking_client(
+    socket: TcpStream,
+    peer: std::net::SocketAddr,
+    booked: BookedSeats,
+) -> std::io::Result<()> {
+    let (reader, mut writer) = socket.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    while let Some(line) = lines.next_line().await? {
+        let line = line.trim();
+
+        let reply = if line == "STATUS" {
+            let set = booked.lock().unwrap();
+            let available: Vec<u32> = (1..=TOTAL_SEATS).filter(|s| !set.contains(s)).collect();
+            format!("AVAILABLE: {available:?}\n")
+        } else if let Some(seat_str) = line.strip_prefix("BOOK ") {
+            match seat_str.parse::<u32>() {
+                Ok(seat) if seat >= 1 && seat <= TOTAL_SEATS => {
+                    // lock สั้น ๆ ครอบเฉพาะการเช็ค-แล้ว-insert (ไม่มี .await อยู่ข้างในเลย
+                    // ตรงตามกฎที่กับดักที่ 5 ท้ายบทเน้นไว้)
+                    let mut set = booked.lock().unwrap();
+                    if set.insert(seat) {
+                        format!("OK: seat {seat} booked\n")
+                    } else {
+                        format!("TAKEN: seat {seat} already booked\n")
+                    }
+                }
+                _ => "ERROR: invalid seat\n".to_string(),
+            }
+        } else {
+            "ERROR: unknown command\n".to_string()
+        };
+
+        writer.write_all(reply.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+async fn run_booking_server(addr: &str, booked: BookedSeats) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    loop {
+        let (socket, peer) = listener.accept().await?;
+        let booked = Arc::clone(&booked);
+        tokio::spawn(async move {
+            if let Err(e) = handle_booking_client(socket, peer, booked).await {
+                eprintln!("error with {peer}: {e}");
+            }
+        });
+    }
+}
+```
+
+จุดที่สำคัญที่สุดในโค้ดนี้คือ `HashSet::insert(seat)` **คืนค่า `bool`**: `true` ถ้าค่านั้นยังไม่มีในเซ็ตมาก่อน (คือ
+insert สำเร็จ) และ `false` ถ้ามีอยู่แล้ว (insert ไม่มีผลอะไรเปลี่ยนแปลง) — เราใช้ค่าที่คืนมานี้เป็นตัวตัดสินว่าใคร
+"ชนะ" การจอง ที่นั่งนี้ **การเช็คว่าที่นั่งว่างหรือไม่ (`.contains()` โดยนัยผ่าน `.insert()`) และการจองจริง (เปลี่ยน
+สถานะเป็นถูกจอง) เกิดขึ้นเป็น operation เดียวที่ไม่มีการแทรกจากใครได้ระหว่างกลาง** เพราะทั้งสองเกิดขึ้นภายใน
+critical section เดียวกันของ `MutexGuard` ตัวเดียว — นี่คือเหตุผลที่ต้องใช้ `Mutex` แทนการเช็คแล้วค่อย insert แยกกัน
+เป็นสองขั้นตอน (`if !set.contains(&seat) { set.insert(seat); ... }`) ซึ่งจะเปิดช่องให้เกิด **race condition** ได้:
+ถ้าสอง task เช็ค `.contains()` พร้อมกันแล้วเห็นว่า "ยังว่าง" ทั้งคู่ (เพราะยังไม่มีใคร insert เข้าไปจริง ๆ ในตอนที่
+ทั้งคู่เช็ค) ทั้งสองก็จะ insert และตอบ `OK` กลับไปทั้งคู่ — ทำให้ที่นั่งเดียวถูกขายซ้ำสองใบ! การรวมเช็ค+insert ไว้ใน
+`.insert()` operation เดียวที่ atomic ภายใต้ lock เดียวกัน (Rust's `HashSet::insert` เป็น atomic ในความหมายที่ว่า
+มันคือ operation เดียวที่ไม่ถูกขั้นตอนกลาง เมื่อรวมกับการถือ `MutexGuard` ตลอดการเรียก ก็รับประกันว่าไม่มี task อื่น
+มาแทรกกลางระหว่างเช็คกับ insert ได้เลย) คือกลไกที่ป้องกันปัญหานี้อย่างสมบูรณ์ — **นี่คือเหตุผลเชิงลึกที่สุดว่าทำไม
+Part 39 ถึงสอนเรื่อง `Mutex` มาตั้งแต่ต้น: มันไม่ใช่แค่ "ป้องกันไม่ให้สอง thread เขียนพร้อมกันจนข้อมูลเพี้ยน" แต่คือ
+"ทำให้ลำดับของการอ่าน-แล้ว-ตัดสินใจ-แล้วเขียน ทั้งชุด เกิดขึ้นเป็นหน่วยเดียวที่แบ่งแยกไม่ได้ (atomic) จากมุมมองของ
+ผู้สังเกตภายนอกทุกคน"**
+
+มาทดสอบด้วยสถานการณ์ที่จงใจสร้าง race condition ขึ้นมาจริง ๆ: สอง client (`customer_A` และ `customer_B`) พยายาม
+`BOOK 5` ที่นั่งเดียวกันแบบ**พร้อมกัน**ผ่าน `tokio::join!` (เชื่อมกับ Part 48):
+
+```rust
+use tokio::io::AsyncReadExt;
+
+async fn booking_client(
+    addr: &str,
+    label: &'static str,
+    commands: Vec<String>,
+) -> std::io::Result<Vec<String>> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let mut responses = Vec::new();
+    for cmd in commands {
+        stream.write_all(format!("{cmd}\n").as_bytes()).await?;
+        let mut buf = [0u8; 256];
+        let n = stream.read(&mut buf).await?;
+        let resp = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+        println!("[{label}] sent {cmd:?} -> got {resp:?}");
+        responses.push(resp);
+    }
+    Ok(responses)
+}
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let addr = "127.0.0.1:7901";
+    let booked: BookedSeats = Arc::new(Mutex::new(HashSet::new()));
+    tokio::spawn(run_booking_server(addr, booked));
+
+    // สองลูกค้าพยายามจองที่นั่งเดียวกัน (seat 5) พร้อมกัน
+    let (r1, r2) = tokio::join!(
+        booking_client(addr, "customer_A", vec!["BOOK 5".to_string(), "STATUS".to_string()]),
+        booking_client(addr, "customer_B", vec!["BOOK 5".to_string(), "STATUS".to_string()]),
+    );
+    let (r1, r2) = (r1?, r2?);
+
+    let ok_count = [&r1[0], &r2[0]].iter().filter(|r| r.starts_with("OK")).count();
+    let taken_count = [&r1[0], &r2[0]].iter().filter(|r| r.starts_with("TAKEN")).count();
+    println!("สรุป: OK={ok_count}, TAKEN={taken_count}");
+    assert_eq!(ok_count, 1);
+    assert_eq!(taken_count, 1);
+
+    Ok(())
+}
+```
+
+ผลลัพธ์จริงจากการรัน (ทดสอบซ้ำ 3 ครั้งเพื่อดูว่าผลลัพธ์คงเส้นคงวาแม้ลำดับการมาถึงของ request จะสุ่มต่างกันในแต่ละ
+ครั้ง):
+
+```
+=== ครั้งที่ 1 ===
+[customer_B] sent "BOOK 5" -> got "OK: seat 5 booked"
+[customer_A] sent "BOOK 5" -> got "TAKEN: seat 5 already booked"
+[customer_A] sent "STATUS" -> got "AVAILABLE: [1, 2, 3, 4, 6, 7, 8, 9, 10]"
+[customer_B] sent "STATUS" -> got "AVAILABLE: [1, 2, 3, 4, 6, 7, 8, 9, 10]"
+สรุป: OK=1, TAKEN=1
+
+=== ครั้งที่ 2 ===
+[customer_A] sent "BOOK 5" -> got "OK: seat 5 booked"
+[customer_B] sent "BOOK 5" -> got "TAKEN: seat 5 already booked"
+[customer_A] sent "STATUS" -> got "AVAILABLE: [1, 2, 3, 4, 6, 7, 8, 9, 10]"
+[customer_B] sent "STATUS" -> got "AVAILABLE: [1, 2, 3, 4, 6, 7, 8, 9, 10]"
+สรุป: OK=1, TAKEN=1
+
+=== ครั้งที่ 3 ===
+[customer_A] sent "BOOK 5" -> got "OK: seat 5 booked"
+[customer_B] sent "BOOK 5" -> got "TAKEN: seat 5 already booked"
+[customer_A] sent "STATUS" -> got "AVAILABLE: [1, 2, 3, 4, 6, 7, 8, 9, 10]"
+[customer_B] sent "STATUS" -> got "AVAILABLE: [1, 2, 3, 4, 6, 7, 8, 9, 10]"
+สรุป: OK=1, TAKEN=1
+```
+
+สังเกตสิ่งสำคัญที่สุดในผลลัพธ์: **ใครจะ "ชนะ" ได้ที่นั่ง (ได้ `OK`) นั้นสุ่มไม่แน่นอน** ระหว่างการรันแต่ละครั้ง
+(ครั้งที่ 1 คือ customer_B ชนะ ส่วนครั้งที่ 2 และ 3 คือ customer_A ชนะ) — เพราะ `tokio::join!` ไม่การันตีว่า future
+ไหนจะถูก schedule ให้ทำงานถึง server ก่อนกัน (ตรงตามที่อธิบายไว้ในหัวข้อ 49.12) **แต่ผลรวมสุดท้ายมี `OK=1, TAKEN=1`
+เสมอทุกครั้งไม่มีข้อยกเว้น** — ไม่มีทางที่จะได้ `OK=2` (ที่นั่งถูกขายซ้ำสองใบ ซึ่งเป็นหายนะทางธุรกิจจริง) หรือ
+`TAKEN=2` (ไม่มีใครได้ที่นั่งเลยทั้งที่ควรมีคนได้) เพราะ `Mutex` การันตีว่าไม่ว่า `.accept()` จะรับ connection มา
+เรียงลำดับยังไง หรือ scheduler จะสลับ task ไหนก่อนหลัง **การเช็ค-และ-จองที่นั่งหมายเลข 5 ของทั้งสอง request จะไม่
+เกิดขึ้นพร้อมกันจริง ๆ เด็ดขาด** อย่างใดอย่างหนึ่งจะต้องรอให้อีกฝั่ง insert เสร็จและปล่อย lock ก่อนเสมอ — นี่คือ
+การันตีที่ **ไม่มีทางได้มาถ้าไม่มี `Mutex` (หรือกลไก mutual exclusion อื่นที่เทียบเท่า)** และเป็นตัวอย่างที่จับต้อง
+ได้ที่สุดในบทนี้ว่าทำไม shared mutable state ข้าม concurrent task ถึงต้องมีการป้องกันอย่างจริงจัง ไม่ใช่แค่ "เขียนโค้ด
+ให้ทำงานถูกในกรณีทดสอบปกติ" เท่านั้น
+
+(วิธีตรวจสอบ: รันโปรแกรมนี้จริงหลายครั้งด้วย `cargo run` ในสภาพแวดล้อมที่มี `cargo` และสามารถ bind/connect TCP บน
+`127.0.0.1` ได้ ผลลัพธ์ข้างต้นคือผลจริงที่จับภาพได้จากการรันซ้ำ 3 ครั้งติดกันโดยไม่มีการแก้ไขโค้ดระหว่างรัน)
+
+### 49.14 ตารางสรุป API ทั้งหมดของบทนี้
+
+ก่อนไปหัวข้อกับดักและแบบฝึกหัด สรุปชนิดข้อมูลและ method หลักทั้งหมดที่เรียนมาในบทนี้ไว้เป็นตารางอ้างอิงเดียว
+(quick reference) สำหรับกลับมาเปิดดูเวลาเขียนโค้ดจริง:
+
+| ชนิดข้อมูล/Method | มาจาก | ทำอะไร | สอนในหัวข้อ |
+|---|---|---|---|
+| `tokio::fs::File::create()` / `::open()` | `tokio::fs` | เปิด/สร้างไฟล์แบบ async คืนค่า `io::Result<File>` | 49.2 |
+| `AsyncReadExt::read()` | `tokio::io` | อ่านเข้า buffer ไม่เกินขนาดที่กำหนด | 49.2, 49.4 |
+| `AsyncReadExt::read_exact()` | `tokio::io` | อ่านให้เต็ม buffer พอดี ไม่งั้น error | 49.2, แบบฝึกหัดข้อ 4 |
+| `AsyncReadExt::read_to_end()` / `read_to_string()` | `tokio::io` | อ่านจนถึง EOF ทั้งหมด | 49.2 |
+| `AsyncWriteExt::write_all()` | `tokio::io` | เขียนให้ครบทั้ง buffer | 49.2, 49.4 |
+| `AsyncWriteExt::flush()` | `tokio::io` | ระบายข้อมูลที่ buffer ค้างไว้ออกไปจริง | 49.2 |
+| `TcpListener::bind()` | `tokio::net` | ผูก listener กับ address/port คืนค่า `io::Result<TcpListener>` | 49.4 |
+| `TcpListener::accept()` | `tokio::net` | รอ connection ใหม่ คืนค่า `(TcpStream, SocketAddr)` | 49.4 |
+| `TcpStream::connect()` | `tokio::net` | เชื่อมต่อไปยัง server คืนค่า `io::Result<TcpStream>` | 49.5 |
+| `TcpStream::into_split()` / `tokio::io::split()` | `tokio::net`/`tokio::io` | แยกครึ่งอ่าน/เขียนออกจากกัน ใช้พร้อมกันได้อิสระ | 49.7, 49.9 |
+| `BufReader::new()` + `AsyncBufReadExt::lines()` | `tokio::io` | ครอบ stream ให้อ่านเป็นบรรทัดผ่าน `\n` ได้ | 49.7 |
+| `.next_line()` | `tokio::io::Lines` | อ่านหนึ่งบรรทัดถัดไป คืนค่า `io::Result<Option<String>>` | 49.7 |
+| `tokio::spawn()` | `tokio` (Part 48) | สร้าง task ใหม่ (หนึ่งต่อหนึ่ง connection) | 49.4, 49.8, 49.12 |
+| `Arc<Mutex<T>>` | `std::sync` (Part 39) | แบ่งปันสถานะข้าม task อย่างปลอดภัย | 49.9, 49.12, 49.13 |
+| `mpsc::unbounded_channel()` | `tokio::sync` (เจาะลึกใน Part 50) | ส่งข้อความข้าม task แบบไม่มีเพดาน | 49.9, 49.12 |
+| `UdpSocket::bind()` | `tokio::net` | ผูก UDP socket กับ address/port | 49.10 |
+| `.send_to()` / `.recv_from()` | `tokio::net::UdpSocket` | ส่ง/รับ datagram แบบ connectionless | 49.10 |
+| `tokio::time::timeout()` | `tokio::time` (ต่อยอด `select!` จาก Part 48) | ครอบ future ด้วยเส้นตายเวลา คืนค่า `Result<T, Elapsed>` | 49.11 |
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### กับดักที่ 1: ลืม `.await` — โค้ด compile ผ่านแต่ไม่มีอะไรเกิดขึ้นเลย
@@ -1234,6 +1550,43 @@ task นั้น** โดยไม่กระทบ loop `.accept()` หลั
 แล้ว ต่างจาก error ของการอ่าน/เขียนกับ client รายตัวที่เป็นเรื่องปกติที่เกิดขึ้นได้ทุกวันและไม่ควรกระทบ client คนอื่น
 เลย — หลักการนี้คือการนำ "แนวคิดเรื่อง scope ของ error" จาก Part 12/30 มาประยุกต์กับ concurrency: **error ที่เกิดกับ
 งานหนึ่งงาน ควรจำกัดผลกระทบไว้แค่งานนั้น ไม่ควรลามไปงานอื่นที่ไม่เกี่ยวข้องกัน**
+
+### กับดักที่ 7: `mpsc::unbounded_channel()` ไม่มีเพดาน — เสี่ยงหน่วยความจำบวมถ้ามี Client ช้า
+
+ตัวอย่าง broadcast ในหัวข้อ 49.9/49.12 ใช้ `mpsc::unbounded_channel()` ซึ่งสะดวกมากเพราะ `.send()` ไม่ใช่ `async fn`
+(ไม่ต้อง `.await` และไม่มีวันบล็อก) แต่ **"ไม่บล็อก" แลกมาด้วยการ "ไม่มีเพดานความจุ" เลย** — ลองนึกภาพว่าถ้า client
+คนหนึ่งเชื่อมต่อไว้แต่ **ไม่ยอมอ่านข้อมูลที่ server ส่งมา** (เช่น โปรแกรมฝั่ง client ค้าง, network ของ client ช้ามาก
+จนไม่ยอม ack ข้อมูลกลับมา ทำให้ TCP send buffer ฝั่ง server เต็มและ `.write_all()` ค้างรออยู่นาน) ในขณะที่ client
+คนอื่น ๆ ยังพิมพ์ข้อความเข้ามาเรื่อย ๆ ไม่หยุด:
+
+```rust
+// ในทุกครั้งที่มีข้อความใหม่ ทุก sender จะถูก .send() โดยไม่มีการเช็คว่าอีกฝั่ง "ตามทัน" หรือไม่
+let list = clients.lock().unwrap();
+for (other_id, sender) in list.iter() {
+    if *other_id != id {
+        let _ = sender.send(broadcast_msg.clone()); // ส่งเข้า queue ภายในของ channel โดยไม่มีเพดาน
+    }
+}
+```
+
+ทุกครั้งที่ `.send()` ถูกเรียกกับ client ที่ "ช้า" ตัวนั้น ข้อความจะถูกเข้าคิวสะสมอยู่ใน buffer ภายในของ
+`UnboundedSender` **โดยไม่มีขีดจำกัด** เพราะ writer task ของ client นั้นยังไม่สามารถ `rx.recv()` แล้วเอาไปเขียนออก
+socket ได้ทันเวลา (ตัว `write_all()` เองก็ค้างอยู่) — ถ้าห้อง chat มีข้อความไหลเข้ามาต่อเนื่องและ client ตัวนั้นไม่
+กลับมา "ตามทัน" เลย หน่วยความจำที่ใช้เก็บ queue ของ client ตัวนั้นจะ**โตขึ้นไปเรื่อย ๆ ไม่มีเพดาน** จนอาจกิน memory
+จนเซิร์ฟเวอร์ทั้งเครื่องมีปัญหาได้ในที่สุด (เพราะ client ที่ช้าเพียงคนเดียว) — สถานการณ์แบบนี้ในวงการเรียกว่าปัญหา
+**backpressure**: ระบบฝั่งผลิตข้อมูล (producer) เร็วกว่าระบบฝั่งบริโภคข้อมูล (consumer) มาก และไม่มีกลไกใดบอกให้ฝั่ง
+ผลิตชะลอตัวลง
+
+ทางแก้ที่ Tokio เตรียมไว้ให้คือ **`mpsc::channel(capacity)` แบบมีเพดาน (bounded)** ซึ่งเมื่อ queue เต็มแล้ว
+`.send()` จะกลายเป็น `async fn` ที่ **`.await` รอ** จนกว่าฝั่งรับจะ `.recv()` เอาข้อความเก่าออกไปก่อนจนมีที่ว่าง —
+วิธีนี้ทำให้ producer ที่เร็วเกินไป "ถูกบีบให้ช้าลงอัตโนมัติ" ตามความเร็วของ consumer ที่ช้าที่สุด ซึ่งเป็นพฤติกรรมที่
+ปลอดภัยกว่ามากในระบบ production จริง (แลกกับความซับซ้อนที่เพิ่มขึ้นเล็กน้อย เพราะตอนนี้ critical section ที่ถือ
+`Mutex` ระหว่าง `.send()` แบบ bounded **จะมี `.await` แทรกอยู่** ซึ่งขัดกับกฎ "ห้าม `.await` ขณะถือ lock" ที่กับดัก
+ที่ 5 เน้นไว้ — การแก้ปัญหานี้อย่างถูกต้องต้องอาศัยเทคนิคที่ซับซ้อนกว่านี้ เช่น clone รายชื่อ sender ออกมาก่อนปล่อย
+lock แล้วค่อยวน `.send().await` ทีละตัวนอก critical section) รายละเอียดของ `mpsc::channel(capacity)` แบบมีเพดาน
+และวิธีจัดการ backpressure อย่างถูกต้องคือเนื้อหาที่ **Part 50** จะเจาะลึกให้ครบถ้วน — บทนี้ขอแค่ให้คุณรู้ว่าปัญหานี้
+มีอยู่จริง และ `unbounded_channel()` ที่ใช้ในตัวอย่างของบทนี้เป็นการเลือกใช้เพื่อความง่ายในการสอน ไม่ใช่ค่าเริ่มต้นที่
+ควรใช้ในระบบ production เสมอไป
 
 ## แบบฝึกหัด (Exercises)
 

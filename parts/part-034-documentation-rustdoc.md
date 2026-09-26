@@ -456,18 +456,20 @@ compile และรันเป็น test จริง** โดยอัตโ
 มาดูตัวอย่างจริง สมมติเรามีฟังก์ชันนี้ในไฟล์ `src/lib.rs`:
 
 ```rust
-/// คำนวณมูลค่ารวมของสินค้ารายการนี้ (ราคา คูณ จำนวน)
-///
-/// # Examples
-///
-/// ```
-/// use mini_inventory::Product;
-///
-/// let p = Product::new("จอมอนิเตอร์", 4500.0, 3);
-/// assert_eq!(p.total_value(), 13500.0);
-/// ```
-pub fn total_value(&self) -> f64 {
-    self.price * self.quantity as f64
+impl Product {
+    /// คำนวณมูลค่ารวมของสินค้ารายการนี้ (ราคา คูณ จำนวน)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mini_inventory::Product;
+    ///
+    /// let p = Product::new("จอมอนิเตอร์", 4500.0, 3);
+    /// assert_eq!(p.total_value(), 13500.0);
+    /// ```
+    pub fn total_value(&self) -> f64 {
+        self.price * self.quantity as f64
+    }
 }
 ```
 

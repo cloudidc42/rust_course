@@ -617,6 +617,32 @@ request หนึ่งที่ error จะไม่มีทางรู้�
 
 นี่คือปัญหาที่ **`tracing` crate** เกิดมาเพื่อแก้โดยเฉพาะ
 
+#### เปรียบเทียบกับภาษาอื่น
+
+แนวคิด facade pattern สำหรับ logging ไม่ใช่สิ่งที่ Rust คิดขึ้นเอง — เกือบทุกภาษาที่ใช้งานจริงระดับ production
+มีสิ่งที่คล้ายกันในรูปแบบของตัวเอง เข้าใจ analogy นี้จะช่วยให้เห็นภาพว่า `log`/`env_logger` ไม่ใช่อะไรที่แปลก
+ใหม่ในวงการ:
+
+- **Python**: module `logging` ใน standard library ทำหน้าที่คล้าย `log` เป๊ะ — มี `logging.getLogger(__name__)`
+  แล้วเรียก `.info()`/`.warning()`/`.error()` โดยที่ตัวโค้ดเองไม่ต้องรู้ว่า log จะไปโผล่ที่ไหน ส่วน "handler"
+  (เทียบกับ backend อย่าง `env_logger`) ต้องถูกตั้งค่าแยกต่างหาก (`logging.basicConfig(...)`) — ถ้าไม่ตั้งค่า
+  handler เลยก็มีค่า default ที่ทำงานได้บ้าง (ต่างจาก `log` ของ Rust ที่ default เป็น no-op สนิท)
+- **Go**: standard library `log` package แบบดั้งเดิมค่อนข้าง "ตรงไปตรงมา" (ไม่มี facade แยกจาก backend มากนัก)
+  แต่ Go เวอร์ชันใหม่ (1.21+) เพิ่ม `log/slog` ที่นำแนวคิด **structured logging** (เหมือน `tracing`'s
+  structured field ในหัวข้อ 60.9 เป๊ะ) เข้ามาเป็นส่วนหนึ่งของ standard library โดยตรง — สะท้อนว่า structured
+  logging กลายเป็นมาตรฐานอุตสาหกรรมไปแล้ว ไม่ใช่แค่แนวคิดเฉพาะของ Rust
+- **JavaScript/Node.js**: ไม่มี logging facade ใน standard library เลย ระบบนิเวศใช้ third-party package อย่าง
+  `winston` หรือ `pino` ตรง ๆ (มักผูกกับ backend ที่เลือกไว้แต่แรกมากกว่า Rust ที่แยก facade ออกจาก backend
+  อย่างชัดเจน) — นี่คือจุดที่ facade pattern ของ Rust's `log` มีข้อดีจริง: library crate ต่าง ๆ ในระบบนิเวศ
+  Rust ไม่ต้อง "เลือกฝ่าย" ว่าจะผูกกับ backend logging ตัวไหน ต่างจาก JS ecosystem ที่บาง package อาจผูกกับ
+  `winston` โดยตรงจนขัดกับ choice ของแอปที่เอาไปใช้
+
+ส่วนแนวคิด **span** ของ `tracing` มี analogy ที่ตรงที่สุดคือ **distributed tracing** ในระบบ microservice ทั่วไป
+(OpenTelemetry spans, Jaeger, Zipkin) — แนวคิดเรื่อง "หน่วยงานหนึ่งชิ้นที่มีจุดเริ่ม/จบ และมี child span ซ้อนกัน
+ได้" เหมือนกันเป๊ะไม่ว่าจะเป็นในโปรแกรมเดียว (`tracing` ในบทนี้) หรือข้ามหลาย service ทั้งระบบ (Part 81, Part
+98-99) — นี่ไม่ใช่เรื่องบังเอิญ เพราะ `tracing` ถูกออกแบบมาให้เชื่อมต่อกับระบบ distributed tracing มาตรฐานได้
+โดยตรงตั้งแต่แรก
+
 ### 60.6 `tracing` Crate: Async-Aware Structured Logging ยุคใหม่
 
 **`tracing`** คือ crate ที่พัฒนาโดยทีม Tokio เอง ออกแบบมาให้เป็น**ซุปเปอร์เซ็ตที่ทรงพลังกว่า** `log` — ทำได้
@@ -968,6 +994,27 @@ field แบบ shorthand (`user_id` เฉย ๆ แทน `user_id = user_id`
 | Library crate ที่คนอื่นจะนำไปใช้ | **`log`** มักยังเป็นตัวเลือกที่ดีกว่า | dependency footprint เล็กกว่ามาก (compile เร็วกว่า, dependency tree เล็กกว่า) — library ที่ต้องการแค่ "ประกาศเหตุการณ์" ไม่จำเป็นต้องดึง `tracing` ที่หนักกว่าเข้ามา และแอปพลิเคชันที่ใช้ `tracing` ก็ยังรับ log จาก library ที่ใช้ `log` ได้ผ่าน compatibility shim |
 | ไม่แน่ใจ / โปรเจกต์เล็กมาก | `log` + `env_logger` ก็เพียงพอ | เรียบง่ายกว่า เรียนรู้เร็วกว่า ถ้าไม่มีปัญหา async attribution (โปรแกรม synchronous ล้วน หรือ async ที่ไม่ซับซ้อน) ก็ไม่จำเป็นต้องใช้ของที่ทรงพลังกว่าที่ต้องการ |
 
+#### เปรียบเทียบแบบ Feature-by-Feature
+
+| แง่มุม | `log` | `tracing` |
+|---|---|---|
+| Macro ระดับ event (`error!`/`warn!`/`info!`/`debug!`/`trace!`) | มี | มี (syntax เกือบเหมือนกัน) |
+| แนวคิด "span" (ช่วงเวลาการทำงานที่ event ผูกเข้าไปอัตโนมัติ) | **ไม่มี** | มี — หัวใจหลักของ crate |
+| Attribute macro สร้าง span อัตโนมัติ (`#[instrument]`) | ไม่มี (ไม่มีแนวคิด span ให้ instrument) | มี |
+| Structured field (`info!(key = value, "msg")`) | ไม่มี (ต้องฝัง field ใน format string เอง) | มี โดยกำเนิด |
+| Active ข้าม `.await` ได้ (เหมาะกับ async) | ไม่รองรับโดยกำเนิด | รองรับโดยกำเนิด — ออกแบบมาเพื่อสิ่งนี้ |
+| Backend/subscriber ที่ใช้กันแพร่หลาย | `env_logger`, `fern`, `flexi_logger`, `simple_logger` | `tracing-subscriber` (แทบจะเป็นมาตรฐานเดียว) |
+| Output เป็น JSON ในตัว (ไม่ต้องเขียน formatter เอง) | ต้องพึ่ง backend เฉพาะทาง (เช่น `env_logger` ไม่มีให้ในตัว) | มีให้ในตัวผ่าน `fmt().json()` |
+| ต่อกับ distributed tracing (OpenTelemetry) | ไม่รองรับโดยตรง | รองรับผ่าน `tracing-opentelemetry` (Part 98-99) |
+| ขนาด dependency tree ที่ดึงมาด้วย | เล็กกว่ามาก (เหมาะกับ library) | ใหญ่กว่า (คุ้มค่าสำหรับ application ที่ใช้ความสามารถเต็มที่) |
+| ความนิยมในหมู่ library crate (HTTP client, driver ต่าง ๆ) | สูงมาก — เป็นตัวเลือกเริ่มต้นของ library ส่วนใหญ่ | น้อยกว่า (แต่เพิ่มขึ้นเรื่อย ๆ) |
+| ความนิยมในหมู่ web framework สมัยใหม่ (Axum ที่จะเรียน Part 62) | ใช้ได้ผ่าน bridge | เป็นค่าเริ่มต้นที่แนะนำโดยตรง |
+
+ตารางนี้ตอกย้ำสิ่งที่หัวข้อก่อนสรุปไว้: **ไม่มีตัวเลือกที่ "ดีกว่าเสมอในทุกกรณี"** — `tracing` ทรงพลังกว่าในแทบ
+ทุกมิติ **ยกเว้น** ขนาด dependency ซึ่งเป็นเหตุผลเดียวที่หนักแน่นพอที่จะทำให้ library crate จำนวนมากยังเลือก
+`log` อยู่ต่อไป (หลักการเดียวกับที่ Part 17/35 และ Part 48 หัวข้อ 48.2 สอนเรื่อง feature flag — "จ่ายเฉพาะที่ใช้"
+คือหลักการที่ library crate ควรยึดถือ เพราะไม่รู้ว่าแอปที่เอาไปใช้จะต้องการความสามารถระดับ `tracing` หรือไม่)
+
 **ประเด็นสำคัญที่ทำให้การเลือกนี้ไม่ใช่ "เลือกอันใดอันหนึ่งแล้วอีกอันหายไปเลย"**: crate อย่าง `tracing-log`
 มีไว้เป็น **compatibility shim** ที่เชื่อมสองระบบเข้าด้วยกัน — แอปพลิเคชันของคุณใช้ `tracing`/`tracing_subscriber`
 เต็มรูปแบบได้ แล้วยัง**รับ log record จาก dependency crate ที่เขียนด้วย `log` ธรรมดา**เข้ามาแสดงในระบบเดียวกัน
@@ -1039,6 +1086,116 @@ request แข่งกัน resume ไม่พร้อมกัน เหม
 (เรียนรู้แนวคิด span, เพิ่ม attribute หนึ่งบรรทัดต่อฟังก์ชัน) แลกมาด้วยความสามารถในการ debug ระบบที่ซับซ้อนได้
 ง่ายขึ้นมหาศาลเมื่อระบบมีขนาดใหญ่ขึ้นและรับ concurrent request จำนวนมากขึ้นในระดับ production จริง
 
+### 60.12 กรณีศึกษา: ใช้ Span ไล่หา Request ที่ทำงานช้าผิดปกติ
+
+มาปิดเนื้อหาก่อน checklist ด้วยกรณีศึกษาที่จำลองสถานการณ์ debug จริง เพื่อให้เห็นว่าทุกอย่างที่เรียนมาในบทนี้
+ประกอบกันแก้ปัญหาจริงได้อย่างไร — สมมติสถานการณ์: ระบบ production ของคุณรับหลายร้อย request พร้อมกันทุกวินาที
+ทีม operations รายงานว่า "บาง request ตอบกลับช้าผิดปกติ แต่ไม่รู้ว่า request ไหน หรือช้าที่ขั้นตอนไหน"
+
+**ถ้าใช้ `println!`/`log` ธรรมดา**: สิ่งที่ทำได้คือเพิ่ม `println!`/`log::info!` ในทุกจุดที่คิดว่าอาจช้า แล้ว
+deploy ใหม่ รอให้ปัญหาเกิดซ้ำ (ซึ่งอาจใช้เวลาเป็นชั่วโมงหรือเป็นวันถ้าปัญหาเกิดไม่บ่อย) แล้วมานั่งไถ log หลาย
+พันบรรทัดที่ปนกันจากทุก request พร้อมกัน (ปัญหาเดียวกับที่พิสูจน์ไว้ในหัวข้อ 60.5) หาบรรทัดที่ timestamp ห่างกัน
+ผิดปกติ **โดยไม่รู้ด้วยซ้ำว่าสองบรรทัดที่ timestamp ห่างกันนั้นเป็นของ request เดียวกันหรือคนละ request** —
+กระบวนการนี้ใช้เวลานานและมีโอกาสสรุปผิดสูงมาก
+
+**ถ้า instrument ด้วย `tracing` ไว้ล่วงหน้าแบบตัวอย่างในหัวข้อ 60.7/60.11**: กลับไปดู log ที่เก็บไว้ (ถ้า
+output เป็น JSON ตามหัวข้อ 60.8 จะยิ่งสะดวก) แล้ว **filter ด้วย `request_id`** ของ request ที่ผู้ใช้รายงานว่าช้า
+(สมมติได้ request_id มาจาก response header หรือจาก error report ของผู้ใช้) จะได้ log เฉพาะของ request นั้น
+เรียงตามเวลาชัดเจน ไม่ปนกับ request อื่นเลย — ดูจากตัวอย่าง output จริงในหัวข้อ 60.7 (สมมติว่านี่คือ request
+ที่ถูกรายงานว่าช้า):
+
+```
+2026-09-26T23:01:10.420276Z  INFO handle_request{request_id=1}: tracing_async: เริ่มรับ request ใหม่
+2026-09-26T23:01:10.448156Z  INFO handle_request{request_id=1}:fetch_from_db{request_id=1}: tracing_async: อ่านข้อมูลจาก database เสร็จแล้ว rows=3
+2026-09-26T23:01:10.454478Z  INFO handle_request{request_id=1}:process_payload{rows_latency=27 request_id=1}: tracing_async: ประมวลผลเสร็จสมบูรณ์ result=54
+2026-09-26T23:01:10.454561Z  INFO handle_request{request_id=1}: tracing_async: ส่ง response กลับให้ client แล้ว result=54
+```
+
+แค่เทียบ timestamp ระหว่างบรรทัด สามารถคำนวณได้ทันทีว่า **`fetch_from_db` ใช้เวลาประมาณ 27.9ms** (จาก
+23:01:10.420276 ถึง 23:01:10.448156) ในขณะที่ **`process_payload` ใช้เวลาแค่ 6.3ms** — ถ้า pattern นี้เกิดขึ้น
+ซ้ำ ๆ ในหลาย request ที่ถูกรายงานว่าช้า สามารถสรุปได้ทันทีว่า **`fetch_from_db` (การ query database) คือจุดที่
+เป็นคอขวดจริง** ไม่ใช่ `process_payload` — ทั้งหมดนี้ได้มาจาก log ที่เก็บไว้ตามปกติ **โดยไม่ต้อง deploy โค้ดใหม่
+สักบรรทัดเดียว** และไม่ต้องรอให้ปัญหาเกิดซ้ำเพื่อใส่ log เพิ่ม เพราะ instrumentation ถูกเตรียมไว้ล่วงหน้าแล้ว
+ตั้งแต่ตอนเขียนโค้ด
+
+**บทเรียนที่ได้จากกรณีศึกษานี้**: การลงทุนใส่ `#[instrument]` และ structured field ตั้งแต่ตอนเขียนโค้ดครั้งแรก
+(ต้นทุนแค่ไม่กี่บรรทัดต่อฟังก์ชัน) ให้ผลตอบแทนมหาศาลตอนต้อง debug ปัญหา production จริงที่ซับซ้อน — นี่คือ
+เหตุผลเชิงปฏิบัติที่หนักแน่นที่สุดที่ทำให้ทีม engineering จริงจังกับการเขียน observability เข้าไปใน**ทุก**
+service ตั้งแต่วันแรก ไม่ใช่ผัดวันไปทำ "ทีหลังตอนมีเวลา" — ถึงตอนที่จำเป็นต้องใช้จริง (ปัญหา production ที่
+กดดันเรื่องเวลา) มักไม่มีเวลาเหลือให้กลับไปเพิ่ม instrumentation ใหม่ทันเวลาอีกแล้ว
+
+### 60.13 พิสูจน์ด้วยตัวเลขจริง: ต้นทุนของ Log ที่ถูก Filter ออกน้อยแค่ไหน (เชื่อมกับ Part 54-55)
+
+คำถามที่มักเกิดขึ้นตอนพิจารณาใส่ `tracing::trace!()`/`debug!()` จำนวนมากในโค้ด hot path (โค้ดที่รันบ่อยมาก เช่น
+ในลูปประมวลผลข้อมูลจำนวนมาก) คือ "การเรียก macro พวกนี้ที่ถูก filter ออกไปเลย (ไม่ได้ print อะไรจริง) มี
+overhead มากแค่ไหน" — จำได้จาก **Part 54 (Performance Optimization และ Benchmarking)** ว่าหลักการที่ถูกต้องคือ
+**วัดจริง ไม่เดา** มาพิสูจน์กันตรง ๆ ด้วยการเรียก `tracing::trace!()` หนึ่งล้านครั้งโดยตั้ง filter ไว้ที่ `info`
+(ทำให้ `trace!` ทุกตัวถูกกรองออกก่อนจะไป format หรือ print อะไรเลย) เทียบกับลูปเปล่าที่ไม่มี `tracing` แม้แต่นิด
+เดียว:
+
+```rust
+use std::time::Instant;
+
+fn main() {
+    // ตั้ง filter ไว้ที่ info เท่านั้น -> trace! ทุกตัวถูกกรองออกก่อนจะไป format/print อะไรเลย
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+        .init();
+
+    const N: u32 = 1_000_000;
+
+    let start = Instant::now();
+    for i in 0..N {
+        tracing::trace!(iteration = i, "ทำงานรอบที่ {i} (ถูกกรองออกเพราะ level ต่ำกว่า info)");
+    }
+    let with_filtered_calls = start.elapsed();
+
+    let start2 = Instant::now();
+    for i in 0..N {
+        std::hint::black_box(i);
+    }
+    let without_calls = start2.elapsed();
+
+    println!("เรียก tracing::trace!() ที่ถูก filter ออก {N} ครั้ง: {with_filtered_calls:?}");
+    println!("loop เปล่าไม่มี tracing เลย {N} ครั้ง: {without_calls:?}");
+}
+```
+
+รันจริงด้วย `cargo build --release` (สำคัญมาก — ต้องวัดใน release mode ตามหลักการของ Part 54 เพราะ debug build
+มี overhead อื่นปนมาที่ไม่สะท้อนความเป็นจริง) พร้อม `RUST_LOG=info`:
+
+```
+เรียก tracing::trace!() ที่ถูก filter ออก 1000000 ครั้ง: 328.741µs
+loop เปล่าไม่มี tracing เลย 1000000 ครั้ง: 322.635µs
+```
+
+ผลลัพธ์จริง: **หนึ่งล้านครั้งของ `trace!()` ที่ถูก filter ออกใช้เวลาเพิ่มขึ้นจากลูปเปล่าเพียง ~6 microseconds
+รวม** (คิดเป็นเวลาเพิ่มขึ้นเฉลี่ยน้อยกว่า 1 นาโนวินาทีต่อการเรียกหนึ่งครั้ง) — นี่คือหลักฐานที่จับต้องได้ว่า
+**การเช็ค level ของ `tracing` ก่อนตัดสินใจว่าจะ format/ประมวลผล field หรือไม่นั้นเร็วมากจนวัดผลกระทบแทบไม่ได้
+ในทางปฏิบัติ** เหตุผลเชิงลึกคือ `tracing` ออกแบบ macro ให้เช็ค "callsite นี้ level ไหน, ปัจจุบัน enable ไหม"
+ผ่าน metadata ที่ cache ไว้ตั้งแต่ compile time (ไม่ต้อง lock หรือ query อะไรที่ช้าตอน runtime) ก่อนจะไปแตะ
+argument หรือ field เลยแม้แต่นิดเดียวถ้าผลเช็คคือ "ไม่ enable" — **ข้อสรุปเชิงปฏิบัติ**: ไม่ต้องกังวลเรื่อง
+performance จนถึงขั้นไม่กล้าใส่ `trace!`/`debug!` ในโค้ดที่รันบ่อย ตราบใดที่ level เหล่านั้นถูก filter ออกใน
+production จริง (ผ่าน `RUST_LOG`/`EnvFilter` ที่เหมาะสมตามหัวข้อ 60.4) — แต่ก็ควร**วัดจริงในโค้ดของตัวเอง**เสมอ
+ถ้าสงสัย ไม่ใช่เชื่อตัวเลขจากบทเรียนนี้ไปตรง ๆ (ตัวเลขจะต่างกันไปตามเครื่องและ workload จริง — หลักการสำคัญกว่า
+ตัวเลข)
+
+### 60.14 Checklist ก่อนนำ Logging ไปใช้จริงใน Production
+
+ก่อนปิดเนื้อหาบทนี้ มารวบตาราง checklist เชิงปฏิบัติที่สรุปทุกหลักการที่เรียนมาไว้ในที่เดียว — ใช้เป็น
+เกณฑ์ตรวจสอบก่อน deploy ระบบที่มี logging/tracing จริง:
+
+| รายการตรวจสอบ | เหตุผล (อ้างอิงหัวข้อ) |
+|---|---|
+| มีการเรียก `env_logger::init()` หรือ `tracing_subscriber::fmt::init()` (หรือเทียบเท่า) **ครั้งเดียว** ที่ต้นโปรแกรม | ไม่ทำแล้ว log หายไปเงียบ ๆ (60.2, กับดัก 1) เรียกซ้ำสองครั้งแล้ว panic (กับดัก 1 ส่วนขยาย) |
+| ตั้ง default log level (fallback เมื่อไม่มี `RUST_LOG`) เป็นค่าที่เหมาะกับ production จริง ไม่ใช่ปล่อยตามค่า default ของ library (`error` เท่านั้น) | ค่า default ของทั้ง `env_logger`/`EnvFilter` ค่อนข้าง "เงียบ" เกินไปสำหรับใช้งานจริงที่อยากเห็น `info` เป็นอย่างน้อย (60.8) |
+| เลือก level ตามเกณฑ์ "ใครอ่าน แล้วต้องทำอะไร" ไม่ใช่ตามสัญชาตญาณ | ป้องกัน alert fatigue จาก `error!` ที่ใช้ผิด และ log ท่วมจาก `info!` ที่ใช้เกิน (60.4, กับดัก 5) |
+| ฟังก์ชัน async ที่เป็น "หน่วยงานเชิงตรรกะ" (request, job, transaction) มี `#[instrument]` ครอบ | ไม่มี span จะ debug ระบบที่รับ concurrent request จำนวนมากไม่ได้เลยว่า log แต่ละบรรทัดเป็นของอะไร (60.7, กับดัก 4) |
+| log error ที่ **"ขอบของระบบ"** จุดเดียว ไม่ log ซ้ำหลายชั้นตามที่ error ถูก propagate ผ่าน `?` | ป้องกันความเข้าใจผิดว่า error เดียวเกิดขึ้นหลายครั้ง (60.4b) |
+| ถ้าระบบมีระบบ log aggregation ปลายทาง (ELK, Loki, Datadog ฯลฯ) ใช้ output แบบ JSON (`fmt().json()`) แทน text | ให้ระบบปลายทาง query ด้วย structured field ได้ตรง ๆ ไม่ต้อง parse ข้อความอิสระ (60.8, 60.9) |
+| ไม่เรียก `tracing_log::LogTracer::init()` เองถ้าใช้ `tracing_subscriber::fmt` อยู่แล้ว | default feature `tracing-log` ติดตั้ง bridge ให้แล้ว เรียกซ้ำจะ panic (60.10, กับดัก 6) |
+| ทดสอบ `RUST_LOG` หลายค่าจริงก่อน deploy (`error`, `info`, `debug`) ไม่ใช่เชื่อว่า code ที่เขียนถูกต้องแน่นอน | syntax ผิดบางกรณี fail แบบเงียบสนิท ไม่มี error เตือน (60.3, กับดัก 2-3) |
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### 1. ลืม Init Logger Backend — Log หายไปเงียบ ๆ โดยไม่มี Error ใดๆ
@@ -1059,6 +1216,32 @@ fn main() {
 ไม่มีใคร init backend เลย (ค่าเริ่มต้นคือ no-op logger) **วิธีแก้**: ตรวจสอบเสมอว่ามีการเรียก `env_logger::init()`
 (ฝั่ง `log`) หรือ `tracing_subscriber::fmt::init()` (ฝั่ง `tracing`) **ครั้งเดียวตอนต้นของ `main()`** — ถ้า
 โปรแกรมรันแล้วไม่มี log อะไรออกมาเลยแม้จะตั้ง `RUST_LOG=trace` ไว้ นี่คือสิ่งแรกที่ควรเช็คก่อนสงสัยอย่างอื่น
+
+**ส่วนขยาย — ปัญหาฝั่งตรงข้าม: เรียก `init()` ซ้ำสองครั้ง**: ถ้าโค้ดมีจุดที่เผลอเรียก `env_logger::init()`
+สองครั้ง (เช่น เรียกใน helper function ที่ถูกเรียกใช้จากหลายที่ในโปรแกรม โดยแต่ละที่ไม่รู้ว่าอีกที่หนึ่งก็เรียก
+เหมือนกัน) จะได้ผลตรงข้ามกับกับดักข้างบนคือ **panic ทันที** เพราะ `log` อนุญาตให้ set global logger ได้แค่
+ครั้งเดียวในโปรแกรมทั้งชีวิต:
+
+```rust
+fn main() {
+    env_logger::init();
+    env_logger::init(); // เรียกซ้ำสองครั้งโดยไม่ตั้งใจ (เช่น เรียกใน helper function ที่ถูกเรียกจากหลายที่)
+    log::info!("บรรทัดนี้จะไม่มีวันได้เห็น เพราะ panic เกิดก่อนหน้านี้แล้ว");
+}
+```
+
+รันจริงได้ panic ทันที:
+
+```
+thread 'main' panicked at .../env_logger-0.11.11/src/logger.rs:901:16:
+env_logger::init should not be called after logger initialized: SetLoggerError(())
+```
+
+**วิธีแก้**: ให้แน่ใจว่ามีจุดเรียก `env_logger::init()`/`tracing_subscriber::fmt::init()` **จุดเดียวเท่านั้นใน
+ทั้งโปรแกรม** (ปกติคือบรรทัดแรก ๆ ของ `fn main()`) — ถ้าจำเป็นต้องเรียกจาก helper function ที่อาจถูกเรียกซ้ำ
+(เช่นใน test suite ที่แต่ละ `#[test]` เรียก setup function เดียวกัน) ให้ใช้ `env_logger::try_init()` แทน (คืน
+`Result` ให้จัดการเองแทนที่จะ panic) หรือห่อด้วย `std::sync::Once`/`std::sync::OnceLock` เพื่อให้แน่ใจว่า init
+เกิดขึ้นแค่ครั้งเดียวจริง ๆ แม้จะถูกเรียกจากหลายจุด
 
 ### 2. RUST_LOG Syntax ผิด — บางกรณี Silent Failure, บางกรณีมี Error Message ชัดเจน
 
@@ -1173,6 +1356,56 @@ Unable to install global subscriber: SetLoggerError(())
 `Subscriber` ของตัวเอง หรือปิด default feature `tracing-log` ไปแล้วด้วยเหตุผลเฉพาะทาง) — ก่อนเพิ่มโค้ด
 bridge เองเสมอ ให้เช็คก่อนว่า backend ที่ใช้อยู่มี bridge ติดมาให้แล้วหรือยัง (ในกรณีของ `tracing_subscriber::fmt`
 คือ**มีให้แล้วเสมอ**ตราบใดที่ไม่ได้ปิด default feature)
+
+### 7. `#[instrument]` แนบทุก Parameter เป็น Field โดยอัตโนมัติ — รวมถึงข้อมูลลับด้วย!
+
+นี่คือกับดักด้าน**ความปลอดภัย**ที่อันตรายมาก และเกิดง่ายมากถ้าไม่รู้ล่วงหน้า — `#[tracing::instrument]` (หัวข้อ
+60.7) แนบ **ทุก parameter ของฟังก์ชันที่ implement `Debug`** เป็น field ของ span โดยอัตโนมัติ **โดยไม่แยกแยะเลย
+ว่า parameter ตัวไหนเป็นข้อมูลอ่อนไหว**:
+
+```rust
+use tracing::instrument;
+
+// อันตราย: #[instrument] แนบทุก parameter เป็น field โดยอัตโนมัติ รวมถึง `password` ด้วย!
+#[instrument]
+fn login(username: &str, password: &str) -> bool {
+    tracing::info!("ตรวจสอบรหัสผ่าน");
+    password == "correct-password"
+}
+
+#[instrument(skip(password))]
+fn login_safe(username: &str, password: &str) -> bool {
+    tracing::info!("ตรวจสอบรหัสผ่าน");
+    password == "correct-password"
+}
+
+fn main() {
+    tracing_subscriber::fmt::init();
+    login("alice", "super-secret-123");
+    login_safe("alice", "super-secret-123");
+}
+```
+
+รันจริงด้วย `RUST_LOG=info` (ตัด ANSI ออก) — เทียบสองบรรทัดนี้ให้ดี:
+
+```
+2026-09-26T23:19:08.330460Z  INFO login{username="alice" password="super-secret-123"}: instrument_leak_demo: ตรวจสอบรหัสผ่าน
+2026-09-26T23:19:08.330542Z  INFO login_safe{username="alice"}: instrument_leak_demo: ตรวจสอบรหัสผ่าน
+```
+
+บรรทัดแรก **`password="super-secret-123"` รั่วไปอยู่ใน log เต็ม ๆ** ทุกครั้งที่ฟังก์ชัน `login` ถูกเรียก — ถ้า
+ระบบ log aggregation ปลายทางเก็บ log พวกนี้ไว้ (ซึ่งเป็นเรื่องปกติของระบบ production) รหัสผ่านของผู้ใช้จริงจะ
+ถูกเก็บไว้เป็น plain text ในระบบ log ที่อาจมีคนเข้าถึงได้มากกว่าระบบ database จริงเสียอีก — เป็นช่องโหว่ความ
+ปลอดภัยที่ร้ายแรงมาก และสามารถเกิดขึ้นได้ง่าย ๆ กับ parameter อื่นที่อ่อนไหวเช่นกัน (API token, credit card
+number, personal identifiable information อื่น ๆ)
+
+**วิธีแก้**: ใช้ **`skip(...)`** ใน `#[instrument(skip(password))]` (เห็นในบรรทัดที่สอง `login_safe`) เพื่อ
+บอกให้ macro **ไม่**แนบ parameter ตัวนั้นเป็น field เลย — ผลคือ span ของ `login_safe` มีแค่ `username` ไม่มี
+`password` ติดไปด้วยแม้แต่นิดเดียว **กฎปฏิบัติที่ควรยึดถือเสมอ**: ทุกครั้งที่ใส่ `#[instrument]` บนฟังก์ชันที่
+รับ parameter ที่เป็นข้อมูลอ่อนไหว (password, token, secret, ข้อมูลส่วนบุคคล) ให้ `skip(...)` พารามิเตอร์นั้น
+**เสมอ** โดยไม่มีข้อยกเว้น — ถ้าฟังก์ชันมี parameter หลายตัวที่ไม่อยาก log เลย ใช้ `skip_all` แล้วเลือกเฉพาะ
+field ที่ต้องการผ่าน `fields(...)` แทน (ปลอดภัยกว่าเพราะเป็นแบบ "allowlist" ไม่ใช่ "denylist" ที่เสี่ยงลืม
+parameter ใหม่ที่เพิ่มเข้ามาทีหลัง)
 
 ## แบบฝึกหัด (Exercises)
 

@@ -1492,20 +1492,20 @@ fn main() {
 
 ```
 error: lifetime may not live long enough
-  --> src/main.rs:8:9
-   |
-6  |     fn greet(&self, name: &str) -> &str {
-   |              -            - let's call the lifetime of this reference `'1`
-   |              |
-   |              let's call the lifetime of this reference `'2`
-7  |         println!("{}, {}!", self.greeting, name);
-8  |         name
-   |         ^^^^ method was supposed to return data with lifetime `'2` but it is returning data with lifetime `'1`
-   |
+ --> src/main.rs:9:9
+  |
+7 |     fn greet(&self, name: &str) -> &str {
+  |              -            - let's call the lifetime of this reference `'1`
+  |              |
+  |              let's call the lifetime of this reference `'2`
+8 |         println!("{}, {}!", self.greeting, name);
+9 |         name
+  |         ^^^^ method was supposed to return data with lifetime `'2` but it is returning data with lifetime `'1`
+  |
 help: consider introducing a named lifetime parameter and update trait if needed
-   |
-6  |     fn greet<'a>(&self, name: &'a str) -> &'a str {
-   |             ++++               ++          ++
+  |
+7 |     fn greet<'a>(&self, name: &'a str) -> &'a str {
+  |             ++++               ++          ++
 ```
 
 สังเกตข้อความ error ที่บอกตรงจุดมาก: **"method was supposed to return data with lifetime `'2`"** (lifetime ของ
@@ -1604,7 +1604,7 @@ fn main() {
 error: lifetime may not live long enough
  --> src/main.rs:2:5
   |
-1 | fn wrap_greeting(name: &str) -> &'static str {
+1 | fn wrap_greeting(name: &str) -> &'static str { // ❌ พยายามบอกว่า output มีอายุยืนตลอดโปรแกรม
   |                         - let's call the lifetime of this reference `'1`
 2 |     name
   |     ^^^^ returning this value requires that `'1` must outlive `'static`

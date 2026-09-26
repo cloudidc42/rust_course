@@ -13,7 +13,7 @@
 | 1 | แนะนำ Rust และการติดตั้งเครื่องมือ (rustup, cargo, VS Code/rust-analyzer) | 🚧 |
 | 2 | Cargo และโครงสร้างโปรเจกต์ (cargo new/build/run/check) | ✅ |
 | 3 | ตัวแปร ชนิดข้อมูลพื้นฐาน และ Mutability (let, mut, shadowing, scalar/compound types) | ⏳ |
-| 4 | ฟังก์ชันและ Control Flow (if/else, loop, while, for, match เบื้องต้น) | ⏳ |
+| 4 | ฟังก์ชันและ Control Flow (if/else, loop, while, for, match เบื้องต้น) | ✅ |
 | 5 | Comments, การจัดรูปแบบโค้ด (rustfmt) และ Clippy | ✅ |
 
 ## โมดูล 1: พื้นฐานภาษา Rust (Core Language Fundamentals) — Part 6–20

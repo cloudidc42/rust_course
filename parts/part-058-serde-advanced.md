@@ -840,6 +840,53 @@ string เท่านั้นแน่ ๆ ไม่ต้องรองร�
 `#[serde(serialize_with = "...")]` เดี่ยว ๆ ได้ (ไม่ต้องมี `with =` ทั้ง module) — Part 57 ไม่ได้ลง
 รายละเอียดตรงนี้เพราะมันคาบเกี่ยวกับการเขียน `Serialize`/`Deserialize` เอง ซึ่งเป็นเนื้อหาของบทนี้
 
+### 58.4.1 ตัวอย่าง `serialize_with` เดี่ยว ๆ: field-level masking
+
+สถานการณ์จริงที่พบบ่อยของ `serialize_with` แบบทิศทางเดียว (ไม่มี `deserialize_with` คู่กัน) คือการ
+**ปกปิดข้อมูลอ่อนไหว** เมื่อ serialize ออกไป (เช่น เพื่อ log หรือส่งกลับใน API response) แต่ยัง
+deserialize ค่าจริงเข้ามาได้ปกติ (เพราะรับ input จากผู้ใช้จริง ต้องได้ค่าจริง ไม่ใช่ค่าที่ mask แล้ว):
+
+```rust
+use serde::{Serialize, Serializer};
+
+fn as_masked<S>(_value: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str("****")
+}
+
+#[derive(Debug, Serialize)]
+struct Account {
+    username: String,
+    #[serde(serialize_with = "as_masked")]
+    password: String,
+}
+
+fn main() {
+    let acc = Account {
+        username: "alice".to_string(),
+        password: "supersecret123".to_string(),
+    };
+    println!("{}", serde_json::to_string(&acc).unwrap());
+}
+```
+
+ผลลัพธ์จริง:
+
+```
+{"username":"alice","password":"****"}
+```
+
+สังเกตว่า `as_masked` **ไม่สนใจค่าจริงของ `_value` เลย** (ตั้งชื่อขึ้นต้นด้วย `_` เพื่อบอก compiler ว่า
+ตั้งใจไม่ใช้ตามธรรมเนียมจาก Part 5) มัน `serialize_str("****")` ตรง ๆ ไม่ว่า password จริงจะเป็นอะไร —
+นี่คือ representation ที่ตั้งใจ**ทำลายข้อมูลต้นฉบับ**ไปเลยตอน serialize (ต่างจากทุกตัวอย่างก่อนหน้าใน
+บทนี้ที่ representation ยัง round-trip กลับมาได้) ซึ่งเป็นเจตนาที่ถูกต้องสำหรับ field ที่ไม่ควรหลุดออก
+ไปในรูปแบบใด ๆ เลย — ถ้า struct นี้ไม่มี `#[derive(Deserialize)]` ด้วย (หรือมีแต่ `password` field ไม่มี
+`deserialize_with` คู่กัน) การ deserialize จะยังใช้ `Deserialize` ปกติของ `String` รับค่าจริงเข้ามาได้
+ตามปกติ — ยืนยันว่า `serialize_with`/`deserialize_with` เป็น**อิสระจากกันโดยสมบูรณ์** ปรับทิศทางเดียวได้
+โดยไม่กระทบอีกทิศทาง
+
 ### 58.5 Deserialize กับ Lifetime: Zero-Copy Deserialization
 
 ทวนจาก Part 20/23: reference (`&'a T`) ผูกอายุการใช้งานไว้กับข้อมูลต้นทาง — ยืมได้แต่ต้องไม่อยู่นานกว่า

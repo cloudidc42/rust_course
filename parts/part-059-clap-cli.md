@@ -19,9 +19,12 @@
 - **Part 57 (Serde เบื้องต้น) และ Part 58 (Serde ขั้นสูง)** — โครงสร้าง attribute ของ `clap` (เช่น `#[arg(short, long, default_value = "...")]`) มีรูปแบบทาง "ปรัชญาการออกแบบ" เหมือนกับ attribute ของ `serde` (เช่น `#[serde(rename = "...", default)]`) เพราะทั้งคู่เป็น derive macro ที่ใช้ attribute เพื่อ **ปรับแต่ง code generation ต่อ field** แบบเดียวกัน — ในหัวข้อท้ายบทเราจะผสาน `clap` (parse CLI arguments) กับ `serde` (deserialize ไฟล์ config/ข้อมูล) เข้าด้วยกันในโปรแกรมเดียว ซึ่งเป็นรูปแบบที่พบได้ในเครื่องมือ command-line ระดับ production แทบทุกตัว
 - **Part 10 (Enums และ Pattern Matching)** — `#[derive(Subcommand)]` แปลง `enum` ให้กลายเป็นชุดของ subcommand โดยตรง แต่ละ variant คือ subcommand หนึ่งตัว และเมื่อ parse เสร็จแล้ว คุณจะ `match` บน enum นั้นเพื่อจัดการแต่ละคำสั่ง — Rust compiler การันตี **exhaustiveness** ของ `match` แบบเดียวกับที่ Part 10 สอนไว้ ทำให้ถ้าคุณเพิ่ม subcommand ใหม่ (เพิ่ม variant ใหม่) แล้วลืมจัดการใน `match` compiler จะฟ้อง error ทันที ไม่ใช่ bug ที่ไปโผล่ตอน runtime
 - **Part 12 (Result<T, E> และ Error Handling เบื้องต้น)** — เรื่อง `?` operator, การคืนค่า `Result` จาก `main()`, และแนวคิดพื้นฐานเรื่อง exit code ของโปรแกรม (0 = สำเร็จ, ไม่ใช่ 0 = ล้มเหลว) เป็นพื้นฐานที่บทนี้ใช้ตลอดหัวข้อ 59.8 ที่ต้องเลือก exit code ให้เหมาะกับแต่ละสาเหตุความล้มเหลว (CLI arg ผิด, ไฟล์ config หาไม่พบ, ไฟล์ config รูปแบบผิด)
+- **Part 32 (Testing: Unit Tests) และ Part 33 (Testing: Integration Tests)** — หัวข้อ 59.11 ใช้ `Cli::try_parse_from(...)` เขียนเป็น `#[test]` เพื่อทดสอบ logic การ parse argument ล้วน ๆ แบบเดียวกับที่ Part 32 สอนไว้ (`assert_eq!`, `#[cfg(test)] mod tests`) และกับดักข้อ 4 (ลำดับ positional argument) อ้างอิงถึงแนวคิด integration test จาก Part 33 ที่ทดสอบ binary ทั้งตัวจากมุมมองผู้ใช้จริง
 - **Part 30 (Error Handling ขั้นสูง) และ Part 31 (thiserror, anyhow)** — เรื่อง custom error type, การแปลง error ด้วย `From`/`Into`, และรูปแบบการจัดการ error แบบมืออาชีพในโปรแกรมจริง จะถูกนำมาใช้ตอนที่เราต้องรวม error จากสามแหล่งต่างกัน (การ parse CLI arguments ของ `clap` เอง, การอ่านไฟล์ของ `std::fs`, และการ deserialize ของ `serde_json`) ให้ผู้ใช้เห็น error message ที่ชัดเจนและได้ exit code ที่ถูกต้องเสมอ
 
 ## เนื้อหา
+
+บทนี้โฟกัสที่ **Derive API** ของ `clap` ตลอดทั้งบท (ตามที่อธิบายเหตุผลไว้ในหัวข้อ 59.2) และครอบคลุมสิ่งที่ CLI application ส่วนใหญ่ในโลกจริงต้องใช้: การประกาศ argument/flag พื้นฐาน, subcommand, custom validation, environment variable fallback, และการผสานกับ `serde`/error handling จนได้โปรแกรมที่ persist ข้อมูลได้จริง ส่วนหัวข้อขั้นสูงกว่านี้ที่ `clap` รองรับได้ด้วย (เช่น shell completion script ผ่าน crate เสริม `clap_complete`, การ generate man page ผ่าน `clap_mangen`, หรือ `ArgGroup` แบบซับซ้อนที่มีมากกว่าสองตัวเลือก) จะไม่ลงรายละเอียดในบทนี้ เพราะเป็นเครื่องมือเสริมที่สร้างต่อบนความเข้าใจพื้นฐานที่บทนี้ปูไว้ — เมื่อเข้าใจ Derive API หลักแล้ว การอ่าน documentation ของส่วนขยายเหล่านั้นจะไม่ใช่เรื่องยากอีกต่อไป
 
 ### 59.1 ทำไมต้องมี crate เฉพาะสำหรับ parse CLI arguments
 
@@ -129,7 +132,40 @@ usage: manual_parse <PATTERN> [--lines] [--ignore-case]
 1. **Derive API** — ใช้ `#[derive(Parser)]` บน struct (แบบที่บทนี้จะโฟกัสทั้งบท) เขียนโค้ดน้อยที่สุด อ่านเข้าใจง่ายที่สุด เพราะโครงสร้างของ argument **คือโครงสร้างของ struct โดยตรง** เป็นวิธีที่ `clap` เอกสารทางการแนะนำให้ใช้เป็นค่าเริ่มต้นสำหรับโปรเจกต์ใหม่แทบทั้งหมด
 2. **Builder API** — เรียก method เช่น `Command::new("myapp").arg(Arg::new("pattern").required(true))` แบบ imperative (สร้าง object แล้วเรียก method ต่อกันไปเรื่อย ๆ) เหมาะกับกรณีที่ต้อง**สร้าง argument แบบ dynamic ตอน runtime** (เช่น จำนวน/ชนิดของ argument ไม่รู้ล่วงหน้าตอน compile time ขึ้นกับ config ไฟล์อื่นที่โหลดมา) ซึ่งเป็นกรณีที่พบไม่บ่อยในโปรเจกต์ทั่วไป
 
-บทนี้จะไม่ลงรายละเอียด Builder API เพราะโปรแกรม CLI ส่วนใหญ่ที่คุณจะเขียน**รู้โครงสร้าง argument ล่วงหน้าตอน compile time อยู่แล้ว** ซึ่งเป็นกรณีที่ Derive API เหมาะสมที่สุดและเป็นที่นิยมที่สุดในระบบนิเวศ (แม้แต่เครื่องมือชื่อดังอย่าง `ripgrep`, `bat`, `fd` ก็ใช้ Derive API เป็นหลัก)
+บทนี้จะไม่ลงรายละเอียด Builder API เพราะโปรแกรม CLI ส่วนใหญ่ที่คุณจะเขียน**รู้โครงสร้าง argument ล่วงหน้าตอน compile time อยู่แล้ว** ซึ่งเป็นกรณีที่ Derive API เหมาะสมที่สุดและเป็นที่นิยมที่สุดในระบบนิเวศ (แม้แต่เครื่องมือชื่อดังอย่าง `ripgrep`, `bat`, `fd` ก็ใช้ Derive API เป็นหลัก) เพื่อให้เห็นหน้าตาของ Builder API สั้น ๆ (ไม่ลงรายละเอียดต่อ) ตัวอย่างที่เทียบเท่ากับ struct `Cli { name: String, verbose: bool }` แบบ Derive API เขียนด้วย Builder API ได้ดังนี้:
+
+```rust
+use clap::{Arg, Command};
+
+fn main() {
+    let matches = Command::new("builder_demo")
+        .about("ตัวอย่าง Builder API แบบสั้น ๆ เพื่อเปรียบเทียบกับ Derive API")
+        .arg(
+            Arg::new("name")
+                .help("ชื่อที่จะทาย")
+                .required(true),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("แสดงรายละเอียดเพิ่มเติม")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .get_matches();
+
+    let name = matches.get_one::<String>("name").unwrap();
+    let verbose = matches.get_flag("verbose");
+    println!("name = {name}, verbose = {verbose}");
+}
+```
+
+```
+$ builder_demo Alice --verbose
+name = Alice, verbose = true
+```
+
+สังเกตความต่างที่ชัดเจน: Builder API ต้องเรียก `.get_one::<String>("name")` เพื่อดึงค่าออกมา ซึ่ง**ผูกชื่อ argument ด้วย string literal** (`"name"`) ที่ต้อง**ตรงกับชื่อที่ตั้งไว้ตอนสร้าง `Arg::new("name")` เป๊ะ** — ถ้าพิมพ์ผิดหรือชื่อไม่ตรงกัน compiler จะไม่ฟ้อง error เลยเพราะเป็นแค่ string ธรรมดา ปัญหาจะไปโผล่ตอน runtime เป็น `panic` จาก `.unwrap()` เท่านั้น ต่างจาก Derive API ที่ผูก argument กับ **field ของ struct โดยตรง** ทำให้พิมพ์ชื่อผิดไม่ได้เลยเพราะ compiler จะฟ้อง error ทันทีถ้า field ไม่มีอยู่จริง — นี่คือเหตุผลเชิงลึกอีกข้อที่ Derive API ได้รับความนิยมมากกว่า Builder API ในโปรเจกต์ใหม่ ๆ แทบทั้งหมด: มันย้าย error จาก runtime (string ไม่ตรงกัน) มาเป็น compile-time (field ไม่มีอยู่จริง) ตามหลักการที่ Rust ยึดถือมาตลอดหลักสูตรนี้
 
 ติดตั้งด้วยคำสั่งเดียว:
 
@@ -297,6 +333,8 @@ minigrep 0.1.0
 ```
 
 **นี่คือประเด็นที่ควรเน้นย้ำ:** ทั้ง `--help` และ `--version` **ไม่มีโอกาส out-of-sync กับโค้ด parsing จริง** เพราะมันถูก generate มาจาก**แหล่งข้อมูลเดียวกัน**เสมอ (struct definition + attribute + doc comment) ต่างจากการเขียน parser เองที่ต้องคอยอัปเดต help text ด้วยมือทุกครั้งที่แก้ argument (ปัญหาที่ 2 ในหัวข้อ 59.1)
+
+**หมายเหตุเรื่องสี:** ตัวอย่าง `--help`/error message ทั้งหมดในบทนี้แสดงเป็นข้อความล้วนไม่มีสี เพราะถูกรันผ่านการ redirect output ไปเก็บเป็นข้อความ (ซึ่งเป็นวิธีที่ใช้ตรวจสอบความถูกต้องของบทนี้ทั้งบท) แต่ในการใช้งานจริงบน terminal ที่รองรับสี `clap` (ผ่าน crate ย่อยชื่อ `anstream`/`anstyle` ที่ติดมาด้วย) จะ**ใส่สีให้ `Usage:`, ชื่อ argument, และคำว่า `error:` โดยอัตโนมัติ** เพื่อให้อ่านง่ายขึ้น โดยตรวจสอบเองว่า output ปลายทางเป็น terminal จริงหรือถูก pipe/redirect ไปที่อื่น (ถ้า pipe ไปที่อื่น จะปิดสีให้อัตโนมัติ เพื่อไม่ให้ ANSI escape code ไปปนกับข้อมูลที่โปรแกรมอื่นจะอ่านต่อ) และยังเคารพมาตรฐาน environment variable `NO_COLOR` (ถ้าตั้งไว้ จะปิดสีเสมอไม่ว่าจะเป็น terminal หรือไม่) — พฤติกรรมนี้เป็นอีกตัวอย่างของ "ส่วนที่ฟรี" ที่ `clap` จัดการให้โดยที่เราไม่ต้องคิดเรื่อง terminal detection เองเลย
 
 **รายละเอียดเพิ่มเติมที่ควรรู้: `-h` กับ `--help` ไม่ได้แสดงผลเหมือนกันเสมอ** `clap` แยกความแตกต่างระหว่าง "short help" (`-h`) กับ "long help" (`--help`) โดยอัตโนมัติจาก doc comment: **บรรทัดแรกของ doc comment** ใช้เป็น short about (แสดงใน `-h` และในรายการ subcommand) ส่วน**ทั้งหมดของ doc comment** (รวมพารากราฟถัดไปที่เว้นบรรทัดว่างคั่น) ใช้เป็น long about (แสดงใน `--help` เท่านั้น) — เราจะเห็นตัวอย่างที่ชัดเจนของพฤติกรรมนี้ในหัวข้อ 59.9 ที่ doc comment ของ `struct Cli` มี 2 พารากราฟ
 
@@ -611,6 +649,54 @@ For more information, try '--help'.
 ```
 
 สังเกตรูปแบบที่ `clap` ใช้เสมอ: `error: invalid value '<ค่าที่ผู้ใช้ใส่>' for '<ชื่อ argument>': <error message ที่ฟังก์ชัน value_parser ของเราคืนมา>` — นี่คือสิ่งที่ทำให้ **error message ของ `clap` สม่ำเสมอกันทั้งโปรแกรม** แม้ logic การ validate จะต่างกันโดยสิ้นเชิงในแต่ละ argument (เทียบกับปัญหาที่ 3 ในหัวข้อ 59.1 ที่การเขียน error message เองมักไม่สม่ำเสมอ) ผู้ใช้เห็นทันทีว่า**ค่าไหน**ที่ผิดและ**ทำไม**ผิด โดยไม่ต้องเดาว่า error นี้มาจาก argument ตัวไหน — คุณภาพระดับนี้ยากที่จะทำได้ด้วยมือแบบสม่ำเสมอทุกจุดในโปรแกรมขนาดใหญ่
+
+### 59.6.1 `conflicts_with`: บอกว่า Argument สองตัวใช้พร้อมกันไม่ได้
+
+Validation ในหัวข้อ 59.6 ตรวจสอบ**ค่าของ argument ตัวเดียว** แต่บางครั้งปัญหาคือ**ความสัมพันธ์ระหว่าง argument สองตัว** เช่น `--verbose` (แสดงรายละเอียดมากขึ้น) กับ `--quiet` (ไม่แสดงอะไรเลย) เป็นสองสิ่งที่ขัดแย้งกันเชิงความหมาย ไม่ควรใส่มาพร้อมกัน — `clap` มี attribute `conflicts_with` สำหรับประกาศความสัมพันธ์แบบนี้โดยตรง ไม่ต้องเขียน `if cli.verbose && cli.quiet { ... }` เช็คเองใน `main()`:
+
+```rust
+use clap::Parser;
+
+/// สาธิต conflicts_with: --quiet และ --verbose ใช้พร้อมกันไม่ได้
+#[derive(Parser, Debug)]
+#[command(name = "conflict_demo")]
+struct Cli {
+    /// แสดงรายละเอียดมากขึ้น
+    #[arg(short, long, conflicts_with = "quiet")]
+    verbose: bool,
+
+    /// ไม่แสดงข้อความใด ๆ เลย
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    println!("{cli:?}");
+}
+```
+
+สังเกตว่า `conflicts_with = "quiet"` อ้างอิงถึง field อีกตัวด้วย**ชื่อ field เป็น string** (`"quiet"` ต้องตรงกับชื่อ field `quiet` เป๊ะ) — นี่เป็นจุดเดียวใน Derive API ที่ยังพึ่ง string matching อยู่ (คล้ายกับ Builder API ในหัวข้อ 59.2) เพราะ `clap` ต้องอ้างอิง argument อื่นที่**ยังไม่รู้จักตอน macro expand ของ field ปัจจุบัน** แต่ต่างจาก Builder API ตรงที่ `clap_derive` **ตรวจสอบชื่อนี้ให้ตอน build `Command`** (ผ่าน `debug_assert!` แบบเดียวกับกับดักข้อ 3) ถ้าพิมพ์ผิดจะได้ panic ชัดเจนตอน debug build ทันที ไม่ใช่ silent bug
+
+ทดสอบกรณีใส่ปกติ (ใส่แค่ตัวเดียว ไม่มีปัญหา):
+
+```
+$ conflict_demo --verbose
+Cli { verbose: true, quiet: false }
+```
+
+ทดสอบกรณีใส่ทั้งสองตัวพร้อมกัน — `clap` ปฏิเสธให้เองก่อนโค้ดของเราจะได้รันด้วยซ้ำ:
+
+```
+$ conflict_demo --verbose --quiet
+error: the argument '--verbose' cannot be used with '--quiet'
+
+Usage: conflict_demo --verbose
+
+For more information, try '--help'.
+```
+
+เทียบกับการเช็คเองใน `main()` (`if cli.verbose && cli.quiet { eprintln!(...); return ExitCode::from(2); }`) ซึ่งก็ทำงานได้เหมือนกัน แต่ `conflicts_with` มีข้อดีสามอย่าง: (1) error message ที่ได้ตรงรูปแบบเดียวกับ error อื่น ๆ ของ `clap` โดยอัตโนมัติ ไม่ต้องเขียนเอง (2) ปรากฏใน `--help` แบบ metadata ภายใน ทำให้ tool อื่นที่ generate documentation จาก `clap::Command` (เช่น generate man page) รู้จักความสัมพันธ์นี้ได้ด้วย ไม่ใช่แค่ logic ที่ซ่อนอยู่ใน `main()` และ (3) ความสัมพันธ์แบบนี้ถูกตรวจสอบ**ก่อน**โค้ด `main()` ของเราจะได้รันด้วยซ้ำ ทำให้ไม่มีทางลืมเช็คในบางจุดของโปรแกรมที่ซับซ้อนขึ้น
 
 ### 59.7 Environment Variable Fallback ด้วย `#[arg(env = "...")]`
 

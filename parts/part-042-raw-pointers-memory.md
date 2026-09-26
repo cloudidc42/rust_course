@@ -18,6 +18,9 @@
   ได้ทั้งในเชิง layout จริงที่วัดได้ด้วย `size_of`/`align_of` และเชิง "ทำไมถึงมีสี่แบบนี้" ในบริบทใช้งานจริง
 - คำนวณและอธิบายเรื่อง **alignment** และ **padding** ได้ พร้อมนำเทคนิคจัดเรียง field ใหม่ไปลดขนาด struct
   ในโปรแกรมจริงได้ทันที และรู้จัก `mem::transmute` ในระดับ "รู้ว่ามันมีอยู่และอันตรายแค่ไหน" มากกว่าจะใช้บ่อย ๆ
+- ใช้เครื่องมือระดับ raw memory อื่น ๆ ที่จำเป็นสำหรับสร้าง data structure ของตัวเอง เช่น `MaybeUninit<T>`
+  (พื้นที่ที่ยังไม่ initialized), `ptr::copy`/`ptr::copy_nonoverlapping` (คัดลอกข้อมูลเป็นก้อน), และ
+  `std::alloc` (จอง/คืนหน่วยความจำเอง) ผ่านตัวอย่าง `MyVec<T>` ที่ทำงานได้จริงครบวงจร
 
 ## ความรู้ที่ต้องมีมาก่อน
 
@@ -404,6 +407,61 @@ pa == pb  (==): false
 ตอนเขียน algorithm ที่ต้องป้องกันการประมวลผลซ้ำ หรือตรวจ self-reference ในโครงสร้างข้อมูลแบบ graph) — และ
 มันคือกลไกเดียวกันเป๊ะที่ `Rc::ptr_eq()` (Part 28) ใช้ตรวจว่า `Rc<T>` สองตัวชี้ไปยัง allocation เดียวกัน
 หรือไม่ ไม่ใช่แค่มีค่าเท่ากัน
+
+#### 42.5.2 คัดลอกข้อมูลเป็นก้อน: `ptr::copy` และ `ptr::copy_nonoverlapping`
+
+นอกจากอ่าน/เขียนทีละ element ด้วย `*ptr` และเลื่อนตำแหน่งด้วย `.add()`/`.sub()` แล้ว Rust ยังมีฟังก์ชันสำหรับ
+**คัดลอกข้อมูลหลาย element พร้อมกันเป็นก้อน** ซึ่งเร็วกว่าการวน loop คัดลอกทีละตัวมาก (คอมไพเลอร์และ CPU
+optimize การคัดลอกก้อนใหญ่ได้ดีกว่าการเข้าถึงทีละไบต์เสมอ) — มีสองฟังก์ชันหลักที่ต่างกันตรงเงื่อนไข
+**overlap** ของ region ต้นทางกับปลายทาง:
+
+- **`ptr::copy_nonoverlapping(src, dst, count)`** — เร็วที่สุด แต่มี safety invariant ว่า**ต้นทางกับ
+  ปลายทางต้องไม่ overlap กันเลยแม้แต่ไบต์เดียว** (เทียบเท่า `memcpy` ใน C) ถ้า region ทั้งสองซ้อนกันจริง
+  จะเป็น undefined behavior ทันที
+- **`ptr::copy(src, dst, count)`** — ช้ากว่าเล็กน้อย (ต้องตรวจทิศทางการคัดลอกให้ถูกต้องเผื่อ overlap) แต่
+  **อนุญาตให้ region ทับซ้อนกันได้อย่างปลอดภัย** (เทียบเท่า `memmove` ใน C) — ใช้เมื่อต้องเลื่อน element
+  ไปมาภายใน array/slice เดียวกัน ซึ่งเป็นกรณีที่เกิด overlap บ่อยที่สุด
+
+```rust
+fn main() {
+    // copy_nonoverlapping: ต้นทางและปลายทางห้ามซ้อนกันเด็ดขาด (เร็วที่สุด เพราะ compiler optimize ได้เต็มที่)
+    let src = [1, 2, 3, 4, 5];
+    let mut dst = [0; 5];
+    unsafe {
+        // SAFETY: src และ dst เป็น array คนละตัว ไม่มีทาง overlap กันได้ ทั้งคู่มีความยาว 5 element เท่ากัน
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), 5);
+    }
+    println!("dst หลัง copy_nonoverlapping = {:?}", dst);
+
+    // ptr::copy: อนุญาตให้ต้นทาง/ปลายทาง overlap กันได้ (เหมือน memmove ใน C) ใช้ตอนเลื่อน element ในที่เดิม
+    let mut data = [1, 2, 3, 4, 5, 6, 7, 8];
+    unsafe {
+        let ptr = data.as_mut_ptr();
+        // เลื่อน element ตั้งแต่ index 2 ถึงท้าย ไปทางขวา 1 ตำแหน่ง (เปิดช่องว่างที่ index 2 ไว้แทรกค่าใหม่)
+        // SAFETY: ptr.add(2) และ ptr.add(3) ทั้งคู่อยู่ในขอบเขตของ allocation เดียวกัน (data มี 8 ตัว)
+        // ปลายทาง ptr.add(3) กับต้นทาง ptr.add(2) ทับซ้อนกันจริง (overlap) จึงต้องใช้ ptr::copy ไม่ใช่
+        // copy_nonoverlapping ซึ่งเป็น UB ทันทีถ้า region ทับกัน
+        std::ptr::copy(ptr.add(2), ptr.add(3), 5);
+    }
+    println!("data หลังเลื่อน element (index 2..7 -> 3..8) = {:?}", data);
+}
+```
+
+ผลลัพธ์จริง:
+
+```
+dst หลัง copy_nonoverlapping = [1, 2, 3, 4, 5]
+data หลังเลื่อน element (index 2..7 -> 3..8) = [1, 2, 3, 3, 4, 5, 6, 7]
+```
+
+สังเกตตัวอย่างที่สอง: เราเลื่อน element ตั้งแต่ index 2 ถึง 6 (ค่า `3, 4, 5, 6, 7`) ไปทางขวาหนึ่งตำแหน่ง
+กลายเป็น index 3 ถึง 7 — สังเกตว่า index 2 ของทั้งสอง (`ptr.add(2)` เป็นต้นทาง, `ptr.add(3)` เป็นปลายทาง)
+**ทับซ้อนกันตั้งแต่ index 3 ถึง 6** เพราะทั้งคู่เข้าถึง 5 element ต่อเนื่องกันแต่เหลื่อมกันแค่ 1 ตำแหน่ง — นี่
+คือสถานการณ์ที่ `copy_nonoverlapping` ห้ามใช้เด็ดขาด (safety invariant ของมันระบุไว้ตรง ๆ) ต้องใช้ `ptr::copy`
+เท่านั้น ซึ่งภายในมันจะเลือกทิศทางการคัดลอก (จากซ้ายไปขวา หรือขวาไปซ้าย) ให้เหมาะกับทิศทางของการ overlap
+โดยอัตโนมัติ ไม่ให้ข้อมูลเขียนทับตัวเองก่อนอ่านเสร็จ — เทคนิคนี้คือสิ่งที่จำเป็นสำหรับแบบฝึกหัดที่ 3 ท้ายบท
+(การ implement `insert()` ให้ `MyVec<T>`) เพราะการแทรก element เข้าไปกลาง buffer ต้องเลื่อน element ที่
+เหลือทั้งหมดไปทางขวาก่อนเสมอ ซึ่งเป็นกรณี overlap แบบตรงเป๊ะที่ `ptr::copy` ถูกออกแบบมาให้ทำ
 
 ### 42.6 Null Pointer: `ptr::null()`, `ptr::null_mut()`, และ `.is_null()`
 
@@ -1337,9 +1395,9 @@ impl<T> Drop for MyVec<T> {
 
 fn main() {
     let mut v: MyVec<String> = MyVec::new();
-    v.push("หนึ่ง".to_string());
-    v.push("สอง".to_string());
-    v.push("สาม".to_string());
+    v.push("one".to_string());
+    v.push("two".to_string());
+    v.push("three".to_string());
     println!("len หลัง push 3 ตัว = {}", v.len());
 
     for i in 0..v.len() {
@@ -1368,10 +1426,10 @@ fn main() {
 
 ```
 len หลัง push 3 ตัว = 3
-v[0] = Some("หนึ่ง")
-v[1] = Some("สอง")
-v[2] = Some("สาม")
-pop() ได้ = Some("สาม"), len เหลือ = 2
+v[0] = Some("one")
+v[1] = Some("two")
+v[2] = Some("three")
+pop() ได้ = Some("three"), len เหลือ = 2
 nums.len() = 10
 0 1 2 3 4 5 6 7 8 9
 ```
@@ -1440,6 +1498,13 @@ fuzzing, และการรัน Miri ตรวจ UB อย่างสม�
 | ทำ binary parsing/serialization ที่ต้องคุม layout เป๊ะ | `#[repr(C)]` หรือ `#[repr(packed)]` (ถ้าจำเป็นจริง) ร่วมกับ raw pointer |
 | ต้องการ optimize ขนาด struct | จัดเรียง field ใหม่ (หัวข้อ 42.10) — **ไม่ต้องใช้ raw pointer เลย** |
 | แปลงตัวเลข/bit pattern ระหว่าง type | `as`, `to_ne_bytes`/`from_ne_bytes`, `to_bits`/`from_bits` — **หลีกเลี่ยง `transmute`** |
+| เลื่อน/คัดลอก element หลายตัวพร้อมกันในโครงสร้างข้อมูลของตัวเอง | `ptr::copy`/`copy_nonoverlapping` (หัวข้อ 42.5.2) แทนการวน loop ทีละตัว |
+
+ตารางนี้สรุปเส้นแบ่งที่ควรยึดถือเป็นหลักการทำงานประจำวัน: **raw pointer ไม่ใช่ "ของต้องห้าม" แต่ก็ไม่ใช่
+"ตัวเลือกแรก" เช่นกัน** — มันคือเครื่องมือเฉพาะทางสำหรับสถานการณ์ที่ borrow checker หรือ type system ระดับสูง
+ของ Rust ยังไม่มีวิธี safe ให้ใช้ตรง ๆ เท่านั้น ทุกครั้งที่ต้องเลือกระหว่าง raw pointer กับวิธี safe อื่น ๆ
+ควรเลือกวิธี safe ก่อนเสมอ แล้วถอยไปใช้ raw pointer ก็ต่อเมื่อพิสูจน์ได้ว่าไม่มีทางเลือกอื่นที่ทำสิ่งเดียวกัน
+ได้จริง
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
@@ -1646,6 +1711,11 @@ fn get_value_dangerous(ptr: *const i32) -> i32 {
 มากกว่าการพึ่งพา compiler เพียงอย่างเดียว — ต่างจากโค้ด Rust ทั่วไปที่ compiler รับหน้าที่ตรวจให้เกือบทั้งหมด
 
 ## แบบฝึกหัด (Exercises)
+
+แบบฝึกหัดทั้งสี่ข้อนี้ไล่ระดับจาก pointer arithmetic พื้นฐานไปจนถึงการออกแบบโครงสร้างข้อมูลแบบเต็มรูปแบบ
+ด้วยตัวเอง แนะนำให้ทดสอบทุกข้อด้วย `rustc --edition 2021` จริง (หรือ `cargo run`) และลองรันด้วย
+`cargo +nightly miri run` เพิ่มเติมถ้ามี toolchain nightly ติดตั้งอยู่ เพื่อตรวจสอบว่า `unsafe` block ที่
+เขียนไม่ละเมิดกฎ aliasing แบบที่กับดักที่ 3 อธิบายไว้
 
 1. **(ง่าย)** เขียนฟังก์ชัน `fn swap_via_raw_ptr<T: Copy>(a: *mut T, b: *mut T)` ที่สลับค่าของสองตำแหน่ง
    ในหน่วยความจำโดยใช้ raw pointer และ `unsafe { *a }`/`unsafe { *b }` ล้วน ๆ (ไม่ใช้ `std::mem::swap`)

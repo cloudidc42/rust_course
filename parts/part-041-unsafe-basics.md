@@ -467,6 +467,9 @@ error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immuta
   |                    -- immutable borrow later used here
 ```
 
+(compiler อาจแสดง warning `unused_unsafe` ควบคู่มาด้วย เนื่องจากในตัวอย่างนี้ไม่มีปฏิบัติการทั้งห้าตามหัวข้อ 41.4
+อยู่ในบล็อกเลยจริง ๆ — เป็นคนละประเด็นกับ error หลักที่เราสนใจอยู่ ไม่ต้องสนใจ warning นั้นในตัวอย่างนี้)
+
 สังเกตว่า error code (`E0502`) และข้อความ error **เหมือนกันเป๊ะ ๆ** กับที่จะเกิดถ้าเราลบ `unsafe { }` ทิ้งไป
 เพราะ **`v.push(4)` ไม่ใช่หนึ่งในห้าปฏิบัติการที่ `unsafe` ปลดล็อกเลย** มันเป็นแค่การเรียก method ธรรมดาบน `Vec<T>`
 — borrow checker วิเคราะห์โค้ดทั้ง block รวมถึงโค้ดที่อยู่ข้างใน `unsafe { }` เหมือนกับโค้ดข้างนอกทุกประการ ไม่มี
@@ -499,6 +502,9 @@ error[E0382]: borrow of moved value: `s`
 7 |         println!("{s}");     // ❌ ใช้ s หลังจากถูก move ไปแล้ว
   |                   ^ value borrowed here after move
 ```
+
+(เช่นเดียวกับตัวอย่างก่อนหน้า compiler อาจแสดง warning `unused_unsafe` เพิ่มเติมมาด้วย เพราะบล็อกนี้ไม่มีปฏิบัติการ
+ทั้งห้าของหัวข้อ 41.4 อยู่จริง — ไม่ใช่ประเด็นที่เราสนใจในตัวอย่างนี้)
 
 เหมือนกับตัวอย่างก่อนหน้า: **`let s2 = s;` ไม่ใช่หนึ่งในห้าปฏิบัติการของ `unsafe`** มันเป็นแค่ assignment ธรรมดา
 ที่ trigger move semantics เหมือนที่เรียนมาตั้งแต่ Part 6 — `unsafe` ไม่ได้ทำให้ `String` กลายเป็น `Copy` type
@@ -890,16 +896,23 @@ fn main() {
 
 ```
 error[E0499]: cannot borrow `*slice` as mutable more than once at a time
- --> src/main.rs:2:29
+ --> src/main.rs:2:30
   |
 1 | fn split_at_mut_attempt<T>(slice: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
-  |                              - let's call the lifetime of this reference `'1`
+  |                                   - let's call the lifetime of this reference `'1`
 2 |     (&mut slice[..mid], &mut slice[mid..])
-  |      -----------------        ^^^^^^^^^^ second mutable borrow occurs here
-  |      |
-  |      first mutable borrow occurs here
+  |     -------------------------^^^^^--------
+  |     |     |                  |
+  |     |     |                  second mutable borrow occurs here
+  |     |     first mutable borrow occurs here
+  |     returning this value requires that `*slice` is borrowed for `'1`
   |
+  = help: use `.split_at_mut(position)` to obtain two mutable non-overlapping sub-slices
 ```
+
+สังเกตบรรทัด `= help:` ที่ compiler แนะนำมาด้วยตรง ๆ — **compiler รู้จักปัญหานี้ดีจนแนะนำให้ใช้ `split_at_mut`
+ที่มีอยู่แล้วใน standard library ทันที** นี่คือหลักฐานที่ชัดเจนที่สุดว่ารูปแบบนี้พบบ่อยและสำคัญพอที่ทีมพัฒนา
+compiler เองจะเขียนข้อความช่วยเหลือเฉพาะสำหรับมันไว้เลย
 
 ตรงตามที่หัวข้อ 41.3 อธิบายไว้ทุกประการ: **borrow checker มองเห็นแค่ว่า `&mut slice[..mid]` และ `&mut
 slice[mid..]` เป็นการยืม `slice` แบบ mutable สองครั้งพร้อมกัน** ซึ่งตรงกับ**รูปแบบ**ที่กฎเหล็กข้อที่ 1 ของ
@@ -1047,7 +1060,7 @@ fn main() {
 ผลลัพธ์:
 
 ```
-ราคาสินค้าหลังปรับภาษี: [110.00000000000001, 220.00000000000003, 330.0, 440.00000000000006, 550.0000000000001, 660.0000000000001]
+ราคาสินค้าหลังปรับภาษี: [110.00000000000001, 220.00000000000003, 330.0, 440.00000000000006, 550.0, 660.0]
 ```
 
 (ตัวเลขทศนิยมท้ายบรรทัดที่ดูไม่กลมพอดี เช่น `110.00000000000001` เป็นเรื่องปกติของ floating-point arithmetic
@@ -1160,10 +1173,10 @@ fn main() {
 warning: unnecessary `unsafe` block
  --> src/main.rs:3:5
   |
-2 | fn redundant_unsafe_example() -> i32 {
-  |                                  ------ because it's not inside an `unsafe fn`
 3 |     unsafe {
   |     ^^^^^^ unnecessary `unsafe` block
+  |
+  = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
 ```
 
 lint นี้มีประโยชน์จริงในทางปฏิบัติ: มันมักจะเตือนคุณเมื่อมีการ **refactor โค้ดออกจนส่วนที่ต้อง `unsafe` จริง ๆ
@@ -1250,14 +1263,17 @@ case ของคุณครอบคลุม path ที่มีปัญห
 ```rust
 fn main() {
     let mut v = vec![1, 2, 3];
-    let r = &v[0];
-    v.push(4); // ยังคง error เหมือนเดิม แม้จะพยายามครอบด้วย unsafe
-    println!("{r}");
+    unsafe {
+        let r = &v[0];
+        v.push(4); // ยังคง error เหมือนเดิม แม้จะพยายามครอบด้วย unsafe
+        println!("{r}");
+    }
 }
 ```
 
 การครอบทั้ง `main()` ด้วย `unsafe { }` **ไม่ช่วยอะไรเลย** เพราะ `v.push(4)` ไม่ใช่หนึ่งในห้าปฏิบัติการที่ `unsafe`
-ปลดล็อก (ตามหัวข้อ 41.4) — วิธีแก้ที่ถูกต้องคือแก้ตามหลักการของ Part 7 ตามปกติ (จำกัด scope ของ `r` ให้จบก่อน
+ปลดล็อก (ตามหัวข้อ 41.4) — โค้ดนี้ยัง compile ไม่ผ่านด้วย error `E0502` เดียวกับที่ไม่มี `unsafe` เลยทุกประการ (ตาม
+ที่พิสูจน์ไว้แล้วในหัวข้อ 41.5) วิธีแก้ที่ถูกต้องคือแก้ตามหลักการของ Part 7 ตามปกติ (จำกัด scope ของ `r` ให้จบก่อน
 `push`) ไม่ใช่การเติม `unsafe`
 
 ### 2. เขียน `unsafe fn` เป็น public API โดยไม่มี `# Safety` Doc

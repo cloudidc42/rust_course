@@ -318,6 +318,20 @@ pub enum Fields {
 2. ถ้า parse **สำเร็จ** — คืนค่า `DeriveInput` ออกมาให้ใช้งานต่อได้ทันที
 3. ถ้า parse **ล้มเหลว** (เช่น input ไม่ใช่ syntax ของ Rust ที่ถูกต้องเลย ซึ่งไม่ควรเกิดขึ้นเพราะ compiler การันตีว่า input เป็นโค้ด Rust ที่ผ่านการ parse ระดับ syntax มาแล้วในระดับหนึ่ง แต่ก็ป้องกันไว้เผื่อกรณีสุดโต่ง) — **มันจะ `return` ออกจากฟังก์ชันทันทีพร้อมสร้าง compile error ที่ถูกต้องให้เอง** (ใช้เทคนิคเดียวกับ `syn::Error::to_compile_error()` ที่เราจะเห็นในหัวข้อ 44.9) นี่คือเหตุผลที่ macro ตัวนี้ต้องเป็น "statement-like macro" ที่เรียกแบบ `let x = parse_macro_input!(input as DeriveInput);` ไม่ใช่ฟังก์ชันธรรมดา เพราะมันต้อง `return` ออกจากฟังก์ชันที่เรียกมันได้โดยตรง (ซึ่งเป็นสิ่งที่ฟังก์ชันธรรมดาทำแทนกันไม่ได้ — ต้องใช้ macro เพื่อ "แทรก" `return` เข้าไปในจุดที่เรียก)
 
+**นี่คือตัวอย่างที่ดีที่เชื่อมกับ Part 36 อีกครั้ง:** จำได้ไหมว่า Part 36 อธิบายไว้ว่า macro ทำงานโดย "ขยาย" (expand) เป็นโค้ดชิ้นใหม่ก่อนที่ type checker จะเริ่มทำงาน — `parse_macro_input!(input as DeriveInput)` ก็ทำงานแบบเดียวกันเป๊ะ มันคือ `macro_rules!` macro (นิยามอยู่ใน crate `syn`) ที่ขยายออกมาเป็นโค้ดประมาณนี้ (แบบง่ายเพื่อความเข้าใจ ไม่ใช่ token-for-token จริง):
+
+```rust
+// รูปแบบคร่าว ๆ ของสิ่งที่ parse_macro_input!(input as DeriveInput) ขยายออกมา
+let input: DeriveInput = match syn::parse::<DeriveInput>(input) {
+    Ok(data) => data,
+    Err(err) => {
+        return proc_macro::TokenStream::from(err.to_compile_error());
+    }
+};
+```
+
+สังเกตว่า `return` ตรงนี้อยู่**ภายในโค้ดที่ macro ขยายออกมา** — พอมันถูก "แทรก" เข้าไปในเนื้อของฟังก์ชัน `derive_describe` (หรือฟังก์ชัน entry point ใดก็ตามที่เรียก `parse_macro_input!`) `return` นั้นก็เท่ากับ `return` ของฟังก์ชันนั้นเองไปโดยอัตโนมัติ — นี่คือกลไกเดียวกับที่ `macro_rules!` ใช้ตอน expand เป็น statement/expression ธรรมดาเข้าไปแทนที่จุดเรียก (Part 36 หัวข้อ 36.3-36.4) เพียงแต่ครั้งนี้สิ่งที่ macro นิยามใน `syn` เอาไปแทนที่คือ**control flow** (`return`) ไม่ใช่แค่ค่าธรรมดา ซึ่งเป็นสิ่งที่ฟังก์ชันปกติ (ที่ต้องรับ/คืนค่าตาม signature ตายตัว) ทำไม่ได้เลยตามหลักการที่ Part 36 อธิบายไว้ในหัวข้อ 36.1
+
 ฝั่ง `quote!{}` ก็มีกลไกที่คล้ายกับ repetition ของ `macro_rules!` (Part 36 หัวข้อ 36.7) มาก — แทนที่จะใช้ `$(...)* ` มันใช้ `#(...)* ` แทน:
 
 ```rust
@@ -384,6 +398,20 @@ ty2 ไม่ใช่ Option
 
 สังเกตกลไกที่เกิดขึ้น: `syn::Type` เป็น `enum` ที่มีหลาย variant (`Type::Path`, `Type::Reference`, `Type::Tuple`, `Type::Array`, ...) — `Type::Path` เก็บ `path.segments` เป็นลำดับของชื่อ (เหมือน `Option`, หรือ `std`/`collections`/`HashMap` ถ้าเขียนแบบเต็ม) แต่ละ segment มี `.arguments` ที่เก็บ generic argument (`PathArguments::AngleBracketed` สำหรับ `<...>`) — เราไล่ pattern match ลงไปทีละชั้นด้วย `if let` ธรรมดา (Part 10) จนดึง type ข้างในออกมาได้ **นี่คือสิ่งที่ `$ty:ty` ของ `macro_rules!` ทำไม่ได้เลยในหลักการ** เพราะ fragment specifier แค่ "จับคู่และเก็บ" ทั้งก้อนไว้ ไม่มีทาง pattern-match ลงไปในโครงสร้างภายในของสิ่งที่จับคู่ได้แล้ว ในขณะที่ `syn::Type` เป็น AST ที่มีโครงสร้างสมบูรณ์ให้ `match`/`if let` ได้เหมือน enum ปกติทุกประการ (ความสามารถนี้จะถูกนำไปใช้จริงในการ generate โค้ดแบบ "ข้าม field ที่เป็น `Option`" ใน Part 45)
 
+**ตาราง type สำคัญของ `syn` ที่ควรรู้จักไว้ก่อนไปเขียนโค้ดจริง** (นอกเหนือจาก `DeriveInput`/`Data`/`Fields` ที่เห็นไปแล้ว):
+
+| Type ของ `syn` | ใช้ parse อะไร | ต้องเปิด feature `"full"` ไหม |
+|---|---|---|
+| `DeriveInput` | struct/enum/union ทั้งก้อน (input ของ derive macro) | ไม่ต้อง (อยู่ใน feature `derive` ที่เป็น default) |
+| `Ident` | identifier เดี่ยว ๆ (ชื่อตัวแปร/type/ฟังก์ชัน) | ไม่ต้อง |
+| `Type` | type annotation (เช่น `Option<String>`, `Vec<u8>`) | ไม่ต้อง |
+| `ItemFn` | นิยามฟังก์ชันทั้งก้อน (`fn foo() { ... }`) — ใช้ใน attribute macro | **ต้องเปิด** |
+| `ItemImpl` | `impl` block ทั้งก้อน | **ต้องเปิด** |
+| `Expr` | expression (เทียบเท่า `$x:expr` ของ `macro_rules!` แต่เป็น AST เต็มรูปแบบ) | **ต้องเปิด** |
+| `Attribute` | attribute ที่ติดอยู่บน item/field (เช่น `#[serde(default)]`) — ใช้ทำ custom attribute ใน Part 45 | ไม่ต้อง |
+
+ทุก type ในตารางนี้มี `.span()` (ตำแหน่งในซอร์สโค้ดต้นฉบับ) ให้เรียกได้เสมอ ซึ่งเป็นสิ่งที่ `syn::Error::new_spanned()` ใช้เพื่อชี้ error ไปยังตำแหน่งที่ถูกต้อง (ตามที่จะเห็นในหัวข้อ 44.9)
+
 **หมายเหตุเชื่อมกับ Part 36 เรื่อง hygiene:** Part 36 พิสูจน์ให้เห็นว่า `macro_rules!` เป็น **hygienic** — ตัวแปรที่ macro ประกาศขึ้นมาเองจะไม่ชนกับตัวแปรของผู้เรียกใช้ แม้ชื่อจะซ้ำกันก็ตาม เพราะ compiler ติดตาม "ที่มา" (site) ของแต่ละ identifier แยกกันโดยอัตโนมัติ proc macro ที่ generate โค้ดผ่าน `quote!{}` **ไม่ได้รับ hygiene ระดับเดียวกันแบบอัตโนมัติ** — ค่าเริ่มต้นของ `quote!` ใช้ `Span::call_site()` สำหรับ identifier ที่มัน generate ขึ้น ซึ่งหมายความว่า identifier เหล่านั้นจะ**ผูกกับ scope ของจุดที่ macro ถูกเรียกใช้** (call site) ไม่ใช่ผูกกับ "โลกของตัว macro เอง" แบบ def-site hygiene ของ `macro_rules!` ในทางปฏิบัติ นี่มักไม่เป็นปัญหาสำหรับ derive macro ที่ generate `impl` block ใหม่ทั้งก้อน (เพราะ body ของ method ที่ generate เป็น scope ใหม่ของตัวเองอยู่แล้ว ไม่ทับซ้อนกับโค้ดของผู้ใช้) แต่เป็นสิ่งที่ต้องระมัดระวังมากขึ้นถ้าคุณเขียน **attribute macro ที่ต้องผสมโค้ดที่ generate เข้ากับ body เดิมของผู้ใช้โดยตรง** (แบบที่ `#[log_call]` ในหัวข้อ 44.2 ทำ) — เป็นอีกเหตุผลที่ตอกย้ำว่า attribute macro ซับซ้อนกว่า derive macro จริง ๆ ไม่ใช่แค่เรื่อง signature
 
 ### 44.6 ตัวอย่างเต็มรูปแบบ: เขียน `#[derive(Describe)]` ตั้งแต่ต้นจนจบ
@@ -406,6 +434,26 @@ proc_macro_demo/                  <-- Cargo workspace
 ```
 
 **สังเกตว่าเราต้องมี 2 crate แยกกันเสมอ** — `describe_derive` (ที่นิยามตัว macro) และ `describe_consumer` (ที่นำ macro มาใช้กับ struct ของตัวเอง) นี่ไม่ใช่ทางเลือก แต่เป็นผลจากกฎในหัวข้อ 44.3: `describe_derive` ต้องคอมไพล์เสร็จสมบูรณ์ก่อนที่ `describe_consumer` จะเริ่ม derive ได้ — ต่อให้ทั้งสองอยู่ใน workspace เดียวกัน `cargo` ก็จะจัดลำดับ build ให้ `describe_derive` compile ก่อนโดยอัตโนมัติ (เพราะมันเห็นความสัมพันธ์ dependency ใน `Cargo.toml` ของ `describe_consumer`)
+
+**`Cargo.toml` ที่ root ของ workspace (เชื่อมกับ Part 17 เรื่อง Cargo workspace):**
+
+```toml
+[workspace]
+resolver = "2"
+members = [
+    "describe_derive",
+    "describe_consumer",
+]
+```
+
+สร้างโครงสร้างทั้งหมดและรันได้จริงด้วยลำดับคำสั่งนี้ (จากโฟลเดอร์ที่มี `Cargo.toml` ของ workspace):
+
+```bash
+cargo new --lib describe_derive     # สร้าง proc-macro crate (ยังต้องแก้ Cargo.toml เพิ่ม proc-macro = true เอง)
+cargo new describe_consumer         # สร้าง binary crate ธรรมดา
+cargo build --workspace             # describe_derive compile ก่อนเสมอ ตามลำดับ dependency
+cargo run -p describe_consumer      # รัน consumer เพื่อดูผลลัพธ์จริง
+```
 
 **ขั้นที่ 1: `describe_derive/Cargo.toml`**
 
@@ -712,6 +760,67 @@ fn main() {
 
 นี่คือตัวอย่างที่ง่ายที่สุดเท่าที่จะเป็นไปได้ของ function-like proc macro โดยเจตนา เพื่อให้เห็น**ความต่างของ entry point** เมื่อเทียบกับ derive macro อย่างชัดเจน: ไม่มีขั้นตอน parse `DeriveInput`, ไม่มีการดึง field, ไม่ต้อง `syn` เลยก็ยังทำงานได้ — ในสถานการณ์จริงที่ input ของ function-like macro ซับซ้อนกว่านี้ (เช่น `sqlx::query!("SELECT ...")` ที่ต้อง parse SQL string) คุณก็จะดึง `syn`/`quote` เข้ามาช่วยแบบเดียวกับ derive macro
 
+**ขยายตัวอย่างให้ "รับ input จริง"** ทีนี้มาดูว่าจะเกิดอะไรขึ้นถ้า `make_answer!` ต้อง**อ่าน**สิ่งที่ผู้ใช้ส่งเข้ามาจริง ๆ (ไม่ใช่ทิ้งไปเฉย ๆ แบบ `_input`) — สมมติเราต้องการให้ `make_answer!(100)` generate `fn answer() -> u32 { 100 }` (กำหนดค่าเองได้) แต่ `make_answer!()` (ไม่ใส่อะไรเลย) ยังใช้ค่า default `42` ได้เหมือนเดิม:
+
+```rust
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, LitInt};
+
+/// function-like proc macro — เรียกใช้แบบ make_answer!() หรือ make_answer!(100)
+/// ต่างจากเวอร์ชันแรกที่ทิ้ง input ไปเฉย ๆ ตอนนี้เราลอง "parse" input จริง ๆ
+/// ถ้าไม่ใส่ argument เลย ใช้ค่า default 42
+#[proc_macro]
+pub fn make_answer(input: TokenStream) -> TokenStream {
+    // input อาจว่างเปล่า (ไม่มี token เลย) หรือมี literal ตัวเลขหนึ่งตัว
+    let value: u32 = if input.is_empty() {
+        42
+    } else {
+        let lit = parse_macro_input!(input as LitInt);
+        match lit.base10_parse::<u32>() {
+            Ok(v) => v,
+            Err(_) => {
+                return syn::Error::new_spanned(
+                    &lit,
+                    "make_answer! ต้องการเลขจำนวนเต็มที่ไม่ติดลบ",
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    };
+
+    quote! {
+        fn answer() -> u32 {
+            #value
+        }
+    }
+    .into()
+}
+```
+
+ทดสอบทั้งสองรูปแบบการเรียก (ตรวจสอบแล้วว่าคอมไพล์และรันผ่านจริงทั้งคู่):
+
+```rust
+// เวอร์ชัน 1: ไม่ใส่ argument
+use answer_macro::make_answer;
+make_answer!();
+fn main() {
+    println!("คำตอบคือ: {}", answer());   // คำตอบคือ: 42
+}
+```
+
+```rust
+// เวอร์ชัน 2: ใส่ argument
+use answer_macro::make_answer;
+make_answer!(100);
+fn main() {
+    println!("คำตอบคือ: {}", answer());   // คำตอบคือ: 100
+}
+```
+
+จุดที่น่าสนใจที่สุดในตัวอย่างนี้คือ **`input.is_empty()`** — เพราะ input ของ function-like macro **ไม่ถูกบังคับให้มีรูปแบบตายตัว**แบบ derive macro (ที่ input ต้อง parse เป็น `DeriveInput` ได้เสมอเพราะมันคือ item จริงที่ compiler parse มาระดับหนึ่งแล้ว) ตัว macro เองต้องเป็นผู้กำหนดเองทั้งหมดว่า "input ที่รับได้มีกี่รูปแบบ" — ในที่นี้เราออกแบบให้รับได้ 2 รูปแบบ (ว่างเปล่า หรือมี literal ตัวเลขหนึ่งตัว) และเขียน logic แยกเองด้วยมือ ต่างจาก derive/attribute macro ที่ compiler garantee โครงสร้างของ input ให้ในระดับหนึ่งอยู่แล้ว (เพราะมันผูกกับไวยากรณ์ item ที่ตายตัวของภาษา) — เสรีภาพนี้คือทั้งข้อดี (ออกแบบ syntax ของ macro ได้เองอย่างอิสระ อย่างที่ `sqlx::query!`/`html!` ทำ) และข้อเสีย (ต้องเขียน validation/error handling ของ "รูปแบบ input ที่รับได้" เองทั้งหมด ไม่มี type system มาช่วยการันตีล่วงหน้า)
+
 ### 44.8 Debugging Proc Macros: `cargo expand` และ `eprintln!`
 
 Debug proc macro **ยากกว่า** debug โค้ดปกติมาก และยากกว่าแม้แต่ debug `macro_rules!` (ที่ Part 36 ก็บอกไว้แล้วว่ายากกว่าฟังก์ชันธรรมดา) เหตุผลคือ:
@@ -723,18 +832,22 @@ Debug proc macro **ยากกว่า** debug โค้ดปกติมา�
 ```rust
 #[proc_macro_derive(Describe)]
 pub fn derive_describe(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let struct_name = &input.ident;
-
     // เทคนิค debug แบบหยาบ: eprintln! จะโชว์ตอน cargo build (ไม่ใช่ตอนโปรแกรมรัน)
-    eprintln!("[describe_derive] กำลัง derive struct ชื่อ: {}", struct_name);
+    eprintln!("[describe_derive] กำลัง derive struct ชื่อ: {}", input.to_string());
 
-    // ... โค้ดที่เหลือเหมือนเดิม
-    # unimplemented!()
+    let input = parse_macro_input!(input as DeriveInput);
+    expand_describe(input).into()
 }
 ```
 
-เมื่อรัน `cargo build -p describe_consumer` คุณจะเห็นบรรทัด `[describe_derive] กำลัง derive struct ชื่อ: Customer` และ `[describe_derive] กำลัง derive struct ชื่อ: Product` ปรากฏบน terminal **ระหว่าง**กระบวนการ compile (ก่อนที่จะมี "Finished" หรือ error ใด ๆ) — นี่คือวิธี debug ที่หยาบมาก (ไม่มี breakpoint, ไม่มี step-through แบบ debugger จริง) แต่เป็นสิ่งที่นักพัฒนา proc macro ใช้กันจริงในทางปฏิบัติ เพราะการต่อ debugger เข้ากับกระบวนการ `rustc` เองที่กำลังรัน `describe_derive` เป็น plugin นั้นยุ่งยากกว่ามากในสถานการณ์ทั่วไป
+รันคำสั่ง `cargo build -p describe_consumer` (หลังลบ target เดิมทิ้งก่อน เพื่อบังคับให้ compile ใหม่ทั้งหมด ไม่งั้น cargo จะ cache ผลลัพธ์เดิมไว้แล้วไม่รัน macro ซ้ำ) ผลลัพธ์จริงที่ปรากฏบน terminal (ตรวจสอบแล้ว):
+
+```
+[describe_derive] กำลัง derive struct ชื่อ: struct Customer { name: String, age: u32, email: String, }
+[describe_derive] กำลัง derive struct ชื่อ: struct Product { sku: String, price: f64, }
+```
+
+สังเกตว่าบรรทัดเหล่านี้ปรากฏขึ้น**ระหว่าง**กระบวนการ compile (ก่อนที่จะมี "Finished" หรือ error ใด ๆ) และแสดง `input.to_string()` แบบดิบที่สุด (คือ `TokenStream` ก่อน parse เป็น `DeriveInput` เสียอีก — เห็นเป็นข้อความยาวก้อนเดียวไม่มีการจัดรูปแบบสวยงาม) เพราะเราจงใจ `eprintln!` **ก่อน** เรียก `parse_macro_input!` เพื่อพิสูจน์ว่านี่คือ token ดิบจริง ๆ ตามที่อธิบายไว้ในหัวข้อ 44.4 — นี่คือวิธี debug ที่หยาบมาก (ไม่มี breakpoint, ไม่มี step-through แบบ debugger จริง) แต่เป็นสิ่งที่นักพัฒนา proc macro ใช้กันจริงในทางปฏิบัติ เพราะการต่อ debugger เข้ากับกระบวนการ `rustc` เองที่กำลังรัน `describe_derive` เป็น plugin นั้นยุ่งยากกว่ามากในสถานการณ์ทั่วไป
 
 **เครื่องมือที่สำคัญกว่า: `cargo expand`** จาก Part 36 คุณได้รู้จัก `cargo expand` มาแล้วในบริบทของ `macro_rules!` (ติดตั้งด้วย `cargo install cargo-expand` แยกจาก cargo default) มันมีประโยชน์มากกว่ากับ proc macro ด้วยซ้ำ เพราะโค้ดที่ proc macro generate ออกมา**อยู่ห่างจากซอร์สโค้ดที่คุณเห็นมากกว่า** `macro_rules!` มาก (ไม่มี template ให้เดารูปร่างคร่าว ๆ ได้เหมือน `macro_rules!` — โค้ดที่ generate มาจาก logic โปรแกรมมิ่งเต็มรูปแบบ) รันคำสั่ง:
 
@@ -1163,18 +1276,58 @@ For more information about this error, try `rustc --explain E0432`.
 
 **สาเหตุ:** `syn` ออกแบบให้ประหยัดเวลา compile โดย default เปิดใช้แค่ชุดไวยากรณ์บางส่วน (พอสำหรับ derive macro ทำงานกับ struct/enum ธรรมดาส่วนใหญ่ได้ — สังเกตว่าตัวอย่าง `Describe`/`Validated` ในบทเรียนใช้ `DeriveInput` ได้แม้ไม่เปิด `"full"` ก็ตาม เพราะ `DeriveInput`/`Data`/`Fields` อยู่ในฟีเจอร์ `derive` ที่เป็น default) แต่ type สำหรับ item ระดับอื่น ๆ ที่ครอบคลุมทั้งภาษา เช่น `syn::ItemFn` (ฟังก์ชัน), `syn::ItemImpl` (impl block), `syn::ItemMod` (module) ถูกกันไว้หลัง feature flag `"full"` เพราะมันดึงเข้ามาซึ่ง parser ของไวยากรณ์ Rust แบบเต็มทั้งภาษา (compile ช้ากว่า) **วิธีแก้:** เปิด `features = ["full"]` เสมอเมื่อ macro ของคุณต้อง parse item ที่ไม่ใช่แค่ struct/enum ธรรมดา (โดยเฉพาะ **attribute macro ที่ทำงานกับฟังก์ชัน** อย่าง `#[log_call]` ในหัวข้อ 44.2 ซึ่งต้องใช้ `syn::ItemFn` เสมอ)
 
+---
+
+**7. ลืมว่าฟังก์ชัน entry point ต้อง `pub` และต้องอยู่ที่ root ของ crate เท่านั้น**
+
+```rust
+// ลืม pub
+use proc_macro::TokenStream;
+use syn::{parse_macro_input, DeriveInput};
+
+#[proc_macro_derive(Describe)]
+fn derive_describe(input: TokenStream) -> TokenStream {   // <-- ไม่มี pub
+    let input = parse_macro_input!(input as DeriveInput);
+    // ...
+    # unimplemented!()
+}
+```
+
+Error จริง (ตรวจสอบแล้ว):
+
+```
+error: functions tagged with `#[proc_macro_derive]` must be `pub`
+ --> src/lib.rs:5:1
+  |
+5 | fn derive_describe(input: TokenStream) -> TokenStream {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+และถ้าลองย้ายฟังก์ชันเดียวกัน (ที่ `pub` ถูกต้องแล้ว) เข้าไปอยู่ใน submodule (`mod inner { ... }`) แทนที่จะอยู่ที่ root ของไฟล์ `lib.rs` ตรง ๆ — จะได้ error อีกแบบ (ตรวจสอบแล้ว):
+
+```
+error: functions tagged with `#[proc_macro_derive]` must currently reside in the root of the crate
+ --> src/lib.rs:9:5
+  |
+9 |     pub fn derive_describe(input: TokenStream) -> TokenStream {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+```
+
+**สาเหตุ:** proc macro entry point ไม่ใช่ item ธรรมดาที่ปฏิบัติตามกฎ visibility/module system แบบเต็มรูปแบบของ Part 16 — compiler ต้อง**มองเห็นและเรียกใช้มันได้แน่นอนในตำแหน่งที่คาดเดาได้** (ที่ root ของ crate เท่านั้น ไม่ซ่อนอยู่ใน `mod` ใด ๆ) เพราะกลไกการโหลด proc macro เป็น compiler plugin (ตามหัวข้อ 44.3) ทำงานอีกชั้นหนึ่งที่อยู่นอกเหนือกฎ `pub`/`mod` ปกติทั้งหมด **วิธีแก้:** เขียนฟังก์ชันที่มี `#[proc_macro_derive]`/`#[proc_macro_attribute]`/`#[proc_macro]` ไว้ที่ระดับบนสุดของ `src/lib.rs` เสมอ และต้องเป็น `pub fn` เท่านั้น (ถ้าต้องการจัดระเบียบ logic ที่ซับซ้อนออกเป็นหลายไฟล์ ให้แยก logic ออกไปเป็นฟังก์ชัน helper ธรรมดาใน module อื่นได้ตามสบาย — แค่ตัว entry point ที่มี attribute พิเศษเท่านั้นที่ต้องอยู่ที่ root)
+
 ## แบบฝึกหัด (Exercises)
 
-1. **[ง่าย]** สร้าง workspace ใหม่ที่มี proc-macro crate ชื่อ `hello_derive` ที่ implement `#[derive(SayHello)]` — เมื่อ derive กับ struct ใดก็ตาม ให้ generate เมธอด `fn say_hello(&self)` ที่พิมพ์ `"สวัสดีจาก <ชื่อ struct>!"` (ไม่ต้องอ่าน field เลย ใช้แค่ `input.ident`) ทดสอบด้วย struct 2 ตัวที่ชื่อต่างกันใน consumer crate แยก แล้วยืนยันว่า output ถูกต้องสำหรับทั้งสองตัว
-   (hint: เริ่มจากโครงสร้าง `describe_derive` ในบทเรียน แต่ตัด logic การอ่าน field ทั้งหมดออก เหลือแค่ `#struct_name` ตัวเดียวใน `quote!`)
+1. **[ง่าย]** สร้าง workspace ใหม่ที่มี proc-macro crate ชื่อ `hello_derive` ที่ implement `#[derive(SayHello)]` — เมื่อ derive กับ struct ใดก็ตาม ให้ generate เมธอด `fn say_hello(&self)` ที่พิมพ์ `"สวัสดีจาก <ชื่อ struct>!"` (ไม่ต้องอ่าน field เลย ใช้แค่ `input.ident`) ทดสอบด้วย struct 2 ตัวที่ชื่อต่างกันใน consumer crate แยก แล้วยืนยันว่า output ถูกต้องสำหรับทั้งสองตัว เช่น `#[derive(SayHello)] struct Robot;` แล้วเรียก `Robot.say_hello()` ควรได้ผลลัพธ์ `สวัสดีจาก Robot!`
+   (hint: เริ่มจากโครงสร้าง `describe_derive` ในบทเรียน แต่ตัด logic การอ่าน field ทั้งหมดออก เหลือแค่ `#struct_name` ตัวเดียวใน `quote!` — สังเกตว่าโจทย์นี้ใช้ได้กับ struct แบบไหนก็ได้แม้แต่ unit struct อย่าง `struct Robot;` เพราะไม่ต้องอ่าน `Fields` เลย)
 
 2. **[กลาง]** ขยาย derive macro `Describe` จากบทเรียนให้รองรับ **tuple struct** ด้วย (เช่น `struct Point(f64, f64);`) โดยพิมพ์ index ของแต่ละ field แทนชื่อ (เพราะ tuple struct ไม่มีชื่อ field) เช่น `Point(1.0, 2.0)` ควร print `field.0`, `field.1` เป็นต้น — ต้องแก้ `match &data_struct.fields` ให้มี arm สำหรับ `Fields::Unnamed` เพิ่มเข้ามา (ใช้ `fields.unnamed.iter().enumerate()` เพื่อได้ index) เขียน consumer ที่ทดสอบทั้ง struct แบบ named field และ tuple struct ในไฟล์เดียวกัน ยืนยันว่าทั้งสองแบบทำงานถูกต้อง
+   (hint: `Fields::Unnamed(fields)` มี `.unnamed` เป็น `Punctuated<Field, Comma>` เหมือน `.named` แต่ไม่มี `.ident` ให้ใช้ — ต้องสร้าง label field เองจาก index เช่น `format!("field.{}", i)` แทน `f.ident.as_ref().unwrap().to_string()` ที่ใช้กับ named field เพิ่มเติม: ลองคิดดูว่าถ้าเจอ `Fields::Unit` (เช่น `struct Marker;`) ควร print อะไร — เป็นกรณีที่สามที่โจทย์ในบทเรียนยังไม่ครอบคลุม)
 
-3. **[ยาก]** เขียน derive macro ชื่อ `#[derive(FieldCount)]` ที่ generate **associated constant** (ไม่ใช่ method) ชื่อ `FIELD_COUNT: usize` เข้าไปใน `impl` block (เช่น `Customer::FIELD_COUNT` ควรได้ `3`) จากนั้นเขียน function-like proc macro เพิ่มอีกตัวชื่อ `count_fields!(TypeName)` ที่รับชื่อ type เป็น argument (parse ด้วย `syn::parse_macro_input!(input as syn::Ident)` หรือ `syn::Type`) แล้ว expand เป็นการเรียก `TypeName::FIELD_COUNT` ตรง ๆ — โจทย์นี้ฝึกทั้งการสร้าง constant ผ่าน `quote!` และการเขียน function-like macro ที่ parse input จริง (ไม่ใช่ทิ้ง input แบบ `make_answer!()` ในบทเรียน)
-   (hint: `quote!` รองรับการ generate `impl` ที่มี `const` ปนกับ `fn` ได้ในบล็อกเดียวกันตามปกติ เหมือนเขียน `impl` มือ)
+3. **[ยาก]** เขียน derive macro ชื่อ `#[derive(FieldCount)]` ที่ generate **associated constant** (ไม่ใช่ method) ชื่อ `FIELD_COUNT: usize` เข้าไปใน `impl` block (เช่น `Customer::FIELD_COUNT` ควรได้ `3`) จากนั้นเขียน function-like proc macro เพิ่มอีกตัวชื่อ `count_fields!(TypeName)` ที่รับชื่อ type เป็น argument (parse ด้วย `syn::parse_macro_input!(input as syn::Ident)` หรือ `syn::Type`) แล้ว expand เป็นการเรียก `TypeName::FIELD_COUNT` ตรง ๆ — โจทย์นี้ฝึกทั้งการสร้าง constant ผ่าน `quote!` และการเขียน function-like macro ที่ parse input จริง (ไม่ใช่ทิ้ง input แบบ `make_answer!()` ในบทเรียน) ทดสอบว่า `count_fields!(Customer)` ให้ผลเท่ากับ `Customer::FIELD_COUNT` เท่ากับ `3` จริง
+   (hint: `quote!` รองรับการ generate `impl` ที่มี `const` ปนกับ `fn` ได้ในบล็อกเดียวกันตามปกติ เหมือนเขียน `impl` มือ เช่น `impl #name { pub const FIELD_COUNT: usize = #count; }` — ส่วน `count_fields!` ไม่ต้องใช้ `syn::parse_macro_input!(... as DeriveInput)` เพราะ input ของมันเป็นแค่ชื่อ type เดียว ไม่ใช่นิยาม item ทั้งก้อน)
 
-4. **[ยาก/ประยุกต์ใช้งานจริง]** ออกแบบระบบ "inventory validation" ง่าย ๆ: เขียน derive macro ชื่อ `#[derive(NonEmpty)]` ที่ generate เมธอด `fn validate(&self) -> Result<(), String>` ให้ struct ที่มี field ชนิด `String` **ทุกตัว** — เมธอดนี้ควรวน loop ตรวจสอบว่าทุก field ที่เป็น `String` ไม่เป็นค่าว่าง (`""`) ถ้าพบ field ว่างให้คืน `Err(format!("field '{}' ต้องไม่เป็นค่าว่าง", ชื่อ field))` ถ้าผ่านหมดให้คืน `Ok(())` — ต้องใช้ `syn::Type` เพื่อเช็คว่า field แต่ละตัวเป็น `String` หรือไม่ (เทียบ path ของ type กับ `"String"`) และต้องเขียนโค้ดที่รายงาน error ด้วย `syn::Error`/`to_compile_error()` อย่างสุภาพถ้า struct ที่ derive ไม่มี named field เลย (ตามหลักการหัวข้อ 44.9) ทดสอบด้วย struct `Order { customer_name: String, note: String }` ทั้งกรณีข้อมูลถูกต้องและกรณีมี field ว่าง — โจทย์นี้ฝึกทั้งการอ่าน `syn::Type` เพื่อเช็คชนิด, generate โค้ดที่มี logic ควบคุมการทำงาน (ไม่ใช่แค่ print), และการรายงาน compile error อย่างมีอารยะพร้อมกัน
-   (hint: การเช็คว่า `syn::Type` คือ `String` แบบง่ายที่สุดคือ pattern match บน `syn::Type::Path(TypePath { path, .. })` แล้วเช็คว่า `path.segments.last().unwrap().ident == "String"` — วิธีนี้ไม่สมบูรณ์แบบ 100% ในทุกกรณี generic/alias แต่เพียงพอสำหรับโจทย์นี้)
+4. **[ยาก/ประยุกต์ใช้งานจริง]** ออกแบบระบบ "inventory validation" ง่าย ๆ: เขียน derive macro ชื่อ `#[derive(NonEmpty)]` ที่ generate เมธอด `fn validate(&self) -> Result<(), String>` ให้ struct ที่มี field ชนิด `String` **ทุกตัว** — เมธอดนี้ควรวน loop ตรวจสอบว่าทุก field ที่เป็น `String` ไม่เป็นค่าว่าง (`""`) ถ้าพบ field ว่างให้คืน `Err(format!("field '{}' ต้องไม่เป็นค่าว่าง", ชื่อ field))` ถ้าผ่านหมดให้คืน `Ok(())` — ต้องใช้ `syn::Type` เพื่อเช็คว่า field แต่ละตัวเป็น `String` หรือไม่ (เทียบ path ของ type กับ `"String"`) และต้องเขียนโค้ดที่รายงาน error ด้วย `syn::Error`/`to_compile_error()` อย่างสุภาพถ้า struct ที่ derive ไม่มี named field เลย (ตามหลักการหัวข้อ 44.9) ทดสอบด้วย struct `Order { customer_name: String, note: String }` ทั้งกรณีข้อมูลถูกต้อง (`validate()` ควรคืน `Ok(())`) และกรณีมี field ว่าง (ควรคืน `Err("field 'note' ต้องไม่เป็นค่าว่าง".to_string())`) — โจทย์นี้ฝึกทั้งการอ่าน `syn::Type` เพื่อเช็คชนิด, generate โค้ดที่มี logic ควบคุมการทำงาน (ไม่ใช่แค่ print), และการรายงาน compile error อย่างมีอารยะพร้อมกัน
+   (hint: การเช็คว่า `syn::Type` คือ `String` แบบง่ายที่สุดคือ pattern match บน `syn::Type::Path(TypePath { path, .. })` แล้วเช็คว่า `path.segments.last().unwrap().ident == "String"` — วิธีนี้ไม่สมบูรณ์แบบ 100% ในทุกกรณี generic/alias แต่เพียงพอสำหรับโจทย์นี้ ส่วน field ที่ไม่ใช่ `String` (เช่น `u32`) ให้ข้ามไปเฉย ๆ ไม่ต้อง validate — ลองคิดต่อว่าถ้าอยากให้ผู้ใช้เลือกเองว่า field ไหนต้อง validate บ้าง (ผ่าน attribute แบบ `#[non_empty]` บน field ที่ต้องการ) จะต้องเพิ่ม logic อ่าน attribute บน field อย่างไร — นี่คือสิ่งที่ Part 45 จะสอนเต็มรูปแบบ)
 
 ## สรุป
 

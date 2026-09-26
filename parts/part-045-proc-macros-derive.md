@@ -170,7 +170,12 @@ pub enum Data {
 - **`Data::Union(DataUnion)`** — item เป็น `union` (จาก Part 41-42 เรื่อง unsafe/raw pointer memory
   layout ถ้าคุณเรียนมาแล้วจะรู้ว่า `union` แชร์ memory เดียวกันระหว่าง field ทั้งหมด อ่านผิด field
   ได้ undefined behavior) — derive macro ส่วนใหญ่**ไม่รองรับ** union เพราะไม่มีทางรู้ว่า field ไหน
-  active อยู่โดยไม่ต้องพึ่ง `unsafe`
+  active อยู่โดยไม่ต้องพึ่ง `unsafe` — จุดที่น่าสังเกตเชิง type: `DataUnion.fields` มี type เป็น
+  **`FieldsNamed` ตรง ๆ** (ไม่ใช่ `Fields` enum แบบ `DataStruct`) เพราะไวยากรณ์ของ `union` ในภาษา Rust
+  **บังคับให้มี named field เท่านั้นเสมอ** (`union Payload { i: i32, f: f32 }` — ไม่มี tuple union หรือ
+  unit union ให้เขียนได้เลยตามกฎภาษา) `syn` จึงเลือก type ที่ตรงกับไวยากรณ์จริงให้ตั้งแต่ระดับ AST เพื่อ
+  ป้องกันไม่ให้เขียนโค้ดที่พยายาม match `Fields::Unnamed`/`Fields::Unit` กับ union ได้ตั้งแต่ตอน compile
+  ตัว macro เอง (compiler ของ Rust เองช่วยคุณจับบั๊กเชิงตรรกะแบบนี้ได้ตั้งแต่ก่อนรันด้วยซ้ำ)
 
 ส่วน `syn::Fields` ที่ทั้ง `DataStruct` และ `Variant` ใช้ร่วมกัน คือตัวที่บอกรูปร่างจริง ๆ ของ field:
 
@@ -370,6 +375,16 @@ arm ต้อง generate pattern แบบ `Variant { a, b }` (มีวงเ�
 generate `Variant(a, b)` (วงเล็บกลม) และ `Fields::Unit` ไม่มีวงเล็บอะไรเลย ถ้าสลับกัน (เช่น generate
 `Variant(a, b)` ให้ variant ที่จริง ๆ เป็น struct-like) จะได้ compile error จาก generated code ทันที
 ซึ่งเราจะเห็นตัวอย่างจริงในหัวข้อกับดัก
+
+**เรื่องที่ไม่ต้องกังวล: `enum` แบบ C-like ที่มี discriminant ชัดเจน** ทวนจาก Part 10 ว่า enum บางแบบ
+กำหนดค่าตัวเลขให้ variant ตรง ๆ ได้ (เช่น `enum HttpStatus { Ok = 200, NotFound = 404 }`) `syn::Variant`
+เก็บส่วนนี้ไว้ใน field `.discriminant: Option<(Token![=], Expr)>` (ค่า `Expr` หลังเครื่องหมาย `=` ถ้ามี) —
+macro ของเราใน 45.4 **ไม่ได้แตะ `.discriminant` เลย** และนั่นถูกต้องแล้ว เพราะการ generate `match self
+{ ... }` ไม่ได้สนใจว่า variant มีค่าตัวเลขกำกับไว้หรือไม่ (`match` จับคู่ตาม**ชื่อ**ของ variant เสมอ
+ไม่ใช่ค่าตัวเลข) discriminant มีความหมายก็ต่อเมื่อคุณ cast enum เป็นตัวเลขด้วย `as i32` เท่านั้น ซึ่งเป็น
+concern คนละเรื่องกับ macro ที่ generate โค้ดจาก field ของแต่ละ variant ไม่เกี่ยวข้องกัน — ถ้า derive
+macro ของคุณต้องการอ่านค่า discriminant จริง ๆ (เช่น derive macro สำหรับแปลง enum เป็นค่าตัวเลข) จึงจะ
+ต้องเข้าไปอ่าน `.discriminant` เพิ่ม ซึ่งอยู่นอกขอบเขตของบทนี้
 
 ### 45.5 รันจริง: ผลลัพธ์ของ `Describe` เวอร์ชันขยาย
 
@@ -878,6 +893,92 @@ syntax tree ที่เรามีอยู่แล้วในมือ** (�
 จะใช้ `Span::call_site()` ที่แม่นยำน้อยกว่า (ชี้ไปที่ตำแหน่งของ `#[derive(...)]` ทั้งก้อน ไม่ใช่จุดที่
 ปัญหาเกิดจริง) — หลักการทั่วไป: **ยิ่ง span แคบและตรงจุดเท่าไหร่ ผู้ใช้ macro ยิ่งแก้ปัญหาได้เร็วเท่านั้น**
 เพราะ IDE/editor จะขีดเส้นใต้สีแดงตรงตำแหน่งที่ span ชี้ ไม่ใช่ทั้งบรรทัด
+
+### 45.10.1 รายงาน error หลายจุดพร้อมกันด้วย `syn::Error::combine`
+
+โค้ดทุกจุดที่เราเขียนมาจนถึงตอนนี้ใช้ `?` เพื่อ**หยุดทันทีที่เจอ error จุดแรก** (early return) ซึ่งเพียง
+พอสำหรับกรณีทั่วไป แต่ลองนึกภาพสถานการณ์นี้: struct หนึ่งมี field ที่เขียน `#[describe(...)]` ผิดอยู่
+**สองจุดพร้อมกัน** ถ้า macro หยุดรายงานแค่จุดแรกที่เจอ ผู้ใช้จะต้องแก้ทีละจุด compile ใหม่ แก้อีกจุด
+compile ใหม่อีกรอบ — ช้ากว่าที่ควรจะเป็นมาก `syn::Error` มี method `.combine(other)` ที่รวม error
+หลายตัวเข้าด้วยกันเป็นก้อนเดียว โดยที่ compiler ยังคง**รายงานทุกจุดพร้อมกันในการ compile ครั้งเดียว**:
+
+```rust
+Fields::Named(fields) => {
+    let mut format_parts = Vec::new();
+    let mut format_args = Vec::new();
+    let mut collected_error: Option<syn::Error> = None;
+
+    for field in &fields.named {
+        let skip = match field_should_skip(&field.attrs) {
+            Ok(skip) => skip,
+            Err(err) => {
+                // เจอ error ที่ field นี้ — สะสมไว้ก่อน ไม่ return ทันที เพื่อให้ตรวจ field
+                // ที่เหลือต่อไปได้ครบ (จะได้เจอ error อื่น ๆ ที่อาจซ่อนอยู่ในรอบเดียวกัน)
+                match &mut collected_error {
+                    Some(existing) => existing.combine(err),
+                    None => collected_error = Some(err),
+                }
+                continue;
+            }
+        };
+        if skip {
+            continue;
+        }
+        let field_ident = field.ident.clone().unwrap();
+        format_parts.push(format!("{}: {{:?}}", field_ident));
+        format_args.push(quote! { self.#field_ident });
+    }
+
+    // ตรวจ error ที่สะสมไว้ทั้งหมดหลัง loop จบ — ถ้ามี ให้ return ออกไปทีเดียว
+    if let Some(err) = collected_error {
+        return Err(err);
+    }
+
+    let fmt_string = /* ... เหมือนหัวข้อ 45.3 ... */;
+    Ok(quote! { format!(#fmt_string, #(#format_args),*) })
+}
+```
+
+ทดสอบด้วย struct ที่เขียน helper attribute ผิดสองจุดพร้อมกัน:
+
+```rust
+#[derive(Describe)]
+struct Config {
+    #[describe(bad_key1)]
+    host: String,
+    #[describe(bad_key2)]
+    port: u16,
+}
+
+fn main() {}
+```
+
+ผลลัพธ์จริงจาก `cargo build` (คัดลอกจาก terminal ตรง ๆ — สังเกตว่า error ทั้งสองจุดปรากฏพร้อมกันใน
+การ compile ครั้งเดียว):
+
+```
+error: รู้จักแค่ #[describe(skip)] เท่านั้น
+ --> src/main.rs:9:16
+  |
+9 |     #[describe(bad_key1)]
+  |                ^^^^^^^^
+
+error: รู้จักแค่ #[describe(skip)] เท่านั้น
+  --> src/main.rs:11:16
+   |
+11 |     #[describe(bad_key2)]
+   |                ^^^^^^^^
+
+error: could not compile `describe_consumer` (bin "describe_consumer") due to 2 previous errors
+```
+
+ผู้ใช้เห็นทั้งสองจุดที่ต้องแก้ในการ compile ครั้งเดียว ไม่ต้องแก้ทีละจุดแล้ว compile ซ้ำหลายรอบ — นี่คือ
+รายละเอียดเล็ก ๆ ที่ทำให้ experience ของผู้ใช้ macro ดีขึ้นอย่างเห็นได้ชัด และเป็นเทคนิคที่ `serde_derive`
+ใช้จริงเวลามีคน parse struct ที่มี attribute ผิดหลายจุดพร้อมกัน (ลองดูตัวเองได้ด้วยการเขียน
+`#[serde(rename = )]` ผิด syntax สองจุดในไฟล์เดียว แล้วสังเกตว่า `rustc` รายงานทั้งสอง error พร้อมกัน)
+หลักการเลือกใช้: ใช้ `?` (early return) เมื่อ error จุดแรกทำให้ตรวจต่อไม่ได้อยู่แล้ว (เช่น input ไม่ใช่
+struct เลย) แต่ใช้ `combine` เมื่อ error แต่ละจุด**เป็นอิสระจากกัน** (เช่น ตรวจ field ทีละตัวในลูปเดียวกัน
+แบบนี้) เพื่อให้ผู้ใช้เห็นทุกปัญหาที่ตรวจพบได้ในรอบเดียว
 
 ### 45.11 panic vs compile error: เทียบให้เห็นจริง
 
@@ -1429,6 +1530,25 @@ helper attribute, error handling ที่ดี, และการทดสอ
 pattern แบบทั่วไป ควรพิจารณาใช้ crate `derive_builder` (บน crates.io) ที่ทำสิ่งเดียวกันนี้แบบสมบูรณ์
 กว่ามาก (รองรับ default value, optional field ที่ไม่ต้อง set, validation แบบกำหนดเอง ฯลฯ) มากกว่าเขียน
 เองจากศูนย์แบบในบทนี้
+
+### 45.15.1 ทุกเทคนิคในบทนี้ อยู่ที่ไหนใน derive macro ที่คุณใช้อยู่แล้ว
+
+เพื่อให้เห็นภาพว่าเทคนิคทั้งหมดที่เราเขียนเองในบทนี้ไม่ใช่ของเล่นทางวิชาการ แต่เป็นสิ่งที่ derive macro
+ที่คุณใช้งานจริง (หรือจะได้ใช้ในบทถัดไปของหลักสูตร) ทำอยู่จริงทุกวัน มาดูตารางเทียบกัน:
+
+| เทคนิคที่เราสร้างเอง (หัวข้อ) | ชื่อกลไกทั่วไป | ตัวอย่างจริงที่ใช้เทคนิคเดียวกัน |
+|---|---|---|
+| แยก `Fields::Named`/`Unnamed`/`Unit` (45.2-45.4) | Data-shape dispatch | `#[derive(Debug)]`, `#[derive(Serialize)]` ต้องรองรับทุก shape เพื่อใช้กับ struct/enum อะไรก็ได้ |
+| เติม trait bound ให้ generic (45.6-45.7) | Bound propagation | `#[derive(Clone)]` ของ std เติม `T: Clone` ให้ทุก type parameter ของ struct ที่ derive อยู่โดยอัตโนมัติแบบเดียวกัน |
+| Helper attribute (`#[describe(skip)]`, 45.8-45.9) | Field-level customization | `#[serde(rename/skip/default)]` (Part 57-58), `#[error("...")]` ของ `thiserror` (Part 31), `#[arg(short, long)]` ของ `clap` (Part 59) |
+| `syn::Error` + span ที่ถูกต้อง (45.10-45.11) | Graceful diagnostics | ทุก derive macro คุณภาพดีบน crates.io ใช้แนวทางนี้ — ลองสังเกต error message ตอนคุณใช้ `#[derive(Serialize)]`/`#[derive(Parser)]` ผิดวิธีดู จะเห็นข้อความที่ชี้ตำแหน่งแม่นยำแบบเดียวกัน |
+| `trybuild` (45.12) | Compile-time UI testing | `serde`, `thiserror`, `async-trait`, `tokio` ใช้จริงใน CI ของตัวเองทั้งหมด |
+| Builder pattern generation (45.13-45.14) | Code generation for a design pattern | `derive_builder` (บน crates.io), และ `clap` ก็ generate โครงสร้างคล้าย builder ภายในให้ `#[derive(Parser)]` เช่นกัน |
+
+ครั้งต่อไปที่คุณเปิด error message จาก `#[derive(Serialize)]` ที่ไม่ผ่าน หรืออ่าน documentation ของ
+`#[serde(...)]`/`#[error(...)]`/`#[arg(...)]` คุณจะรู้ทันทีว่าเบื้องหลังมันไม่มีอะไรที่ "เวทมนตร์" เกิน
+กว่าที่คุณเพิ่งเขียนเองในบทนี้เลย — ต่างกันแค่ระดับความครบถ้วนของ edge case ที่ผ่านการทดสอบมาหลายปีจาก
+ผู้ใช้จริงหลายล้านคนเท่านั้น
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

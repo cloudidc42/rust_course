@@ -158,14 +158,21 @@ concurrent กันเป็นตาราง (คุณไม่จำเป�
 ### 37.2 `std::thread::spawn()`: สร้าง Thread แรกของคุณ
 
 มาเริ่มเขียนโค้ดจริงกัน ฟังก์ชันหลักที่ใช้สร้าง thread ใหม่ใน Rust คือ `std::thread::spawn()` ซึ่งมี signature
-ประมาณนี้ (ย่อจาก standard library):
+ประมาณนี้ (คัดลอกมาจาก standard library ตรง ๆ เพียงแต่เติม body ปลอมด้วย `unimplemented!()` เพื่อให้ snippet นี้
+compile ผ่านได้ในตัวมันเอง — ตัว implementation จริงอยู่ใน std library):
 
 ```rust
+use std::thread::JoinHandle;
+
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T,
     F: Send + 'static,
     T: Send + 'static,
+{
+    let _ = f; // ในความเป็นจริง compiler จะเรียก f() บน thread ใหม่ — ที่นี่แค่แสดง signature เฉย ๆ
+    unimplemented!()
+}
 ```
 
 อ่าน signature นี้ทีละส่วน (คุณคุ้นเคยกับ generic bound แบบนี้มาแล้วตั้งแต่ Part 18, 22):
@@ -313,10 +320,20 @@ fn main() {
 
 ### 37.3 `.join()`: รอให้ Thread ลูกทำงานจบ — และสิ่งที่เกิดขึ้นถ้าไม่เรียกมันเลย
 
-`.join()` เป็น method ของ `JoinHandle<T>` มี signature ประมาณนี้:
+`.join()` เป็น method ของ `JoinHandle<T>` มี signature ประมาณนี้ (จำลอง `JoinHandle<T>` แบบง่าย ๆ ขึ้นมาเองในตัวอย่าง
+นี้เพื่อให้ signature ของ `join` compile ผ่านได้ในตัวมันเอง — struct จริงใน std ซับซ้อนกว่านี้มาก แต่ signature ของ
+`join` เหมือนกันเป๊ะ):
 
 ```rust
-pub fn join(self) -> thread::Result<T>
+use std::thread;
+
+struct JoinHandle<T>(std::marker::PhantomData<T>);
+
+impl<T> JoinHandle<T> {
+    pub fn join(self) -> thread::Result<T> {
+        unimplemented!()
+    }
+}
 ```
 
 สังเกตว่า `join` รับ `self` แบบ **by value** (ไม่ใช่ `&self`) — หมายความว่าเรียก `.join()` ได้**ครั้งเดียว**เท่านั้น

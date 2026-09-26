@@ -94,7 +94,7 @@
 | 62 | แนะนำ Axum Framework | ✅ |
 | 63 | Axum: Routing และ Handlers | ✅ |
 | 64 | Axum: State Management และ Extractors | ✅ |
-| 65 | Axum: Middleware (tower, tower-http) | ⏳ |
+| 65 | Axum: Middleware (tower, tower-http) | ✅ |
 | 66 | Axum: Error Handling แบบมืออาชีพ | ⏳ |
 | 67 | แนะนำ Actix-web Framework | ⏳ |
 | 68 | Actix-web: Routing, Handlers, Middleware | ⏳ |

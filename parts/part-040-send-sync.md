@@ -305,7 +305,7 @@ trait เดียว
 mutability** จาก Part 28/29 — type บางชนิด (`Cell<T>`, `RefCell<T>`, `Rc<T>`) แม้จะให้ `&T` มาจากภายนอก
 แต่ข้างในสามารถ**เปลี่ยนแปลงค่าได้จริง**ผ่านกลไกที่ซ่อนอยู่ (เช่น `RefCell::borrow_mut()` ที่ใช้แค่ `&self`
 ไม่ใช่ `&mut self`) ถ้าสอง thread ถือ `&RefCell<T>` ตัวเดียวกันพร้อมกัน แล้วต่างฝ่ายต่างเรียก `borrow_mut()`
-พร้อมกัน — เกิด race condition ทันที (รายละเอียดกลไกเต็ม ๆ อยู่หัวขัดถัดไป)
+พร้อมกัน — เกิด race condition ทันที (รายละเอียดกลไกเต็ม ๆ อยู่หัวข้อถัดไป)
 
 ### 40.6 ความสัมพันธ์ที่แม่นยำระหว่าง `Send` และ `Sync`
 
@@ -687,7 +687,7 @@ fn main() {
 เมื่อเราเข้าสู่ Part 41 (Unsafe Rust) ที่คุณจะเริ่มเขียน type ที่ห่อ raw pointer เอง และต้องตัดสินใจด้วยตัวเอง
 ว่า type นั้นควรเป็น `Send`/`Sync` หรือไม่ (บางครั้งถึงกับต้องทำตรงข้าม คือ**เพิ่ม** `Send`/`Sync` ให้ type
 ที่มี raw pointer อยู่ข้างใน ด้วย `unsafe impl Send for MyType {}` เมื่อคุณมั่นใจ 100% ว่ามันปลอดภัยจริง
-ทั้งที่ field ไม่ผ่านกฎ auto trstatic — นี่คือเหตุผลที่ `Send`/`Sync` ต้องเป็น `unsafe trait`)
+ทั้งที่ field ไม่ผ่านกฎ auto trait ตามปกติ — นี่คือเหตุผลที่ `Send`/`Sync` ต้องเป็น `unsafe trait`)
 
 ### 40.10 ลายเซ็นเต็มของ `thread::spawn`: ตอนนี้อ่านได้ครบทุกส่วนแล้ว
 
@@ -997,7 +997,7 @@ impl RawCounter {
 }
 ```
 
-`RawCounter` มี field เดียวคือ `count: i32` — ตาม gฎ auto trait ในหัวข้อ 40.8 มันเป็นทั้ง `Send` **และ**
+`RawCounter` มี field เดียวคือ `count: i32` — ตามกฎ auto trait ในหัวข้อ 40.8 มันเป็นทั้ง `Send` **และ**
 `Sync` โดยอัตโนมัติ (เพราะ `i32: Send + Sync`) มาพิสูจน์และใช้งานแบบเธรดเดียวก่อน (ย้าย ownership ทั้งก้อน
 ไปเธรดใหม่แค่เธรดเดียว):
 
@@ -1129,7 +1129,7 @@ Part 38 และ trait object จาก Part 21
 
 ทวนจาก Part 38: `mpsc::channel::<T>()` คืนคู่ `(Sender<T>, Receiver<T>)` สำหรับส่งข้อมูลข้าม thread
 ผ่านคิวข้อความ ทั้งสอง type นี้ก็ถูกคำนวณ `Send`/`Sync` ด้วยกฎเดียวกันทั้งหมด — และเพราะ**ทั้งคู่ต้องออกแบบมา
-ให้ใช้ข้าม thread โดยธรรมชาติอยู่แล้ว** (นั่นคือจุดประสงค์ทั้งหมดของ channel) std จึงimplement ให้ทั้ง
+ให้ใช้ข้าม thread โดยธรรมชาติอยู่แล้ว** (นั่นคือจุดประสงค์ทั้งหมดของ channel) std จึง implement ให้ทั้ง
 `Sender<T>` และ `Receiver<T>` เป็น `Send` (เมื่อ `T: Send`) — และ `Sender<T>` ยังเป็น `Sync` ด้วย เพราะ
 ออกแบบให้ clone แล้วแจกจ่ายให้หลาย thread ส่งเข้า queue เดียวกันได้พร้อมกันอย่างปลอดภัย (multiple producer
 ตามชื่อ "mpsc" — multiple producer, single consumer)

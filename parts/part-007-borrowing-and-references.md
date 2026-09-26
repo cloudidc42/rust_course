@@ -243,11 +243,11 @@ fn main() {
 ```
 
 ```
-error[E0594]: cannot assign to `*r`, as `r` is a `&` reference
+error[E0594]: cannot assign to `*r`, which is behind a `&` reference
  --> src/main.rs:5:5
   |
 5 |     *r = 6;
-  |     ^^^^^^ `r` is a `&` reference, so the data it refers to cannot be written
+  |     ^^^^^^ `r` is a `&` reference, so it cannot be written to
   |
 help: consider changing this to be a mutable reference
   |
@@ -376,12 +376,15 @@ fn main() {
 
 ```
 error[E0596]: cannot borrow `greeting` as mutable, as it is not declared as mutable
- --> src/main.rs:6:22
+ --> src/main.rs:7:21
   |
-5 |     let greeting = String::from("สวัสดี");
-  |         -------- help: consider changing this to be mutable: `mut greeting`
-6 |     add_exclamation(&mut greeting);
-  |                      ^^^^^^^^^^^^ cannot borrow as mutable
+7 |     add_exclamation(&mut greeting);
+  |                     ^^^^^^^^^^^^^ cannot borrow as mutable
+  |
+help: consider changing this to be mutable
+  |
+6 |     let mut greeting = String::from("สวัสดี");
+  |         +++
 ```
 
 นี่คือความสอดคล้องกันของระบบ mutability ทั้งหมดใน Rust: **การจะได้ mutable reference มา ตัวแปรต้นทางต้องประกาศเป็น `mut`
@@ -497,7 +500,7 @@ error[E0499]: cannot borrow `s` as mutable more than once at a time
   |              ^^^^^^ second mutable borrow occurs here
 6 |
 7 |     println!("{r1}, {r2}");
-  |               ---- first borrow later used here
+  |                -- first borrow later used here
 ```
 
 compiler บอกตรง ๆ เลยว่า: มี mutable borrow ครั้งแรกเกิดขึ้นที่ `r1` (ยังจะถูกใช้ต่อในบรรทัด `println!`) แล้วคุณพยายามสร้าง
@@ -631,7 +634,7 @@ error[E0502]: cannot borrow `s` as mutable because it is also borrowed as immuta
   |              ^^^^^^ mutable borrow occurs here
 7 |
 8 |     println!("{r1}, {r2}, and {r3}");
-  |               -- immutable borrow later used here
+  |                -- immutable borrow later used here
 ```
 
 ข้อความ error นี้บอกไว้ชัดมาก: `r1` (immutable) ยังจะถูกใช้ต่อใน `println!` ข้างล่าง (มี "immutable borrow later used
@@ -1217,15 +1220,21 @@ fn main() {
 
 ```
 error[E0507]: cannot move out of `*s` which is behind a shared reference
- --> src/main.rs:2:26
+ --> src/main.rs:2:25
   |
 2 |     let owned: String = *s;
   |                         ^^ move occurs because `*s` has type `String`, which does not implement the `Copy` trait
   |
-help: consider cloning the value if the performance cost matters
+help: consider removing the dereference here
   |
-2 |     let owned: String = s.clone();
-  |                         ~~~~~~~~
+2 -     let owned: String = *s;
+2 +     let owned: String = s;
+  |
+help: consider cloning the value if the performance cost is acceptable
+  |
+2 -     let owned: String = *s;
+2 +     let owned: String = s.clone();
+  |
 ```
 
 **วิธีแก้**: เมื่อคุณมีแค่ reference (`&String`) และต้องการ `String` ที่เป็นเจ้าของจริง ๆ (owned value) คุณ**ไม่มีสิทธิ์
@@ -1310,19 +1319,15 @@ fn main() {
 error[E0597]: `s` does not live long enough
  --> src/main.rs:6:13
   |
-3 |     let r;
-  |         - borrow later stored here
-4 |
-5 |     {
-6 |         let s = String::from("hello");
+5 |         let s = String::from("hello");
   |             - binding `s` declared here
-7 |         r = &s;
+6 |         r = &s;
   |             ^^ borrowed value does not live long enough
-8 |     }
+7 |     }
   |     - `s` dropped here while still borrowed
-9 |
-10 |     println!("{r}");
-   |               - borrow later used here
+8 |
+9 |     println!("{r}");
+  |                - borrow later used here
 ```
 
 สังเกตว่านี่คือ error code คนละตัวจากหัวข้อ 7.8 (`E0106` เป็นเรื่อง signature ของฟังก์ชันที่ขาด lifetime specifier

@@ -962,6 +962,144 @@ task #8: https://example.com/h.csv -> 3425 bytes (จำลอง)
 ประมวลผลรูปภาพ/วิดีโอแบบ batch, หรือระบบ scraping ที่ต้องดาวน์โหลดหลาย URL พร้อมกันโดยจำกัดจำนวน worker ไม่ให้
 เปิด connection มากเกินไปพร้อมกัน
 
+### 38.11 เทียบกับภาษาอื่น: Go Channels และ Python `queue.Queue`
+
+เพื่อให้เห็นภาพว่าแนวคิด message passing ของ Rust อยู่ตรงไหนในบริบทของภาษาอื่น ๆ ที่คุณอาจคุ้นเคยมาก่อน ลองเทียบ
+กับสองภาษาที่มีแนวคิดคล้ายกันแต่รายละเอียดต่างกันชัดเจน:
+
+**Go** เป็นภาษาที่ทำให้ channel เป็นที่รู้จักกว้างขวางที่สุดในวงการโปรแกรมมิ่งสมัยใหม่ ผ่าน syntax ที่กระชับมาก:
+
+```go
+// Go
+ch := make(chan string)          // unbounded ก็ได้ (ปกติ) หรือ bounded ก็ได้ (make(chan string, 10))
+go func() {
+    ch <- "สวัสดีจาก goroutine"    // ส่งข้อความ
+}()
+msg := <-ch                       // รับข้อความ (บล็อก)
+fmt.Println(msg)
+```
+
+ความต่างที่สำคัญที่สุดคือ **Go ไม่มีระบบ ownership/borrow checker ที่บังคับตรวจสอบตอน compile** — คุณส่ง pointer
+หรือ struct ผ่าน `ch <-` ได้ แต่ **ไม่มีอะไรห้ามคุณเก็บตัวแปรตัวเดิมไว้ใช้ต่อที่ฝั่งผู้ส่งเลย** ถ้าค่านั้นเป็น
+pointer หรือ slice (ซึ่งใน Go เป็นการอ้างอิงไปยัง memory เดียวกัน) ทั้งสอง goroutine ก็สามารถแก้ไขข้อมูลเดียวกัน
+พร้อมกันได้จริง กลายเป็น data race ที่ Go compiler ตรวจจับไม่ได้เลย (ต้องพึ่งเครื่องมือ runtime อย่าง `go run
+-race` ช่วยตรวจจับตอนรันเท่านั้น) ในขณะที่ **Rust บังคับด้วย move semantics ที่ compiler ตรวจสอบให้ตั้งแต่ compile
+time** — ถ้าคุณพยายามใช้ค่าที่ `.send()` ไปแล้วต่อ จะเจอ error ทันที (ตามที่เห็นในหัวข้อ "กับดักที่พบบ่อย" ข้อ 5)
+นี่คือความต่างเชิงปรัชญาที่สำคัญที่สุด: **Go ให้เสรีภาพมากกว่าแต่ไม่การันตีความปลอดภัย ส่วน Rust จำกัดเสรีภาพ
+บางอย่างแต่การันตีความปลอดภัยด้วย compiler**
+
+**Python** ไม่มี channel เป็น syntax พิเศษในภาษา แต่มี `queue.Queue` ใน standard library ที่ให้ความรู้สึกคล้ายกัน
+มาก โดยเฉพาะเมื่อใช้ร่วมกับ `threading`:
+
+```python
+# Python
+import queue
+import threading
+
+q = queue.Queue(maxsize=2)   # bound = 2 (คล้าย sync_channel) หรือไม่ระบุ maxsize เพื่อไม่จำกัด (คล้าย channel())
+
+def producer():
+    q.put("ข้อความ")   # ถ้า queue เต็มจะบล็อกรอ (backpressure เหมือน sync_channel)
+
+def consumer():
+    msg = q.get()      # บล็อกรอจนกว่าจะมีข้อความ (คล้าย .recv())
+    print(msg)
+```
+
+`queue.Queue` มี `maxsize` ที่ทำงานเหมือน `sync_channel(bound)` เป๊ะ ๆ (ใส่ `maxsize=0` เพื่อไม่จำกัด คล้าย
+`channel()` ธรรมดา) และ `.put()`/`.get()` ก็บล็อกคล้าย `.send()`/`.recv()` — **แต่ข้อจำกัดสำคัญของ Python คือ
+Global Interpreter Lock (GIL)** ที่ทำให้ thread หลายตัวใน Python (CPython) ไม่สามารถรัน bytecode ของ Python
+พร้อมกันจริง ๆ ได้อยู่ดี (ได้ประโยชน์จาก thread ก็ต่อเมื่องานส่วนใหญ่เป็น I/O-bound เช่น รอ network/disk ไม่ใช่
+CPU-bound) ในขณะที่ **thread ของ Rust เป็น OS thread เต็มรูปแบบที่รันพร้อมกันจริงบนหลาย CPU core ได้เสมอ** ไม่มี
+global lock แบบ GIL มาจำกัด — นี่คือเหตุผลหนึ่งที่ message passing ใน Rust ให้ประสิทธิภาพ scaling ที่ดีกว่ามาก
+เมื่อ workload เป็นงานที่ใช้ CPU หนัก (CPU-bound) เช่นตัวอย่าง worker pool ในบทนี้
+
+โดยรวมแล้ว **แนวคิดพื้นฐาน (ส่งค่าผ่านช่องสัญญาณ, บล็อกรอเมื่อไม่มีข้อความ, ปิดช่องเมื่อไม่มีผู้ส่ง) เหมือนกันทั้ง
+สามภาษา** เพราะเป็นรูปแบบที่พิสูจน์แล้วว่าใช้ได้ผลดีในการออกแบบระบบ concurrent — สิ่งที่ Rust เพิ่มเข้ามาให้
+เหนือกว่าคือ **การันตีความปลอดภัยเรื่อง ownership ที่ compiler ตรวจสอบให้ฟรี** และ **การไม่มี runtime overhead
+จาก garbage collector หรือ GIL ที่มาคอยขวางประสิทธิภาพ**
+
+### 38.12 Pattern ขั้นสูงที่ควรรู้จัก: แนบ `Sender` ไปในข้อความเองเพื่อทำ Request/Response แบบตรงจุด
+
+ตัวอย่าง pipeline ในหัวข้อ 38.10 ใช้ **result channel กลางที่ทุก worker ส่งกลับเข้ามาปนกัน** แล้วให้ main thread
+แยกแยะทีหลังด้วย `task_id` — วิธีนี้ใช้ได้ดีเมื่อ main thread ต้องการ**เก็บผลลัพธ์ทั้งหมดรวมกัน**ในที่เดียว แต่มี
+อีกรูปแบบหนึ่งที่พบบ่อยมากในโค้ด Rust จริง (โดยเฉพาะในโค้ดสไตล์ "actor model" ที่แต่ละ thread/task ทำหน้าที่เป็น
+"actor" คอยรับคำสั่งและตอบกลับ) คือ **แนบ `Sender` ของ channel ใหม่ (สร้างขึ้นเฉพาะสำหรับคำขอนั้น ๆ) ไปเป็นส่วน
+หนึ่งของข้อความที่ส่งเอง** เพื่อให้ **แค่ผู้ส่งคำขอเดิมเท่านั้นที่ได้รับคำตอบของคำขอนั้นตรง ๆ** ไม่ปนกับคำขออื่น
+เลย ไม่ต้องมีการ "แยกแยะ" ทีหลังด้วย ID อะไรทั้งสิ้น:
+
+```rust
+use std::sync::mpsc;
+use std::thread;
+
+enum Command {
+    Add {
+        a: i32,
+        b: i32,
+        reply_to: mpsc::Sender<i32>, // ช่องทางตอบกลับ "ส่วนตัว" ของคำขอนี้โดยเฉพาะ
+    },
+    Quit,
+}
+
+fn main() {
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+
+    let worker = thread::spawn(move || {
+        for cmd in cmd_rx {
+            match cmd {
+                Command::Add { a, b, reply_to } => {
+                    reply_to.send(a + b).unwrap(); // ตอบกลับเฉพาะผู้ที่ถามคำถามนี้เท่านั้น
+                }
+                Command::Quit => break,
+            }
+        }
+        println!("[worker] ได้รับคำสั่ง Quit แล้ว จบการทำงาน");
+    });
+
+    // คำขอที่ 1: สร้าง channel ตอบกลับใหม่เฉพาะสำหรับคำขอนี้
+    let (reply_tx, reply_rx) = mpsc::channel();
+    cmd_tx
+        .send(Command::Add { a: 3, b: 4, reply_to: reply_tx })
+        .unwrap();
+    println!("3 + 4 = {}", reply_rx.recv().unwrap());
+
+    // คำขอที่ 2: สร้าง channel ตอบกลับใหม่อีกชุด แยกจากคำขอแรกสิ้นเชิง
+    let (reply_tx2, reply_rx2) = mpsc::channel();
+    cmd_tx
+        .send(Command::Add { a: 10, b: 20, reply_to: reply_tx2 })
+        .unwrap();
+    println!("10 + 20 = {}", reply_rx2.recv().unwrap());
+
+    cmd_tx.send(Command::Quit).unwrap();
+    worker.join().unwrap();
+}
+```
+
+ผลลัพธ์จริงจากการรัน:
+
+```
+3 + 4 = 7
+10 + 20 = 30
+[worker] ได้รับคำสั่ง Quit แล้ว จบการทำงาน
+```
+
+**อธิบายกลไกที่สำคัญ**: `enum Command` มี variant `Add` ที่เก็บ `reply_to: mpsc::Sender<i32>` ไว้เป็น field หนึ่ง
+— นี่คือ `Sender` ของ **channel ตัวใหม่ที่สร้างขึ้นเฉพาะสำหรับคำขอครั้งนั้น ๆ เท่านั้น** (สังเกตว่าเราสร้าง
+`mpsc::channel()` ใหม่ก่อนส่งคำขอทุกครั้ง ไม่ใช่ใช้ channel เดิมซ้ำ) เมื่อ worker ได้รับ `Command::Add` มันก็ใช้
+`reply_to` ที่แนบมาส่งคำตอบ**กลับไปยัง `Receiver` ที่ตรงกับคำขอนั้นเป๊ะ ๆ** ผู้ส่งคำขอ (main thread) รอรับคำตอบ
+ผ่าน `reply_rx`/`reply_rx2` ของตัวเอง โดยไม่มีทางได้รับคำตอบของคำขออื่นสับสนกันเลย เพราะแต่ละคำขอมี "ท่อตอบกลับ"
+เป็นของตัวเองโดยเฉพาะ (บางครั้งเรียก pattern นี้ว่า **"oneshot channel"** เพราะแต่ละ channel ตอบกลับถูกใช้แค่
+ครั้งเดียวแล้วก็ทิ้งไป — crate ภายนอกอย่าง `tokio` มี type `oneshot::Sender`/`oneshot::Receiver` ที่ออกแบบมา
+เพื่อ use case นี้โดยเฉพาะ ปรับให้ประหยัด resource กว่า `mpsc` ธรรมดาเมื่อรู้แน่ชัดว่าจะส่งแค่ค่าเดียว แต่หลักการ
+ทำงานเหมือนกันทุกประการกับที่สาธิตในตัวอย่างนี้)
+
+Pattern นี้เหมาะมากกับสถานการณ์ **"actor" ที่ต้องรับคำสั่งได้หลากหลายรูปแบบ** (แทนด้วย `enum` เหมือน `Command`
+ในตัวอย่าง) และผู้ส่งคำสั่งต้องการ **คำตอบที่ตรงกับคำขอของตัวเองแบบ 1-ต่อ-1 ทันที** ไม่ต้องรอปนกับคำขอของคนอื่น
+หรือมาคอยกรองผลลัพธ์ทีหลังด้วย ID แบบในหัวข้อ 38.10 — ข้อแลกเปลี่ยนคือ **ต้นทุนในการสร้าง channel ใหม่ทุกครั้งที่
+มีคำขอ** (แม้จะเล็กมาก แต่ก็ไม่ใช่ศูนย์) เทียบกับ pattern ใน 38.10 ที่ใช้ channel กลางเดียวตลอดทั้งโปรแกรม —
+เลือกใช้ pattern ไหนขึ้นอยู่กับว่าคุณต้องการ **คำตอบแบบตรงจุดทันทีต่อคำขอ** (pattern นี้) หรือ **สะสมผลลัพธ์
+จำนวนมากไว้ประมวลผลรวมทีหลัง** (pattern ในหัวข้อ 38.10)
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. Deadlock: รอ `.recv()` ตลอดไปเพราะยังมี `Sender` ที่ไม่ตายและไม่ส่งอะไรเลย**
@@ -1188,6 +1326,65 @@ fn main() {
 ส่งจะพยายามส่งเกิน `bound` (ตามรูปแบบที่ถูกต้องในหัวข้อ 38.7 ที่แยก producer/consumer เป็นสอง thread ชัดเจน)
 หรือถ้าตั้งใจให้ thread เดียวทำทั้งสองหน้าที่จริง ๆ ต้องสลับลำดับการเรียก `.send()`/`.recv()` ให้ไม่มีจังหวะไหน
 ที่บัฟเฟอร์เต็มเกิน `bound` ก่อนจะมีการ `.recv()` มาคั่น
+
+**7. เรียก `.send().unwrap()` ในระยะยาว โดยไม่คิดว่า `Receiver` อาจถูก drop ไปก่อนแล้ว**
+
+```rust
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+    let (tx, rx) = mpsc::channel::<i32>();
+
+    let handle = thread::spawn(move || {
+        for i in 1..=5 {
+            thread::sleep(Duration::from_millis(50));
+            tx.send(i).unwrap(); // .unwrap() ตรงนี้อันตราย ถ้า main เลิกรอไปแล้ว
+        }
+    });
+
+    println!("{:?}", rx.recv()); // main รับแค่ข้อความแรกแล้วเลิกสนใจที่เหลือ
+    drop(rx); // main ไม่รอรับข้อความที่เหลืออีกแล้ว -> receiver ถูก drop ไปตรงนี้
+
+    handle.join().unwrap();
+}
+```
+
+Panic message จริงจากการรัน (สองบรรทัด panic เกิดขึ้นต่อกัน — จาก thread ลูกก่อน แล้วตามด้วย main ที่ `.join()`
+ไปเจอ error ของ thread ที่ panic นั้นอีกที):
+
+```
+Ok(1)
+
+thread '<unnamed>' panicked at src/main.rs:11:24:
+called `Result::unwrap()` on an `Err` value: SendError { .. }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'main' panicked at src/main.rs:18:19:
+called `Result::unwrap()` on an `Err` value: Any { .. }
+```
+
+สิ่งที่เกิดขึ้น: main thread รับข้อความแรก (`i = 1`) เสร็จแล้ว **เลิกสนใจข้อความที่เหลือทันที** ด้วยการ `drop(rx)`
+— ทำให้ thread ลูกที่กำลังจะส่ง `i = 2` (หลัง sleep 50ms) พบว่า `Receiver` ตายไปแล้ว `.send(2)` จึงคืน
+`Err(SendError { .. })` แต่เพราะเราเขียน `.unwrap()` ต่อท้ายไว้ (ตามที่เตือนไว้ในหัวข้อ 38.2) **thread ลูกจึง
+panic ทันที** — และเพราะ thread ลูก panic, การเรียก `.join()` ที่ main thread (ซึ่งรอผลลัพธ์ของ thread ลูกอยู่)
+จะได้รับค่าเป็น `Err` กลับมาด้วย (ตามที่เรียนใน Part 37 ว่า `.join()` คืน `Result<T, Box<dyn Any + Send>>`) และ
+เพราะโค้ดเขียน `handle.join().unwrap()` ต่ออีกที **main thread เลย panic ตามไปด้วยเป็นทอด ๆ**
+
+**วิธีแก้**: ถ้ารู้ตัวว่าฝั่ง `Receiver` อาจเลิกรอกลางทางได้ (เป็นพฤติกรรมปกติของระบบ ไม่ใช่ข้อผิดพลาด) ให้ `match`/
+`if let Err` จัดการผลลัพธ์ของ `.send()` แทนการ `.unwrap()` ตรง ๆ แล้วออกจาก loop การส่งอย่างสงบเมื่อพบว่า
+`Receiver` ปิดไปแล้ว (ไม่มีประโยชน์ที่จะพยายามส่งต่อไปอีก):
+
+```rust
+for i in 1..=5 {
+    thread::sleep(Duration::from_millis(50));
+    if tx.send(i).is_err() {
+        println!("[thread ลูก] receiver เลิกรอไปแล้ว หยุดส่งข้อความที่เหลือ");
+        break;
+    }
+}
+```
 
 ## แบบฝึกหัด (Exercises)
 

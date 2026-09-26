@@ -81,10 +81,10 @@
 | 54 | Performance Optimization และ Benchmarking (criterion) | ✅ |
 | 55 | Profiling Rust Applications (flamegraph, perf) | ✅ |
 | 56 | Memory Management ขั้นสูงและ Zero-cost Abstractions | ⏳ |
-| 57 | Serialization: Serde เบื้องต้น | ⏳ |
-| 58 | Serde ขั้นสูง (custom Serialize/Deserialize) | ⏳ |
-| 59 | CLI Applications ด้วย clap | ⏳ |
-| 60 | Logging และ Tracing เบื้องต้น (log, tracing crate) | ⏳ |
+| 57 | Serialization: Serde เบื้องต้น | ✅ |
+| 58 | Serde ขั้นสูง (custom Serialize/Deserialize) | ✅ |
+| 59 | CLI Applications ด้วย clap | ✅ |
+| 60 | Logging และ Tracing เบื้องต้น (log, tracing crate) | ✅ |
 
 ## โมดูล 4: การพัฒนาเว็บแอปพลิเคชัน (Web Development) — Part 61–85
 

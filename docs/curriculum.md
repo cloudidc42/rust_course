@@ -30,11 +30,11 @@
 | 13 | Collections: Vec<T> | ✅ |
 | 14 | Collections: String และการจัดการข้อความ (UTF-8) | ✅ |
 | 15 | Collections: HashMap, HashSet, BTreeMap/BTreeSet | ✅ |
-| 16 | Modules และการจัดระเบียบโค้ด (mod, pub, use, super, crate) | ⏳ |
+| 16 | Modules และการจัดระเบียบโค้ด (mod, pub, use, super, crate) | ✅ |
 | 17 | Packages, Crates, Workspaces | ✅ |
-| 18 | Generics เบื้องต้น | ⏳ |
-| 19 | Traits เบื้องต้น | ⏳ |
-| 20 | Lifetimes เบื้องต้น | ⏳ |
+| 18 | Generics เบื้องต้น | ✅ |
+| 19 | Traits เบื้องต้น | ✅ |
+| 20 | Lifetimes เบื้องต้น | ✅ |
 
 ## โมดูล 2: ระดับกลาง (Intermediate) — Part 21–40
 

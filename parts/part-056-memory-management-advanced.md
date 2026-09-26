@@ -748,6 +748,42 @@ error: cannot define multiple global allocators
 behavior ทันที (แต่ละ allocator มักมีโครงสร้างข้อมูลภายในของตัวเองที่ไม่รู้จักกัน) — Rust เลือกป้องกันปัญหานี้
 ที่ compile time ไปเลยดีกว่าปล่อยให้เป็นบั๊กที่หายากตอน runtime
 
+#### 56.6.1 ใช้ allocator สำเร็จรูปจริงในโปรเจกต์: ตัวอย่าง `mimalloc`
+
+ในทางปฏิบัติ โปรเจกต์ส่วนใหญ่ที่ต้องการสลับ allocator **ไม่ได้เขียน `GlobalAlloc` implementation เองตั้งแต่ต้น**
+(แบบ `CountingAllocator` ในหัวข้อ 56.6) แต่ดึง crate สำเร็จรูปที่มีคนเขียน allocator คุณภาพสูงไว้ให้แล้วมาใช้
+ตรง ๆ — `mimalloc` (พัฒนาโดย Microsoft) เป็นตัวอย่างที่ได้รับความนิยมสูงตัวหนึ่ง ลองติดตั้งและใช้งานจริง:
+
+```toml
+# Cargo.toml
+[dependencies]
+mimalloc = { version = "0.1", default-features = false }
+```
+
+```rust
+use mimalloc::MiMalloc;
+
+// แค่บรรทัดนี้บรรทัดเดียว -- ทุก Box::new, Vec::push, String::from ในทั้งโปรแกรม (รวม
+// dependency crate อื่น ๆ ที่ import เข้ามาด้วย) เปลี่ยนไปใช้ mimalloc แทน System ทันที
+// ไม่ต้องแก้โค้ด logic ของตัวเองแม้แต่บรรทัดเดียว
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+fn main() {
+    let v: Vec<i32> = (0..1000).collect();
+    println!("sum = {}", v.iter().sum::<i32>());
+}
+```
+
+โค้ดนี้ compile และรันผ่านจริง (ทดสอบด้วย `cargo build --release` ในการเขียนบทนี้) ได้ผลลัพธ์ `sum = 499500`
+เหมือนกับที่ใช้ `System` allocator ทุกประการ (ผลลัพธ์ทาง logic **ต้องเหมือนกันเป๊ะเสมอ** ไม่ว่าจะใช้ allocator
+ตัวไหน — allocator เปลี่ยนแค่ "ประสิทธิภาพของการจอง/คืนหน่วยความจำ" ไม่เคยเปลี่ยน "ความหมายทาง logic" ของ
+โปรแกรมเลย นี่คือสัญญาที่ trait `GlobalAlloc` การันตีไว้) — สังเกตว่าการสลับ allocator ทั้งโปรแกรมใช้แค่**สอง
+บรรทัด** (`use` และ `#[global_allocator] static GLOBAL: ...`) ไม่ต้องแก้ business logic ที่มีอยู่แล้วแม้แต่
+บรรทัดเดียว นี่คือพลังของการที่ Rust ออกแบบให้ allocator เป็น**สิ่งที่เปลี่ยนได้จากภายนอก**แทนที่จะฝังไว้ตายตัว
+ในตัวภาษาแบบภาษาส่วนใหญ่ — crate อย่าง `tikv-jemallocator` (ห่อ `jemalloc`) ก็ใช้รูปแบบเดียวกันนี้เป๊ะ ต่างกัน
+แค่ชื่อ struct ที่ implement `GlobalAlloc` เท่านั้น
+
 ### 56.7 `#[no_std]`: เมื่อไม่มี Standard Library ให้ใช้เลย (ระดับ Awareness)
 
 เนื้อหาทั้งหมดของหลักสูตรจนถึงบทนี้ (และของ Rust โดยทั่วไป) อยู่ในโลกที่มี **standard library** (`std`) ให้ใช้

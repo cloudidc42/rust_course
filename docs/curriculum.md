@@ -90,7 +90,7 @@
 
 | # | ชื่อบท | สถานะ |
 |---|---|---|
-| 61 | HTTP Fundamentals และ REST API Concepts | ⏳ |
+| 61 | HTTP Fundamentals และ REST API Concepts | ✅ |
 | 62 | แนะนำ Axum Framework | ⏳ |
 | 63 | Axum: Routing และ Handlers | ⏳ |
 | 64 | Axum: State Management และ Extractors | ⏳ |

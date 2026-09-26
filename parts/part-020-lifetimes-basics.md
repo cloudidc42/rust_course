@@ -1631,7 +1631,13 @@ struct UserProfile<'a> {
 
 // ปัญหาเชิง ergonomics: struct นี้ "ผูกติด" อยู่กับข้อมูลต้นทางตลอดไป ทำให้เก็บใส่ Vec<UserProfile>
 // แล้วส่งกลับข้ามฟังก์ชัน หรือใส่ใน struct อื่นที่ไม่มี lifetime parameter เลย ทำได้ยากขึ้นมาก
-// (ตัวอย่างสถานการณ์เชิง design เท่านั้น ไม่ compile เพราะไม่มีข้อมูลจริงมาสร้าง)
+fn main() {
+    let name = String::from("สมชาย");
+    let about = String::from("โปรแกรมเมอร์ Rust");
+    let profile = UserProfile { display_name: &name, bio: &about };
+    // ใช้งานได้ตราบใดที่ name/about ยังไม่ถูก drop เท่านั้น — นี่คือ ergonomics cost ที่ต้องแบกไว้ตลอดทั้งโปรแกรม
+    println!("{}: {}", profile.display_name, profile.bio);
+}
 ```
 
 **วิธีแก้**: ก่อนใช้ lifetime parameter บน struct ให้ถามตัวเองเสมอว่า **"struct นี้จำเป็นต้อง `borrow` ข้อมูลจริง ๆ

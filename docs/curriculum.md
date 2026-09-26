@@ -91,9 +91,9 @@
 | # | ชื่อบท | สถานะ |
 |---|---|---|
 | 61 | HTTP Fundamentals และ REST API Concepts | ✅ |
-| 62 | แนะนำ Axum Framework | ⏳ |
-| 63 | Axum: Routing และ Handlers | ⏳ |
-| 64 | Axum: State Management และ Extractors | ⏳ |
+| 62 | แนะนำ Axum Framework | ✅ |
+| 63 | Axum: Routing และ Handlers | ✅ |
+| 64 | Axum: State Management และ Extractors | ✅ |
 | 65 | Axum: Middleware (tower, tower-http) | ⏳ |
 | 66 | Axum: Error Handling แบบมืออาชีพ | ⏳ |
 | 67 | แนะนำ Actix-web Framework | ⏳ |

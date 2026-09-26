@@ -1392,6 +1392,10 @@ fn parse_port(raw: &str) -> Result<u16, ConfigError> {
     let port = raw.parse::<u16>()?;
     Ok(port)
 }
+
+fn main() {
+    println!("{:?}", parse_port("8080"));
+}
 ```
 
 Error ที่ได้ (อธิบายละเอียดแล้วในหัวข้อ 12.7):
@@ -1520,7 +1524,7 @@ fn main() {
 panic message ที่ได้ (ถ้ารันจริง จะ panic ก่อนถึงบรรทัด `println!`):
 
 ```
-thread 'main' panicked at src/main.rs:11:39:
+thread 'main' panicked at src/main.rs:11:40:
 user not found: "user 'unknown' not found"
 ```
 

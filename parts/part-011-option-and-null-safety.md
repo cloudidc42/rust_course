@@ -1042,6 +1042,53 @@ fn main() {
 เมื่อต้อง propagate เหตุผลของความล้มเหลวขึ้นไปให้ผู้เรียกใช้จัดการต่อ** — เลือกเครื่องมือให้ตรงกับสถานการณ์ ไม่ใช่
 ใช้ตัวเดียวกันตลอดทุกที่
 
+### 11.13 เทียบ API ของ `Option<T>` กับภาษาอื่นที่มี "nullable type"
+
+Part 10 เทียบแนวคิดเรื่อง null handling ระหว่าง Rust กับภาษาอื่นในภาพรวมไปแล้ว (ตารางในหัวข้อ 10.9) บทนี้เจาะลึก
+ระดับ **method ต่อ method** เพื่อช่วยให้คนที่มีพื้นฐานภาษาอื่นมาก่อนเทียบ mental model ได้ตรงจุดมากขึ้น:
+
+| สิ่งที่ต้องการทำ | Rust `Option<T>` | Java `Optional<T>` | Kotlin `T?` | TypeScript (`strictNullChecks`) |
+|---|---|---|---|---|
+| ดึงค่าแบบเสี่ยง exception/panic | `.unwrap()` / `.expect("msg")` | `.get()` (Java 8-9) / `.orElseThrow()` | `!!` (not-null assertion) | `!` (non-null assertion, ตรวจแค่ตอน dev) |
+| ดึงค่าแบบมี default | `.unwrap_or(v)` / `.unwrap_or_else(f)` | `.orElse(v)` / `.orElseGet(f)` | Elvis operator `?:` | `??` (nullish coalescing) |
+| แปลงค่าข้างในโดยไม่ unwrap | `.map(f)` | `.map(f)` | `?.let { f(it) }` | `?.` (optional chaining) แล้ว map เอง |
+| แปลงค่าที่ตัว closure เองก็คืน optional | `.and_then(f)` | `.flatMap(f)` | `?.let { f(it) }` (ผลเป็น nullable ซ้อน ต้อง flatten เอง) | ไม่มี built-in ตรง ๆ ต้องเขียน helper เอง |
+| กรองด้วยเงื่อนไข | `.filter(pred)` | `.filter(pred)` | `?.takeIf { pred(it) }` | ไม่มี built-in ตรง ๆ |
+| เช็คว่ามีค่าหรือไม่ | `.is_some()` / `.is_none()` | `.isPresent()` / `.isEmpty()` | `!= null` / `== null` | `!= null` / `== null` |
+| บังคับเช็คก่อนใช้เสมอ (compiler-enforced) | **บังคับ 100%** — compile ไม่ผ่านถ้าลืม | ไม่บังคับ — field ปกติยังเป็น `null` ได้เสมอ | บังคับเข้มงวดในระดับ compiler | บังคับแค่ตอน type-check (`as any`/ปิด flag ก็ข้ามได้) |
+
+จุดที่ต้องสังเกตให้ดีคือแถวสุดท้าย — Rust คือภาษาเดียวในตารางนี้ที่ **ไม่มี "ทางลัด" ให้หลีกเลี่ยงการเช็คได้เลย
+นอกจากการเรียก `.unwrap()`/`.expect()` อย่างตั้งใจ** (ซึ่งเป็นการยอมรับความเสี่ยง panic อย่างชัดเจนด้วยตัวเอง
+ไม่ใช่ช่องโหว่ที่หลุดมาโดยไม่รู้ตัว) ในขณะที่ Kotlin ยังมี `!!` ที่ throw `NullPointerException` ได้เหมือนภาษาที่มี
+null ทั่วไป และ TypeScript ที่ตรวจแค่ตอน compile time (ไม่มีการเช็คอะไรเลยตอน runtime จริง เพราะสุดท้ายก็ compile
+เป็น JavaScript ธรรมดา) — ความแตกต่างนี้ตอกย้ำประเด็นจากหัวข้อ 11.1 อีกครั้งว่า **การมี syntax ที่คล้ายกันไม่ได้
+แปลว่าการันตีความปลอดภัยแบบเดียวกัน**
+
+### 11.14 ทบทวนภาพรวม: ตารางสรุป Method ทั้งหมดของ `Option<T>`
+
+ก่อนไปหัวข้อ "กับดักที่พบบ่อย" มาสรุป method ทั้งหมดที่เรียนไปในบทนี้ไว้เป็นตารางอ้างอิงเดียว เพื่อให้เปิดดูย้อนหลัง
+ได้ง่ายเวลาลืมว่าควรใช้ตัวไหนในสถานการณ์ไหน (แบบเดียวกับตารางสรุป pattern ในหัวข้อ 10.12 ของ Part 10):
+
+| Method | Signature (แนวคิด) | Eager/Lazy | ใช้เมื่อ |
+|---|---|---|---|
+| `.unwrap()` | `Option<T> -> T` (panic ถ้า `None`) | - | มั่นใจ 100% ว่าไม่ใช่ `None` (prototype/test/invariant พิสูจน์แล้ว) |
+| `.expect(msg)` | `Option<T> -> T` (panic พร้อมข้อความเอง) | - | เหมือน `.unwrap()` แต่ต้องการ panic message ที่มีบริบท |
+| `.unwrap_or(v)` | `Option<T> -> T` | Eager | มีค่า default พร้อมใช้ ต้นทุนต่ำ (literal/ตัวแปรที่มีอยู่แล้ว) |
+| `.unwrap_or_else(f)` | `Option<T> -> T` | Lazy | ค่า default มีต้นทุนสูงหรือมี side effect |
+| `.unwrap_or_default()` | `Option<T> -> T` (ต้อง `T: Default`) | Lazy | "ไม่มีค่า" ตีความเป็นค่า default ของ type ได้ตามธรรมชาติ |
+| `.map(f)` | `Option<T> -> Option<U>` (`f: T -> U`) | - | แปลงค่าข้างในโดยไม่ unwrap, closure คืนค่าธรรมดา |
+| `.and_then(f)` | `Option<T> -> Option<U>` (`f: T -> Option<U>`) | - | เหมือน `.map()` แต่ closure เองก็คืน `Option` (ป้องกันซ้อน) |
+| `.is_some()` / `.is_none()` | `&Option<T> -> bool` | - | เช็คสถานะเฉย ๆ ไม่ต้องใช้ค่าจริงต่อ |
+| `.as_ref()` | `&Option<T> -> Option<&T>` | - | ยืมดูค่าข้างในโดยไม่ move/clone |
+| `.as_mut()` | `&mut Option<T> -> Option<&mut T>` | - | แก้ค่าข้างในตรง ๆ โดยไม่ unwrap/reassign ทั้งตัว |
+| `.or(other)` | `Option<T> -> Option<T>` | Eager | ต้องการ fallback เป็นอีก `Option` (ยังไม่ unwrap) |
+| `.or_else(f)` | `Option<T> -> Option<T>` | Lazy | เหมือน `.or()` แต่ fallback มีต้นทุนสูง |
+| `.filter(pred)` | `Option<T> -> Option<T>` (`pred: &T -> bool`) | - | มีค่าอยู่ก็จริง แต่ต้องผ่านเงื่อนไขเพิ่มด้วย |
+| `.zip(other)` | `Option<A> -> Option<(A, B)>` | - | ต้องใช้สองค่าคู่กันเสมอ ขาดตัวใดตัวหนึ่งไม่ได้ |
+| `.ok_or(err)` | `Option<T> -> Result<T, E>` | Eager | แปลงเป็น `Result`, error เป็น literal ราคาถูก |
+| `.ok_or_else(f)` | `Option<T> -> Result<T, E>` | Lazy | แปลงเป็น `Result`, error ต้องสร้างด้วย `format!`/คำนวณ |
+| `?` (ในฟังก์ชันที่คืน `Option`) | ดึงค่าออกมาหรือ `return None;` ทันที | - | unwrap หลายขั้นตอนต่อกัน ต้องการอ่านเป็นเส้นตรง |
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. `.unwrap()` บนค่า `None` — panic ที่พบบ่อยที่สุดในโค้ด Rust ของมือใหม่**
@@ -1055,7 +1102,7 @@ fn main() {
 ```
 
 ```
-thread 'main' panicked at src/main.rs:3:29:
+thread 'main' panicked at src/main.rs:3:28:
 called `Option::unwrap()` on a `None` value
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ```

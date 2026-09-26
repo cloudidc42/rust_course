@@ -25,8 +25,8 @@
 | 8 | Slices (&str, &[T]) | ✅ |
 | 9 | Structs (tuple struct, unit struct, methods, impl) | ✅ |
 | 10 | Enums และ Pattern Matching (match, if let, while let) | ✅ |
-| 11 | Option<T> และ Null Safety | ⏳ |
-| 12 | Result<T,E> และ Error Handling เบื้องต้น (? operator) | ⏳ |
+| 11 | Option<T> และ Null Safety | ✅ |
+| 12 | Result<T,E> และ Error Handling เบื้องต้น (? operator) | ✅ |
 | 13 | Collections: Vec<T> | ✅ |
 | 14 | Collections: String และการจัดการข้อความ (UTF-8) | ✅ |
 | 15 | Collections: HashMap, HashSet, BTreeMap/BTreeSet | ⏳ |

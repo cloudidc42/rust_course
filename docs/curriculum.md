@@ -65,11 +65,11 @@
 
 | # | ชื่อบท | สถานะ |
 |---|---|---|
-| 41 | Unsafe Rust เบื้องต้น | ⏳ |
-| 42 | Raw Pointers และ Memory Layout | ⏳ |
-| 43 | FFI: การเชื่อมต่อกับ C (extern "C", bindgen) | ⏳ |
-| 44 | Procedural Macros เบื้องต้น | ⏳ |
-| 45 | Procedural Macros: Derive Macros ขั้นสูง | ⏳ |
+| 41 | Unsafe Rust เบื้องต้น | ✅ |
+| 42 | Raw Pointers และ Memory Layout | ✅ |
+| 43 | FFI: การเชื่อมต่อกับ C (extern "C", bindgen) | ✅ |
+| 44 | Procedural Macros เบื้องต้น | ✅ |
+| 45 | Procedural Macros: Derive Macros ขั้นสูง | ✅ |
 | 46 | Async/Await เบื้องต้น | ⏳ |
 | 47 | Futures และ Executors (วิธีทำงานภายใน) | ⏳ |
 | 48 | Tokio: Runtime และ Tasks | ⏳ |

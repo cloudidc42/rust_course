@@ -45,11 +45,11 @@
 | 23 | Lifetimes ขั้นสูง (lifetime elision, higher-ranked, structs with lifetimes) | ✅ |
 | 24 | Closures (Fn, FnMut, FnOnce, capturing) | ✅ |
 | 25 | Iterators เบื้องต้น (Iterator trait, for loop desugaring) | ✅ |
-| 26 | Iterators ขั้นสูง (adapters, custom iterators, performance) | ⏳ |
-| 27 | Smart Pointers: Box<T> | ⏳ |
-| 28 | Smart Pointers: Rc<T> และ RefCell<T> | ⏳ |
-| 29 | Smart Pointers: Weak<T>, Cow<T>, interior mutability patterns | ⏳ |
-| 30 | Error Handling ขั้นสูง (custom error types, From/Into, error chains) | ⏳ |
+| 26 | Iterators ขั้นสูง (adapters, custom iterators, performance) | ✅ |
+| 27 | Smart Pointers: Box<T> | ✅ |
+| 28 | Smart Pointers: Rc<T> และ RefCell<T> | ✅ |
+| 29 | Smart Pointers: Weak<T>, Cow<T>, interior mutability patterns | ✅ |
+| 30 | Error Handling ขั้นสูง (custom error types, From/Into, error chains) | ✅ |
 | 31 | thiserror และ anyhow ในโปรเจกต์จริง | ⏳ |
 | 32 | Testing: Unit Tests (#[test], assert!, mocking เบื้องต้น) | ⏳ |
 | 33 | Testing: Integration Tests และการจัดระเบียบ test suite | ⏳ |

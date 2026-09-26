@@ -1282,7 +1282,8 @@ fn main() {
         cached_summary: Rc::new("summary".to_string()),
     };
     thread::spawn(move || {
-        println!("{}", report.title);
+        // ใช้ทั้งสาม field ในโค้ด ทำให้ closure ต้อง capture cached_summary (Rc<String>) เข้ามาด้วย
+        println!("{} - {} - {}", report.title, report.total_sales, report.cached_summary);
     });
 }
 ```
@@ -1291,10 +1292,31 @@ Error:
 
 ```
 error[E0277]: `Rc<String>` cannot be sent between threads safely
-  |
-  = help: within `Report`, the trait `Send` is not implemented for `Rc<String>`
-note: required because it appears within the type `Report`
+  --> src/main.rs:14:19
+   |
+14 |       thread::spawn(move || {
+   |       ------------- ^------
+   |       |             |
+   |  _____|_____________within this `{closure@src/main.rs:14:19: 14:26}`
+   | |     |
+   | |     required by a bound introduced by this call
+15 | |         println!("{} - {} - {}", report.title, report.total_sales, report.cached_summary);
+16 | |     });
+   | |_____^ `Rc<String>` cannot be sent between threads safely
+   |
+   = help: within `{closure@src/main.rs:14:19: 14:26}`, the trait `Send` is not implemented for `Rc<String>`
+note: required because it's used within this closure
+note: required by a bound in `spawn`
 ```
+
+**ข้อสังเกตสำคัญเพิ่มเติม**: ถ้า closure ข้างในใช้แค่ `report.title` เพียง field เดียว (ไม่แตะ
+`cached_summary` เลย) โค้ดนี้จะ **compile ผ่านได้ปกติ!** เพราะ Rust 2021 edition มีฟีเจอร์ **disjoint
+closure capture** — closure จะ capture มาเฉพาะ field ที่มันใช้จริงเท่านั้น ไม่ใช่ทั้ง struct ทั้งก้อน
+เสมอไป (ทวนจาก Part 24) ดังนั้นถ้าไม่ได้แตะ field ที่เป็น `Rc<T>` เลย closure ก็จะไม่ capture มันมา และ
+`Send` ก็จะไม่มีปัญหาอะไรเลย — นี่คือเหตุผลที่ตัวอย่างข้างบนต้องใช้ `report.cached_summary` ในการ
+`println!` ด้วย เพื่อบังคับให้ closure capture field ที่มีปัญหาเข้ามาจริง ๆ ให้เห็น error ชัด ๆ (แต่ในโค้ด
+จริงคุณไม่ควรพึ่งพา "ความบังเอิญที่ไม่ได้แตะ field ที่มีปัญหา" แบบนี้เป็นทางแก้ — มันคือ time bomb ที่จะ
+ระเบิดทันทีที่มีคนแก้โค้ดให้ไปแตะ field นั้นในอนาคต ทางแก้ที่ถูกต้องเสมอคือเปลี่ยน `Rc<T>` เป็น `Arc<T>`)
 
 จำกฎจากหัวข้อ 40.8 ให้แม่น: **แค่ field เดียวที่ไม่ใช่ `Send` ก็ทำให้ struct ทั้งก้อนไม่ใช่ `Send`** ไม่ว่า
 field อื่นจะปลอดภัยกี่ตัวก็ตาม เวลาเจอ error แบบนี้ ให้ไล่หา field ที่เป็น `Rc<T>`/`RefCell<T>` (หรือ type

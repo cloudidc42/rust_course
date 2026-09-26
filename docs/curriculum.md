@@ -71,10 +71,10 @@
 | 44 | Procedural Macros เบื้องต้น | ✅ |
 | 45 | Procedural Macros: Derive Macros ขั้นสูง | ✅ |
 | 46 | Async/Await เบื้องต้น | ✅ |
-| 47 | Futures และ Executors (วิธีทำงานภายใน) | ⏳ |
-| 48 | Tokio: Runtime และ Tasks | ⏳ |
-| 49 | Tokio: I/O และ Networking (TCP/UDP) | ⏳ |
-| 50 | Async Channels และ Synchronization (tokio::sync) | ⏳ |
+| 47 | Futures และ Executors (วิธีทำงานภายใน) | ✅ |
+| 48 | Tokio: Runtime และ Tasks | ✅ |
+| 49 | Tokio: I/O และ Networking (TCP/UDP) | ✅ |
+| 50 | Async Channels และ Synchronization (tokio::sync) | ✅ |
 | 51 | Atomics และ Lock-free Programming | ⏳ |
 | 52 | Design Patterns ใน Rust (Builder, Strategy, Observer) | ⏳ |
 | 53 | Design Patterns ใน Rust (Newtype, Typestate, RAII) | ⏳ |

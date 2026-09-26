@@ -949,9 +949,45 @@ error: Validated ใช้ได้กับ struct เท่านั้น ไ
 
 **กลไกที่ทำให้เกิดผลลัพธ์นี้:** `syn::Error::new_spanned(tokens, message)` สร้าง `syn::Error` โดยผูก**ตำแหน่ง (span)** ของ error เข้ากับ token ที่คุณระบุ (ในตัวอย่างคือ `&input.ident` ซึ่งคือชื่อ `Status` ที่มาจาก source code จริงของผู้ใช้ พร้อมข้อมูลบรรทัด/คอลัมน์ที่แม่นยำที่ compiler เก็บไว้ตั้งแต่ parse) จากนั้น `.to_compile_error()` แปลง `syn::Error` ให้กลายเป็น **`TokenStream` ที่มี macro พิเศษของ compiler ชื่อ `compile_error!`** อยู่ข้างใน (ประมาณว่า expand เป็น `compile_error!("Validated ใช้ได้กับ struct เท่านั้น...")` ที่ตำแหน่ง span ที่กำหนด) — `compile_error!` คือ macro built-in ของ Rust ที่ทำหน้าที่เดียว คือ**บอก compiler ให้สร้าง error message ตรงตามที่ระบุ ที่ตำแหน่งที่ระบุ** โดยไม่ต้อง panic ทั้งกระบวนการ compile เลย มันคือวิธี "ส่ง error กลับไปให้ compiler แสดงอย่างสุภาพ" แทนการทำให้ทั้งกระบวนการ crash
 
+**พิสูจน์ว่า "การเลือก span" สำคัญจริง — ไม่ใช่แค่การใช้ `syn::Error` เฉย ๆ ก็พอ** ลองเปลี่ยนแค่บรรทัดเดียวในตัวอย่างข้างบน จาก `syn::Error::new_spanned(&input.ident, ...)` เป็น `syn::Error::new(proc_macro2::Span::call_site(), ...)` (ใช้ `Span::call_site()` ซึ่งหมายถึง "ตำแหน่งที่ macro ถูกเรียกใช้" แทนตำแหน่งของ token ที่ระบุจริง):
+
+```rust
+// เปลี่ยนจาก new_spanned(&input.ident, ...) เป็น new(Span::call_site(), ...)
+_ => syn::Error::new(
+    proc_macro2::Span::call_site(),
+    "Validated ใช้ได้กับ struct เท่านั้น ไม่รองรับ enum หรือ union",
+)
+.to_compile_error()
+.into(),
+```
+
+ผลลัพธ์จริงที่ได้เปลี่ยนไปทันที (ตรวจสอบแล้ว) แม้ข้อความ error จะเหมือนเดิมทุกตัวอักษร:
+
+```
+error: Validated ใช้ได้กับ struct เท่านั้น ไม่รองรับ enum หรือ union
+ --> src/main.rs:3:10
+  |
+3 | #[derive(Validated)]
+  |          ^^^^^^^^^
+  |
+  = note: this error originates in the derive macro `Validated` (in Nightly builds, run with -Z macro-backtrace for more info)
+```
+
+เทียบกับก่อนหน้าที่ใช้ `new_spanned(&input.ident, ...)` ที่หัวลูกศรชี้ไปที่ `enum Status` (บรรทัด 4) — เวอร์ชันนี้หัวลูกศรชี้ไปที่ **`#[derive(Validated)]` เอง** (บรรทัด 3) แทน เพราะ `Span::call_site()` หมายถึง "ตำแหน่งของการเรียก macro" ไม่ใช่ "ตำแหน่งของ token ที่เรากำลังบ่นถึง" — ข้อความเหมือนกันเป๊ะ แต่ตำแหน่งที่ compiler ชี้ให้ผู้ใช้ดูต่างกันโดยสิ้นเชิง **บทเรียนสำคัญ:** เวลาสร้าง `syn::Error` ควรเลือก span จาก **token จริงที่เป็นสาเหตุของปัญหา** (ผ่าน `new_spanned` หรือเรียก `.span()` จาก AST node ที่เกี่ยวข้องตรง ๆ) เสมอ แทนการใช้ `Span::call_site()` แบบเหมาเข่ง เพื่อให้ error ชี้ไปยังจุดที่ผู้ใช้ต้องแก้ไขจริง ๆ ไม่ใช่แค่ชี้ไปที่ "จุดที่เรียก macro" อย่างคลุมเครือ
+
 **หลักปฏิบัติที่ควรยึดถือ:** proc macro ที่เขียนดีควรเลี่ยง `.unwrap()`/`.expect()`/`panic!()` ในทุกจุดที่ input จากผู้ใช้ (ไม่ใช่ error ภายในของตัว macro เอง) อาจทำให้ logic ล้มเหลว — ให้ใช้ `syn::Error` + `to_compile_error()` แทนเสมอ เพื่อให้ผู้ใช้ macro ของคุณได้รับ experience เดียวกับ error message มาตรฐานของ Rust compiler เอง ไม่ใช่ backtrace ที่งงงวยจากภายในกระบวนการ derive
 
 ### 44.10 เขียนบ่อยแค่ไหน? Derive vs Attribute vs Function-like ในทางปฏิบัติ
+
+ก่อนปิดบท มาต่อยอดตารางเปรียบเทียบ 3 เครื่องมือลดโค้ดซ้ำซ้อนที่ Part 36 ทิ้งไว้ให้ (generic/trait, declarative macro, procedural macro) ด้วยมุมมองที่ลึกขึ้นเฉพาะฝั่ง **procedural macro** ที่เราเพิ่งเรียนมาทั้งบท:
+
+| คุณสมบัติ | Generic function/trait (Part 18/19/21) | `macro_rules!` (Part 36) | Procedural macro (บทนี้) |
+|---|---|---|---|
+| มองเห็นโครงสร้างของ type ที่ทำงานด้วยได้แค่ไหน | เห็นผ่าน trait bound เท่านั้น (ต้องนิยาม bound ไว้ล่วงหน้า) | ไม่เห็นเลย เห็นแค่ token ตาม fragment specifier | เห็น**เต็มรูปแบบ**ผ่าน AST ของ `syn` (ชื่อ field, ชนิด field, attribute, generic, ฯลฯ) |
+| รับจำนวน/ชนิด item ที่ต่างกันในครั้งเดียวได้ไหม | ได้ผ่าน monomorphization แต่ต้อง "รู้ล่วงหน้า" ว่าจะรับ type ที่สนองต่อ trait bound ใด | ได้ผ่าน repetition แต่จำกัดแค่ "รูปแบบ token" ที่ arm รองรับ | ได้เต็มที่ — logic โปรแกรมมิ่งจริงตัดสินใจได้จาก AST ที่เห็น |
+| ต้องเขียน crate แยกไหม | ไม่ต้อง | ไม่ต้อง | **ต้อง** (`proc-macro = true`, ตามหัวข้อ 44.3) |
+| แก้ไข item เดิมได้ไหม | ไม่เกี่ยวข้อง (ไม่ได้ทำงานกับ item แบบนี้) | ได้ถ้าออกแบบให้ generate item ใหม่ทั้งก้อน (แต่เสีย ergonomic ตามหัวข้อ 44.1) | derive: ไม่ได้ / attribute: ได้เต็มที่ |
+| ความยากในการ debug | ง่ายที่สุด (error ชี้ตำแหน่งจริงเสมอ) | ปานกลาง (`cargo expand` ช่วยได้) | ยากที่สุด แต่**ควบคุมข้อความ error ได้เอง**ผ่าน `syn::Error` (หัวข้อ 44.9) |
 
 ก่อนปิดบท มาตั้งความคาดหวังที่สมจริงเกี่ยวกับว่า**นักพัฒนา Rust ทั่วไป**ควรลงทุนเวลาเรียนรู้ proc macro แต่ละชนิดมากแค่ไหน:
 

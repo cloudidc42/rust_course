@@ -44,7 +44,7 @@
 | 22 | Generics ขั้นสูง (trait bounds, where clauses, PhantomData) | ✅ |
 | 23 | Lifetimes ขั้นสูง (lifetime elision, higher-ranked, structs with lifetimes) | ✅ |
 | 24 | Closures (Fn, FnMut, FnOnce, capturing) | ✅ |
-| 25 | Iterators เบื้องต้น (Iterator trait, for loop desugaring) | ⏳ |
+| 25 | Iterators เบื้องต้น (Iterator trait, for loop desugaring) | ✅ |
 | 26 | Iterators ขั้นสูง (adapters, custom iterators, performance) | ⏳ |
 | 27 | Smart Pointers: Box<T> | ⏳ |
 | 28 | Smart Pointers: Rc<T> และ RefCell<T> | ⏳ |

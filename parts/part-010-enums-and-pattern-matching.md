@@ -1563,6 +1563,10 @@ fn describe(method: PaymentMethod) -> &'static str {
         // ลืม BankTransfer!
     }
 }
+
+fn main() {
+    println!("{}", describe(PaymentMethod::Cash));
+}
 ```
 
 ```
@@ -1583,10 +1587,14 @@ error[E0004]: non-exhaustive patterns: `PaymentMethod::BankTransfer` not covered
 ```rust
 fn describe(n: i32) -> String {
     let result = match n {
-        0 => "zero",   // &str
-        _ => 1,        // i32 -- ผิด! ต้องเป็น &str เหมือนกัน
+        0 => "zero",
+        _ => 1,
     };
     result.to_string()
+}
+
+fn main() {
+    println!("{}", describe(5));
 }
 ```
 
@@ -1672,8 +1680,12 @@ enum PaymentMethod {
 fn describe(m: &PaymentMethod) -> String {
     match m {
         PaymentMethod::Cash => "cash".to_string(),
-        PaymentMethod::CreditCard(number, cvv) => format!("{number} {cvv}"), // ผิดรูปแบบ!
+        PaymentMethod::CreditCard(number, cvv) => format!("{number} {cvv}"),
     }
+}
+
+fn main() {
+    println!("{}", describe(&PaymentMethod::Cash));
 }
 ```
 
@@ -1757,8 +1769,12 @@ borrowing จาก Part 6-7 กับ pattern matching ในบทนี้ **
 fn classify(n: i32) -> &'static str {
     match n {
         _ => "อื่น ๆ",
-        0 => "ศูนย์", // ไม่มีวันถูกเรียกใช้ เพราะ _ ข้างบนจับไปหมดแล้ว
+        0 => "ศูนย์",
     }
+}
+
+fn main() {
+    println!("{}", classify(0));
 }
 ```
 

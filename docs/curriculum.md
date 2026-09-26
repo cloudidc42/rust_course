@@ -75,11 +75,11 @@
 | 48 | Tokio: Runtime และ Tasks | ✅ |
 | 49 | Tokio: I/O และ Networking (TCP/UDP) | ✅ |
 | 50 | Async Channels และ Synchronization (tokio::sync) | ✅ |
-| 51 | Atomics และ Lock-free Programming | ⏳ |
+| 51 | Atomics และ Lock-free Programming | ✅ |
 | 52 | Design Patterns ใน Rust (Builder, Strategy, Observer) | ✅ |
-| 53 | Design Patterns ใน Rust (Newtype, Typestate, RAII) | ⏳ |
-| 54 | Performance Optimization และ Benchmarking (criterion) | ⏳ |
-| 55 | Profiling Rust Applications (flamegraph, perf) | ⏳ |
+| 53 | Design Patterns ใน Rust (Newtype, Typestate, RAII) | ✅ |
+| 54 | Performance Optimization และ Benchmarking (criterion) | ✅ |
+| 55 | Profiling Rust Applications (flamegraph, perf) | ✅ |
 | 56 | Memory Management ขั้นสูงและ Zero-cost Abstractions | ⏳ |
 | 57 | Serialization: Serde เบื้องต้น | ⏳ |
 | 58 | Serde ขั้นสูง (custom Serialize/Deserialize) | ⏳ |

@@ -323,7 +323,7 @@ fn main() {
     cache.show();
 
     // ตัวอย่างที่ T เป็น reference ซ้อนกัน: T = &str (ซึ่งมี lifetime ของตัวเองซ่อนอยู่)
-    let text = String::from("ข้อความต้นฉบับ");
+    let text = String::from("original source text");
     let borrowed: &str = &text;
     let nested_cache = Cache { value: &borrowed }; // T = &str, ต้องมีอายุยืนไม่น้อยกว่า 'a ของ Cache เอง
     nested_cache.show();
@@ -334,7 +334,7 @@ fn main() {
 
 ```
 แคชไว้: [1, 2, 3, 4]
-แคชไว้: "ข้อความต้นฉบับ"
+แคชไว้: "original source text"
 ```
 
 **ทำไมต้องมี bound `T: 'a` ทั้ง ๆ ที่ดูเหมือน field `value: &'a T` ก็บอกอะไรพอแล้ว**: เพราะ `&'a T` แค่บอกว่า
@@ -1374,9 +1374,11 @@ error: lifetime may not live long enough
   = help: consider adding the following bound: `'a: 'b`
 ```
 
-**วิธีแก้**: เพิ่ม `where 'a: 'b` ตามที่อธิบายเต็มรูปแบบในหัวข้อ 23.3-23.4 — เมื่อสองก) lifetime parameter ต้องมี
+**วิธีแก้**: เพิ่ม `where 'a: 'b` ตามที่อธิบายเต็มรูปแบบในหัวข้อ 23.3-23.4 — เมื่อ lifetime parameter สองตัวต้องมี
 ความสัมพันธ์เชิง subtyping กัน (ตัวหนึ่งต้องยืนยาวไม่น้อยกว่าอีกตัว) ให้เขียนความสัมพันธ์นั้นด้วย outlives bound
-เสมอ อย่าคาดหวังว่า compiler จะเดาเองได้โดยไม่มีข้อมูลนี้
+เสมอ อย่าคาดหวังว่า compiler จะเดาเองได้โดยไม่มีข้อมูลนี้ — และถ้า generic type parameter `T` เองอาจมี reference
+แฝงอยู่ข้างใน (ตามหัวข้อย่อย "จาก `T: 'static` สู่ Outlives Bound ทั่วไป") อย่าลืมพิจารณาเพิ่ม bound `T: 'a` ควบคู่
+กันไปด้วยเสมอ ไม่ใช่แค่ `where 'a: 'b` อย่างเดียว
 
 **4. แยก Lifetime Parameter มากเกินความจำเป็น (Over-Engineering) จนทำให้ API ใช้งานยากขึ้นโดยไม่ได้ประโยชน์จริง**
 
@@ -1563,7 +1565,10 @@ parameter ให้ถามตัวเองก่อนเสมอว่า 
   กัน
 - **หัวข้อ 23.3-23.4**: **Lifetime subtyping** (`'long: 'short`) ทำให้ reference ที่มีอายุยืนกว่าใช้แทนที่อายุสั้น
   กว่าได้เสมอ — และ **outlives bound** (`where 'a: 'b`) คือ syntax ที่ใช้บอก compiler ถึงความสัมพันธ์นี้เมื่อ
-  elision และการอนุมานปกติไม่พอ โดยเฉพาะเมื่อต้อง "แปลง" lifetime ผ่าน generic wrapper
+  elision และการอนุมานปกติไม่พอ โดยเฉพาะเมื่อต้อง "แปลง" lifetime ผ่าน generic wrapper — bound `T: 'a` คือภาพรวม
+  ของ `T: 'static` จาก Part 20 ที่ใช้ปิดช่องโหว่เมื่อ generic type parameter เองอาจมี reference แฝงอยู่ข้างใน และ
+  ตัวอย่าง `LineSplitter<'a, 'b>` แสดงให้เห็นว่าเมื่อไหร่ที่การแยก lifetime parameter สองตัวคือทางเลือกที่ถูกต้อง
+  จริง ๆ (field มาจากพารามิเตอร์อิสระของ constructor) ไม่ใช่การ over-engineer
 - **หัวข้อ 23.5**: `dyn Trait` มี lifetime bound แฝงอยู่เสมอ (`+ 'static` โดย default) ต้องเขียน `+ 'a` อย่างชัดเจน
   เมื่อ trait object เก็บข้อมูลที่ยืมมาแบบไม่ใช่ `'static`
 - **หัวข้อ 23.6**: **Higher-Ranked Trait Bounds** (`for<'a>`) แก้ปัญหาที่ lifetime ธรรมดาแก้ไม่ได้ — เมื่อ closure

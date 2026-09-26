@@ -1078,6 +1078,317 @@ fn main() {
 `Order` ไม่แก้ไข จึงเรียกซ้ำได้หลายครั้งพร้อมกันในลูปได้อย่างปลอดภัย), และ **`Box<dyn Fn>`** (เก็บ closure ที่
 concrete type ต่างกันไว้ใน collection เดียว)
 
+### 24.12 ขนาดของ Closure ในหน่วยความจำ: Capture ยิ่งมาก ยิ่งใหญ่
+
+หัวข้อ 24.9 บอกไว้ว่า closure ที่ capture ตัวแปรคือ struct ที่ไม่มีชื่อ เก็บตัวแปรที่ capture มาไว้เป็น field —
+ถ้าเป็น struct จริง มันก็ต้อง **มีขนาด (size) ที่วัดได้จริง** เหมือน struct ทั่วไปที่เรียนมาตั้งแต่ Part 9 และ
+ขนาดนั้นต้องขึ้นอยู่กับว่า field ข้างในเก็บอะไรบ้าง — หัวข้อนี้จะพิสูจน์ mental model นั้นด้วยตัวเลขจริงจาก
+`std::mem::size_of_val` (เทคนิคเดียวกับที่ Part 11 หัวข้อ 11.3 ใช้พิสูจน์เรื่อง null pointer optimization ของ
+`Option<&T>`)
+
+```rust
+fn main() {
+    // closure ที่ไม่ capture อะไรจาก environment เลยแม้แต่ตัวเดียว
+    let non_capturing = |x: i32| x + 1;
+
+    // closure ที่ capture ตัวแปรเดียว เป็น i32 ผ่านการยืม (&i32 -- อ่านอย่างเดียว จึงได้ Fn)
+    let a = 10;
+    let capture_one_i32 = |x: i32| x + a;
+
+    // closure ที่ capture String มาแบบ move -- เก็บ String ทั้งตัว (ไม่ใช่ &String) เป็น field ของตัวเอง
+    let name = String::from("สมชาย");
+    let capture_owned_string = move |greeting: &str| format!("{greeting} {name}");
+
+    // closure ที่ capture ตัวแปรเล็ก ๆ สามตัว (u8 แต่ละตัว 1 ไบต์) มาแบบ move
+    let b: u8 = 1;
+    let c: u8 = 2;
+    let d: u8 = 3;
+    let capture_three = move |x: i32| x + (b as i32) + (c as i32) + (d as i32);
+
+    println!("non_capturing          : {} ไบต์", std::mem::size_of_val(&non_capturing));
+    println!("capture_one_i32 (&i32)  : {} ไบต์", std::mem::size_of_val(&capture_one_i32));
+    println!("capture_owned_string    : {} ไบต์", std::mem::size_of_val(&capture_owned_string));
+    println!("capture_three (3 x u8)  : {} ไบต์", std::mem::size_of_val(&capture_three));
+
+    println!("เทียบ: size_of &i32     = {}", std::mem::size_of::<&i32>());
+    println!("เทียบ: size_of String   = {}", std::mem::size_of::<String>());
+
+    // เรียกใช้ทุกตัวจริง เพื่อไม่ให้ compiler เตือนว่าตัวแปรไม่ได้ถูกใช้
+    println!("{} {} {} {}", non_capturing(1), capture_one_i32(1), capture_owned_string("hi"), capture_three(1));
+}
+```
+
+ผลลัพธ์ (บนเครื่อง 64-bit ทั่วไป — ตัวเลขจริงอาจต่างกันเล็กน้อยตามรุ่น compiler แต่ความสัมพันธ์ระหว่างค่าจะเหมือนกัน
+เสมอ):
+
+```
+non_capturing          : 0 ไบต์
+capture_one_i32 (&i32)  : 8 ไบต์
+capture_owned_string    : 24 ไบต์
+capture_three (3 x u8)  : 3 ไบต์
+เทียบ: size_of &i32     = 8
+เทียบ: size_of String   = 24
+1 20 hi สมชาย 7
+```
+
+**อ่านตัวเลขทีละบรรทัดโยงกลับไปยัง mental model ของหัวข้อ 24.9:**
+
+- **`non_capturing` มีขนาด 0 ไบต์** — เพราะมันไม่ capture ตัวแปรใด ๆ จาก environment เลย struct ที่ compiler สร้าง
+  ให้จึง **ไม่มี field เลยแม้แต่ field เดียว** ในภาษา Rust struct ที่ไม่มี field (หรือมี field ที่ล้วนไม่มีขนาด)
+  เรียกว่า **zero-sized type (ZST)** — มันมีตัวตนในเชิง type system (compiler แยกแยะมันจาก closure ตัวอื่นได้)
+  แต่ไม่ต้องใช้พื้นที่ memory จริงเลยสักไบต์ตอน runtime นี่คือเหตุผลเชิงวิศวกรรมที่ทำให้การ "ห่อ" logic สั้น ๆ
+  ไว้ในรูป closure ที่ไม่ capture อะไร **ไม่มีต้นทุนด้าน memory เพิ่มขึ้นมาเลยแม้แต่นิดเดียว** เมื่อเทียบกับการ
+  เรียกฟังก์ชันธรรมดาตรง ๆ
+- **`capture_one_i32` มีขนาด 8 ไบต์ เท่ากับ `size_of::<&i32>()` เป๊ะ** — เพราะ field เดียวของมันคือ `&i32`
+  (reference ไปยัง `a`) ขนาดของ closure จึงเท่ากับขนาดของ pointer หนึ่งตัวบนเครื่อง 64-bit พอดี ไม่มีอะไรซับซ้อน
+  กว่านั้น
+- **`capture_owned_string` มีขนาด 24 ไบต์ เท่ากับ `size_of::<String>()` เป๊ะ** — เพราะ `move` ทำให้ closure เก็บ
+  `name: String` **ทั้งตัว** เป็น field ของมันตรง ๆ (ไม่ใช่ `&String` ที่จะมีขนาดแค่ 8 ไบต์) และ `String` เองมี
+  โครงสร้างภายในสามส่วน (pointer ไปยังข้อมูลบน heap, ความยาวปัจจุบัน, capacity — รายละเอียดเต็มรูปแบบอยู่ใน
+  Part 14) รวมกันเป็น 24 ไบต์บนเครื่อง 64-bit — นี่คือหลักฐานที่จับต้องได้ว่า `move` **เปลี่ยนสิ่งที่ closure
+  เก็บไว้จริง ๆ** จาก "ที่อยู่ที่ชี้กลับไปยังเจ้าของเดิม" (เล็ก คงที่เสมอ) เป็น "ข้อมูลตัวจริงทั้งก้อน" (ขนาดแปรผัน
+  ตามชนิดข้อมูลที่ยึดมา)
+- **`capture_three` มีขนาดแค่ 3 ไบต์** — เพราะ `move` ทำให้มันเก็บ `b`, `c`, `d` (ตัวละ `u8` คือ 1 ไบต์) เป็น field
+  ทั้งสามตัวตรง ๆ ไม่ใช่ reference (ซึ่งจะกิน 8 ไบต์ต่อตัวรวมเป็น 24 ไบต์ ใหญ่กว่าข้อมูลจริงที่ต้องการเก็บเสียอีก)
+  — สังเกตว่ากรณีนี้ `u8` ไม่มีข้อกำหนดเรื่อง alignment ที่บีบให้ต้องเติม padding เพิ่ม (ต่างจากตัวเลขขนาดใหญ่กว่า
+  เช่น `i32`/`i64` ที่อาจมี padding เข้ามาเกี่ยวข้อง) จึงได้ขนาดที่กระชับที่สุดเท่าที่เป็นไปได้จริง ๆ
+
+**ข้อสรุปเชิงวิศวกรรมที่สำคัญที่สุดจากตัวเลขทั้งหมดนี้**: **"ขนาด" ของ closure ไม่ได้ขึ้นอยู่กับว่า body ของมันยาว
+หรือซับซ้อนแค่ไหนเลย แต่ขึ้นอยู่กับ "จำนวนและชนิดของตัวแปรที่มัน capture มาเก็บเป็น field" เท่านั้น** closure ที่มี
+body ยาวสิบบรรทัดแต่ไม่ capture อะไรเลยก็ยังมีขนาด 0 ไบต์เท่ากับ `non_capturing` เพราะ body ไม่ใช่ "data" ที่ต้อง
+เก็บไว้ตอน runtime — มันคือ code ที่ถูก compile ไปเป็นคำสั่งของ CPU ตั้งแต่ตอน compile time ต่างหาก (เหมือนกับ
+ฟังก์ชันธรรมดาทุกฟังก์ชัน) สิ่งที่กิน memory จริง ๆ มีแค่ field ที่ struct ต้องพกไปด้วยเท่านั้น — หลักการเดียวกัน
+กับที่ Part 9 สอนไว้เรื่องขนาดของ struct ทั่วไป (ขึ้นอยู่กับ field ไม่ใช่จำนวนบรรทัดของ `impl` ที่ผูกกับมัน)
+
+**ผลข้างเคียงที่น่าสนใจอีกอย่างของการที่ closure ไม่ capture อะไรเลยมีขนาด 0 ไบต์**: closure แบบนี้สามารถ
+**coerce (แปลงชนิดโดยอัตโนมัติ) เป็น function pointer ธรรมดา (`fn(...) -> ...`) ได้โดยตรง** เพราะไม่มี "environment"
+อะไรให้ต้องพกไปด้วยเลย — มันจึงมีหน้าตาเหมือน `fn` เปล่า ๆ ทุกประการในเชิง representation ตอน runtime:
+
+```rust
+fn main() {
+    // closure ที่ไม่ capture อะไร -- assign ให้ตัวแปรที่ประกาศ type เป็น fn pointer ตรง ๆ ได้เลย
+    let non_capturing: fn(i32) -> i32 = |x| x + 1;
+
+    println!("{}", non_capturing(4));
+    println!("size_of fn pointer = {}", std::mem::size_of_val(&non_capturing));
+}
+```
+
+```
+5
+size_of fn pointer = 8
+```
+
+แต่ถ้า closure ตัวนั้น **capture** ตัวแปรอะไรมาแม้แต่ตัวเดียว การ coerce เป็น `fn` pointer แบบนี้จะทำไม่ได้ทันที
+เพราะ `fn` pointer ตามนิยามของภาษา (function pointer ดิบ ๆ) **ไม่มีที่เก็บ "environment" ใด ๆ เลย** มันคือแค่
+ที่อยู่ของ code ในหน่วยความจำเท่านั้น ไม่มีทางแปะข้อมูลเพิ่มเข้าไปได้:
+
+```rust
+fn main() {
+    let a = 10;
+    let capturing: fn(i32) -> i32 = |x| x + a; // ผิด -- closure ตัวนี้ capture `a` มาด้วย
+    println!("{}", capturing(1));
+}
+```
+
+```
+error[E0308]: mismatched types
+ --> src/main.rs:3:37
+  |
+3 |     let capturing: fn(i32) -> i32 = |x| x + a;
+  |                    --------------   ^^^^^^^^^ expected fn pointer, found closure
+  |                    |
+  |                    expected due to this
+  |
+  = note: expected fn pointer `fn(i32) -> i32`
+                found closure `{closure@src/main.rs:3:37: 3:40}`
+note: closures can only be coerced to `fn` types if they do not capture any variables
+ --> src/main.rs:3:45
+  |
+3 |     let capturing: fn(i32) -> i32 = |x| x + a;
+  |                                             ^ `a` captured here
+```
+
+หมายเหตุ `note` บรรทัดสุดท้ายของ error นี้พูดตรงประเด็นที่สุด: **`closures can only be coerced to fn types if
+they do not capture any variables`** — ยืนยัน mental model ของหัวข้อนี้ทั้งหมดในประโยคเดียว: closure ที่ไม่
+capture อะไรเลยไม่มีความต่างจาก `fn` ธรรมดาแม้แต่นิดเดียวในเชิง representation ตอน runtime (ทั้งคู่คือแค่ "ที่อยู่
+ของ code") แต่ทันทีที่ต้อง capture อะไรสักอย่าง มันต้องกลายเป็น "code + data" ที่ไม่มีทาง represent ด้วย function
+pointer ดิบ ๆ ได้อีกต่อไป — ต้องใช้ type ของ closure เอง (ผ่าน generic, `impl Trait`, หรือ `dyn Trait` ตามที่
+เรียนมาในหัวข้อ 24.7-24.8) เท่านั้น
+
+### 24.13 เปรียบเทียบกับภาษาอื่น: Closure ใน C++, JavaScript, และ Python
+
+ผู้เรียนที่มีพื้นฐานภาษาอื่นมาก่อนมักมี "ความคุ้นเคยผิด ๆ" เกี่ยวกับ closure ติดตัวมาโดยไม่รู้ตัว เพราะแต่ละภาษา
+เลือกออกแบบเรื่อง capture ต่างกันมาก หัวข้อนี้จะเทียบให้เห็นชัดว่า Rust เลือกวิธีที่ **ปลอดภัยที่สุดในเชิง compile
+time** แลกกับการที่ต้องเรียนรู้กฎ `Fn`/`FnMut`/`FnOnce`/`move` ที่ภาษาอื่นไม่มีให้เรียนเลย เพราะพวกเขาผลักปัญหา
+เดียวกันนี้ไปเป็นพฤติกรรม runtime แทน
+
+#### เทียบกับ C++: ต้องเขียน Capture List เอง — ผิดแล้วไม่ compile error แต่เป็น Undefined Behavior
+
+C++ (ตั้งแต่ C++11) มี lambda expression ที่ต้อง **ระบุ capture mode เองตรง ๆ ทุกครั้งผ่าน capture list**
+(สัญลักษณ์ `[...]` หน้า parameter list) ไม่มีการ "compiler อนุมานให้อัตโนมัติจาก body" แบบ Rust เลย:
+
+```cpp
+#include <iostream>
+#include <string>
+
+int main() {
+    int threshold = 100;
+
+    auto by_value  = [threshold](int price) { return price > threshold; };  // capture โดย copy ค่า
+    auto by_ref     = [&threshold](int price) { return price > threshold; }; // capture โดย reference
+    auto copy_all   = [=](int price) { return price > threshold; };          // capture ทุกตัวที่ใช้ โดย copy
+    auto ref_all    = [&](int price) { return price > threshold; };          // capture ทุกตัวที่ใช้ โดย reference
+
+    std::cout << by_value(150) << std::endl;
+    return 0;
+}
+```
+
+สังเกตว่าโปรแกรมเมอร์ C++ ต้อง **เลือกเองตรง ๆ** ว่าจะ capture แบบ copy (`[threshold]`, `[=]`) หรือแบบ reference
+(`[&threshold]`, `[&]`) — ต่างจาก Rust ที่ compiler เลือก capture mode ที่ผ่อนคลายที่สุดให้เองจากการวิเคราะห์ body
+(ตามหัวข้อ 24.5.4) ปัญหาที่ใหญ่กว่านั้นคือ **ถ้าโปรแกรมเมอร์เลือกผิด — capture โดย reference (`[&]`) ไปยังตัวแปร
+local แล้ว return lambda ตัวนั้นออกจากฟังก์ชัน (สถานการณ์เดียวกับที่เราเห็นใน `make_printer` ในหัวข้อ 24.6) —
+**C++ compiler ไม่มีทางจับได้ตอน compile time เลย** โปรแกรมจะ compile ผ่านอย่างราบรื่น แล้วไปพังตอน runtime แบบ
+**undefined behavior** (อาจ crash, อาจได้ค่าขยะ, หรือที่แย่ที่สุดคือ "ดูเหมือนทำงานถูกต้อง" ในการทดสอบแต่พังตอน
+production เพราะ timing/memory layout ต่างกันเล็กน้อย) นี่คือความต่างเชิงปรัชญาที่สำคัญที่สุดระหว่างสองภาษา: **สิ่ง
+ที่ Rust บังคับให้แก้ตอน compile time ด้วย error E0373 (ตามหัวข้อ 24.6) คือบั๊กเดียวกันเป๊ะที่ C++ ปล่อยให้กลาย
+เป็น dangling reference ที่ตรวจจับไม่ได้จนกว่าจะพังตอน runtime** — นี่คือเหตุผลที่กฎเรื่อง `move`/`Fn`/`FnMut`/
+`FnOnce` ที่ดูยุ่งยากตอนเรียนใหม่ ๆ กลับกลายเป็นตาข่ายนิรภัยที่ C++ ไม่มีให้เลย
+
+#### เทียบกับ JavaScript: Capture ตัวแปร (Binding) เสมอ ไม่ใช่ Capture ค่า — กับดัก `var` ใน Loop คลาสสิก
+
+JavaScript closure **capture ตัวแปร (variable binding) ไม่ใช่ capture ค่า ณ ขณะนั้น** เสมอ ไม่มีแนวคิดเรื่อง
+"ยืมแบบอ่านอย่างเดียว" กับ "ยึด ownership" แบบ Rust เลย — ทุก closure ใน JS มองเห็น "ช่องตัวแปรตัวเดียวกัน" ที่
+มันถูกประกาศไว้ในสโคปเดิมเสมอ ถ้าตัวแปรนั้นถูกแก้ไขทีหลัง closure ทุกตัวที่ capture มันไว้จะเห็นค่าที่แก้ไขแล้ว
+**ทั้งหมดพร้อมกัน** นี่คือต้นเหตุของบั๊กคลาสสิกที่โปรแกรมเมอร์ JS รุ่นเก่าเกือบทุกคนเคยเจอ:
+
+```javascript
+// ปัญหาคลาสสิกของ JavaScript รุ่นก่อน ES6 -- ใช้ var (function-scoped, ไม่ใช่ block-scoped)
+var callbacks = [];
+for (var i = 0; i < 3; i++) {
+  callbacks.push(function () {
+    console.log(i); // capture ตัวแปร i ตัวเดียวกันทุก closure ไม่ใช่ capture ค่า ณ ตอนสร้าง
+  });
+}
+callbacks.forEach(function (cb) { cb(); });
+// ผลลัพธ์จริง: 3, 3, 3  (ไม่ใช่ 0, 1, 2 ตามที่คนเขียนใหม่ ๆ คาดหวัง!)
+// เพราะ i ตัวเดียวกันถูก capture ไว้ในทุก closure และ loop เพิ่มค่ามันไปจนครบ (=3) ก่อน callback จะถูกเรียก
+```
+
+ทุก closure ในลูปนี้ capture **ตัวแปร `i` ตัวเดียวกัน** (ไม่ใช่คนละสำเนา) เพราะ `var` ใน JS เป็น function-scoped
+ไม่ใช่ block-scoped พอ loop จบ `i` มีค่าเป็น `3` และ closure ทั้งสามตัวก็เห็นค่า `3` เหมือนกันหมดตอนถูกเรียก
+ทีหลัง — วิธีแก้ในยุค ES6 คือเปลี่ยนจาก `var` เป็น `let` (block-scoped ทำให้แต่ละรอบของลูปได้ตัวแปรคนละตัวกันจริง ๆ)
+
+เทียบกับ Rust ที่ปัญหานี้ **ไม่มีทางเกิดขึ้นได้เลยตั้งแต่แรก** เพราะ closure ที่ capture ตัวแปรด้วยการ **ยืม**
+(`Fn`/`FnMut`) จะยึด reference ไปยังตัวแปรต้นทางตัวเดียวกันก็จริง แต่ borrow checker (Part 7) จะไม่ยอมให้คุณ
+เก็บ closure ที่ยืม `&mut` ตัวแปรเดียวกันไว้หลายตัวพร้อมกันเลยตั้งแต่ compile time (จะเจอ error ทันทีถ้าลองทำ) และ
+ถ้าใช้ `move` (ตามหัวข้อ 24.6) แต่ละ closure ที่สร้างขึ้นในแต่ละรอบของ `for`/`.map()` จะได้ **สำเนาข้อมูลของตัวเอง**
+คนละชุดจริง ๆ (ไม่ใช่ตัวแปรตัวเดียวกันที่ใครมาแก้ทีหลังก็เห็นหมด) มาดูโค้ด Rust ที่ทำงานแบบเดียวกันแต่ไม่มีกับดักนี้:
+
+```rust
+fn main() {
+    let mut callbacks: Vec<Box<dyn Fn() -> i32>> = Vec::new();
+
+    for i in 0..3 {
+        // i แต่ละรอบของ for loop คือตัวแปรคนละตัวกันจริง ๆ ใน Rust (ไม่ใช่ตัวแปรเดียวกันแบบ var ใน JS)
+        // move ยึดค่า i ของรอบนั้นเข้าไปเก็บในตัว closure โดยตรง -- แต่ละ closure จึงมีสำเนาของตัวเอง
+        callbacks.push(Box::new(move || i));
+    }
+
+    for cb in &callbacks {
+        println!("{}", cb());
+    }
+}
+```
+
+```
+0
+1
+2
+```
+
+ผลลัพธ์ออกมาตามสัญชาตญาณเป๊ะ (`0, 1, 2`) เพราะทุกรอบของ `for` ใน Rust สร้างตัวแปร `i` คนละตัวกันจริง (ไม่ใช่แค่
+คนละค่าของตัวแปรตัวเดียวกันแบบ `var` เก่าของ JS) และ `move` ทำให้ closure แต่ละตัว **ยึดสำเนาค่าของ `i` ณ รอบนั้น
+ไปเก็บเป็นของตัวเองจริง ๆ** ไม่มีการ "แชร์ช่องตัวแปรเดียวกัน" ให้เกิดกับดักแบบ JS ได้เลยตั้งแต่ต้น
+
+(ถ้าต้องการพฤติกรรมแบบ JS ที่ตั้งใจให้ closure หลายตัว **แชร์สถานะเดียวกันจริง ๆ** และแก้ไขมันร่วมกันได้ Rust ก็
+ทำได้ แต่ต้องขอความช่วยเหลือจาก `Rc<RefCell<T>>` อย่างชัดเจน — ซึ่งเป็นการ "บอก type system ตรง ๆ ว่าฉันต้องการ
+แชร์ ownership และ mutability ข้ามหลาย closure โดยตั้งใจ" ไม่ใช่ผลข้างเคียงที่เกิดขึ้นเองแบบ JS เราจะเจาะลึก
+`Rc<RefCell<T>>` เต็มรูปแบบใน Part หลัง ๆ ของหลักสูตรที่พูดถึง smart pointer)
+
+#### เทียบกับ Python: Late Binding เหมือน JavaScript และต้องมี `nonlocal` เพื่อแก้ไขตัวแปรนอก
+
+Python closure มีพฤติกรรมคล้าย JavaScript รุ่นก่อน ES6 มาก คือ **capture ตัวแปรแบบ late binding** (อ้างถึงชื่อ
+ตัวแปรในสโคปที่ล้อมรอบ ไม่ใช่ค่า ณ ตอนสร้าง closure) กับดักคลาสสิกที่คู่กันคือการสร้าง lambda หลายตัวในลูปเดียวกัน:
+
+```python
+callbacks = []
+for i in range(3):
+    callbacks.append(lambda: i)  # capture ชื่อ i ไม่ใช่ค่า -- ทุก lambda อ้างถึงตัวแปร i ตัวเดียวกัน
+
+for cb in callbacks:
+    print(cb())
+# ผลลัพธ์จริง: 3, 3, 3  (เหมือนกับปัญหา var ใน JavaScript เป๊ะ เพราะ Python ก็ late-bind ชื่อตัวแปรเหมือนกัน)
+
+# วิธีแก้แบบดั้งเดิมใน Python: บังคับให้ capture ค่า ณ ขณะนั้นผ่าน default argument
+fixed_callbacks = []
+for i in range(3):
+    fixed_callbacks.append(lambda i=i: i)  # default argument ถูกประเมินค่าตอนสร้าง lambda เท่านั้น
+
+for cb in fixed_callbacks:
+    print(cb())
+# ผลลัพธ์: 0, 1, 2
+```
+
+สังเกตว่า Python ไม่มีวิธี "บอก compiler ให้ capture by value" ตรง ๆ แบบ `move` ของ Rust เลย โปรแกรมเมอร์ Python
+ต้องใช้ **workaround** ผ่าน default argument (`lambda i=i: i`) ซึ่งจริง ๆ แล้วไม่ใช่กลไก "closure capture"
+เลยด้วยซ้ำ แต่อาศัยพฤติกรรมของ default argument ที่ถูกประเมินค่าแค่ครั้งเดียวตอนนิยามฟังก์ชัน (evaluation ตอน
+def-time) มาแก้ปัญหาแทน — เป็นวิธีที่ต้อง "รู้เคล็ดลับ" ถึงจะนึกออก ไม่ได้เป็นส่วนหนึ่งของไวยากรณ์ closure ที่
+ออกแบบมาให้ตรงประเด็นตั้งแต่แรกแบบ `move` ของ Rust
+
+อีกจุดที่ต่างชัดเจนคือการ **แก้ไข** ตัวแปรจาก enclosing scope: Python ต้องประกาศ `nonlocal` ก่อนเสมอถ้าต้องการ
+assign ค่าใหม่ให้ตัวแปรนอกจากภายใน closure (ไม่ใช่แค่อ่านเฉย ๆ):
+
+```python
+def make_counter():
+    count = 0
+    def increment():
+        nonlocal count  # ถ้าไม่มีบรรทัดนี้ -- Python จะถือว่า count เป็นตัวแปร local ใหม่ในฟังก์ชัน increment แทน
+        count += 1
+        return count
+    return increment
+
+counter = make_counter()
+print(counter())  # 1
+print(counter())  # 2
+print(counter())  # 3
+```
+
+ถ้าลืม `nonlocal count` ไป Python จะไม่ error ตอน define แต่จะ error ตอน**เรียกจริง**ด้วย
+`UnboundLocalError: local variable 'count' referenced before assignment` เพราะ Python ตีความ `count += 1`
+ว่ากำลังสร้างตัวแปร local ชื่อ `count` ใหม่ในฟังก์ชัน `increment` (ซึ่งยังไม่มีค่าเลยตอนอ่าน `count +=` ทำให้อ่าน
+ก่อน assign ไม่ได้) — นี่คือ error ที่เจอตอน**รันจริง**เท่านั้น ต่างจาก Rust ที่ปัญหาแบบเดียวกัน (ลืมทำให้ closure
+แก้ไขตัวแปรที่ capture มาได้) จะถูกจับตอน **compile time** เสมอ (ตามหัวข้อ 24.5.2 และกับดักข้อ 4 ท้ายบทนี้ — ลืม
+`mut` บนตัวแปรที่เก็บ `FnMut` closure จะเจอ E0596 ตั้งแต่ยัง compile ไม่ผ่าน ไม่ต้องรอไปพังตอนรัน)
+
+#### สรุปภาพรวมของการเปรียบเทียบ
+
+| ภาษา | วิธี capture | ใครเป็นคนเลือก capture mode | ถ้าเลือกผิด/ลืม จะพังตอนไหน |
+|---|---|---|---|
+| **Rust** | ยืม (`&T`), ยืมแก้ไขได้ (`&mut T`), หรือยึด ownership (`T`) — บังคับด้วย `move` ได้ | **compiler** วิเคราะห์จาก body ให้อัตโนมัติ | **compile time** เสมอ (E0373/E0382/E0596 ฯลฯ) |
+| **C++** | copy (`[x]`, `[=]`) หรือ reference (`[&x]`, `[&]`) | **โปรแกรมเมอร์** ต้องเขียน capture list เอง | **runtime** (undefined behavior ถ้าเลือกผิด — ไม่มี compile error เตือน) |
+| **JavaScript** | capture ตัวแปร (binding) เสมอ ไม่มีให้เลือก | ไม่มีให้เลือก — เป็น late binding เสมอ | **runtime** (ค่าที่ได้ผิดจากที่คาด แต่โปรแกรมไม่ crash) |
+| **Python** | capture ชื่อตัวแปร (late binding) เสมอ ต้อง `nonlocal` เพื่อแก้ไข | ไม่มีให้เลือก — ต้องใช้ workaround (default argument) เพื่อบังคับ capture by value | **runtime** (`UnboundLocalError` หรือค่าที่ได้ผิดจากที่คาด) |
+
+ตารางนี้สรุปสิ่งที่บทนี้พยายามสอนมาตั้งแต่ต้นให้เห็นภาพเดียว: **สิ่งที่ทำให้ Rust closure "เรียนรู้ยากกว่า" ภาษา
+อื่นตอนแรก (ต้องเข้าใจ `Fn`/`FnMut`/`FnOnce`, ต้องรู้ว่าเมื่อไหร่ต้องใส่ `move`) ที่จริงคือสิ่งเดียวกันกับสิ่งที่ทำให้
+มันปลอดภัยกว่าอย่างมหาศาล** — ทุกกับดักที่ภาษาอื่นปล่อยให้เกิดตอน runtime (dangling reference ใน C++, ค่าตัวแปร
+ที่ผิดจากที่คาดใน JS/Python) ถูก Rust ผลักให้กลายเป็น compile error ที่ต้องแก้ให้เรียบร้อยก่อนโปรแกรมจะรันได้เลย
+แม้แต่ครั้งเดียว — สอดคล้องกับปรัชญาของทั้งหลักสูตรนี้ที่เห็นมาตลอดตั้งแต่ Part 6 (ownership), Part 7 (borrowing),
+Part 11 (`Option<T>` แทน null), และ Part 20/23 (lifetimes): **ผลักปัญหาให้ compiler จับได้ก่อน ดีกว่าปล่อยให้มัน
+กลายเป็นบั๊กที่ผู้ใช้จริงเจอ**
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. เรียก closure ตัวเดิมด้วย argument type คนละแบบ หลังจาก type ถูก "ล็อก" ไปแล้ว (E0308)**

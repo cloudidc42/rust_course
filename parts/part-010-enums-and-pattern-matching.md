@@ -500,6 +500,33 @@ enum นี้ในโปรเจกต์เอง
 | ตรวจพบปัญหาเมื่อไหร่ | ตอน runtime (ถ้าโชคดีมี test/QA เจอ) หรืออาจไม่เจอเลย | ตอน compile time — ก่อนโค้ดจะรันด้วยซ้ำ |
 | ความเสี่ยงของทีมใหญ่ | สูง — สมาชิกทีมอื่นอาจไม่รู้ว่าต้องไปแก้ที่ไหนบ้าง | ต่ำ — compiler ระบุตำแหน่งให้ครบถ้วนอัตโนมัติ |
 
+เพื่อให้เห็นภาพปัญหา fall-through ของ `switch` ชัดเจนขึ้น ลองดูโค้ด C (ตัวอย่างนี้เป็นภาษา C ไม่ใช่ Rust — ยกมา
+เพื่อเปรียบเทียบเท่านั้น ไม่ต้อง compile) ที่ลืมเขียน `break`:
+
+```c
+/* ภาษา C — ตัวอย่างเปรียบเทียบเท่านั้น */
+switch (payment_method) {
+    case CASH:
+        printf("จ่ายด้วยเงินสด\n");
+        /* ลืมเขียน break; ตรงนี้! */
+    case CREDIT_CARD:
+        printf("จ่ายด้วยบัตรเครดิต\n");
+        break;
+    case BANK_TRANSFER:
+        printf("จ่ายด้วยการโอนเงิน\n");
+        break;
+}
+```
+
+โค้ด C ข้างบนนี้ **compile ผ่านสนิท ไม่มี warning เตือนโดย default ด้วยซ้ำ** (ต้องเปิด flag พิเศษอย่าง
+`-Wimplicit-fallthrough` ถึงจะเตือน) แต่พฤติกรรมที่ได้คือ: ถ้า `payment_method == CASH` โปรแกรมจะปริ้นทั้ง
+`"จ่ายด้วยเงินสด"` **และ** `"จ่ายด้วยบัตรเครดิต"` ต่อกันไปเลย เพราะ C ไหลจาก `case CASH` ต่อไปยัง `case CREDIT_CARD`
+โดยอัตโนมัติเมื่อไม่มี `break` (นี่คือพฤติกรรม fall-through ที่ตั้งใจออกแบบไว้ตั้งแต่ยุค C ดั้งเดิม เพื่อให้เขียน
+หลาย case ที่ทำงานเหมือนกันได้ง่าย แต่ก็เป็นแหล่งบั๊กจากการ "ลืม" `break` มาตลอดหลายสิบปี) `match` ของ Rust
+**ไม่มีแนวคิด fall-through แบบนี้เลย** — แต่ละ arm ทำงานแยกเดี่ยวสมบูรณ์ในตัวเอง ไม่มีทางไหลไป arm ถัดไปโดยไม่ตั้งใจ
+ไม่ว่าจะลืมเขียนอะไรก็ตาม ผสมกับ exhaustiveness checking ที่บังคับครบทุกกรณี ทำให้ปัญหาสองแบบที่พบบ่อยที่สุดของ
+`switch` ใน C/Java/JavaScript (fall-through โดยไม่ตั้งใจ, และลืม handle บาง case) ถูกกำจัดไปจากรากฐานของภาษาเลย
+
 นี่คือเหตุผลที่นักพัฒนา Rust ที่มีประสบการณ์มักบอกว่า `match` + `enum` คือ "refactoring superpower" — การเปลี่ยนแปลง
 โครงสร้างข้อมูลหลักของระบบ (เช่นเพิ่มตัวเลือกใหม่) ที่ในภาษาอื่นเป็นงานที่น่ากังวลมาก (เพราะกลัวพลาดจุดใดจุดหนึ่ง)
 กลายเป็นงานที่ทำได้อย่างมั่นใจใน Rust เพราะ compiler เป็น safety net ให้เสมอ
@@ -1076,6 +1103,26 @@ runtime แทน แต่ Rust บังคับให้ `age` (type `Option
 คุณพร้อมสำหรับ Part 11 ที่จะสอน method อย่าง `.unwrap_or()`, `.map()`, `.and_then()`, และการออกแบบโค้ดที่ปลอดภัย
 จาก null อย่างเต็มรูปแบบ
 
+#### เทียบกับวิธีแก้ปัญหา Null ในภาษาอื่น
+
+Rust ไม่ใช่ภาษาแรกที่พยายามแก้ปัญหานี้ หลายภาษาสมัยใหม่ก็มีแนวคิดคล้ายกันในระดับที่ต่างกัน:
+
+| ภาษา | วิธีจัดการค่า "อาจไม่มี" | compiler บังคับให้เช็คก่อนใช้หรือไม่ |
+|---|---|---|
+| **Java (ก่อน 8)** | ใช้ `null` ตรง ๆ ทุก reference type อาจเป็น `null` ได้เสมอ | ไม่บังคับเลย — `NullPointerException` เกิดตอน runtime |
+| **Java 8+ (`Optional<T>`)** | มี `Optional<T>` เป็น class เสริม แต่เป็นแค่ **convention** เพิ่มเติม field เดิมยังเป็น `null` ได้อยู่ดี | ไม่บังคับ — `Optional.get()` ยังเรียกได้โดยไม่เช็ค `isPresent()` ก่อน แล้ว throw `NoSuchElementException` ตอน runtime ถ้าเป็นค่าว่าง |
+| **TypeScript (`strictNullChecks` เปิด)** | ใช้ union type `T \| null \| undefined` | บังคับใน level type checker ตอน dev เท่านั้น (compile เป็น JS ปกติ ไม่มีการเช็คจริงตอน runtime และปิด flag นี้ได้) |
+| **Kotlin** | ใช้ `T?` (nullable type) แยกจาก `T` (non-null) อย่างเป็นทางการในภาษา | บังคับค่อนข้างเข้มงวดใน compiler แต่ยังมี `!!` (not-null assertion) ให้ข้ามการเช็คได้ถ้าต้องการ (ซึ่งอาจ throw runtime exception) |
+| **Rust (`Option<T>`)** | ไม่มี `null` ในภาษาเลย ใช้ enum `Option<T>` ที่เป็น type แยกจาก `T` อย่างสมบูรณ์ | บังคับ 100% ผ่าน type system — ไม่มีทาง "ลืมเช็ค" แล้ว compile ผ่านได้เลย (นอกจากตั้งใจเรียก `.unwrap()`/`.expect()` ซึ่งเป็นการยอมรับความเสี่ยง panic อย่างชัดเจนด้วยตัวเอง) |
+
+จุดที่ทำให้ Rust แตกต่างจาก Java's `Optional<T>` และ TypeScript อย่างมีนัยสำคัญคือ **Rust ไม่มี "ทางลัดที่ยังเป็น
+null ได้" หลงเหลืออยู่เลย** — ใน Java คุณยังเขียน `String name = null;` ได้ตรง ๆ เสมอ ไม่ว่าจะมี `Optional<T>`
+ให้ใช้หรือไม่ก็ตาม (`Optional<T>` เป็นแค่ตัวเลือกที่นักพัฒนา "ควร" ใช้ แต่ภาษาไม่ได้บังคับ) ส่วน TypeScript ที่ตรวจสอบ
+ตอน compile time ก็ยังเป็นแค่ชั้นตรวจสอบที่ทับอยู่บนภาษา JavaScript ที่มี `null`/`undefined` เป็นพื้นฐานอยู่ดี
+(ปิด flag หรือใช้ `as any` ก็ข้ามการเช็คได้ทันที) ในขณะที่ Rust **ไม่มี concept ของ null หลงเหลืออยู่ในภาษาเลย
+แม้แต่นิดเดียว** — ค่าที่ไม่มี ก็คือ `Option::None` ซึ่งเป็นเพียงหนึ่งใน 2 variant ของ enum ธรรมดา ๆ ที่ต้องผ่าน
+`match`/`if let` เหมือน enum อื่นทุกตัวที่เรียนมาในบทนี้ ไม่มีกฎพิเศษหรือทางลัดใด ๆ แยกออกไปเลย
+
 ### 10.10 `if let`, `while let`, และ `let else`
 
 หลายครั้งเราสนใจแค่ **pattern เดียว** จาก `match` และไม่สนใจกรณีอื่นเลย (หรือสนใจแค่ทำอย่างอื่นสั้น ๆ ในกรณีอื่น)
@@ -1362,6 +1409,138 @@ fn main() {
 สถานะ (transition rule)** เพิ่มเข้ามาอีกชั้น (เช่น ห้ามยกเลิกออเดอร์ที่ส่งถึงแล้ว) ทำให้ทั้งระบบ "เขียนโค้ดผิดกฎ
 ไม่ได้เลย" ตั้งแต่ตอน compile ไปจนถึงตอน runtime ที่ตรวจสอบ business rule ผ่านค่าที่คืนมา — นี่คือภาพรวมทั้งหมด
 ของแนวคิด **enum + pattern matching ทำให้ illegal states unrepresentable** ที่เราตั้งเป้าไว้ตั้งแต่ต้นบท
+
+#### สรุปสถานะออเดอร์จากหลาย ๆ ออเดอร์พร้อมกัน
+
+ในระบบจริง เรามักต้องดูภาพรวมของออเดอร์หลายรายการพร้อมกัน (เช่น dashboard ของแอดมิน) — เขียนฟังก์ชันที่รับ
+`&[Order]` (slice ตามที่เรียนใน Part 8) แล้วใช้ `match` นับจำนวนแต่ละสถานะได้ตรงไปตรงมา:
+
+```rust
+#[derive(Debug)]
+enum Order {
+    Pending,
+    Shipped { tracking_number: String },
+    Delivered { date: String },
+    Cancelled { reason: String },
+}
+
+fn summarize(orders: &[Order]) -> (u32, u32, u32, u32) {
+    let mut pending = 0;
+    let mut shipped = 0;
+    let mut delivered = 0;
+    let mut cancelled = 0;
+
+    for order in orders {
+        match order {
+            Order::Pending => pending += 1,
+            Order::Shipped { .. } => shipped += 1,
+            Order::Delivered { .. } => delivered += 1,
+            Order::Cancelled { .. } => cancelled += 1,
+        }
+    }
+
+    (pending, shipped, delivered, cancelled)
+}
+
+fn main() {
+    let orders = vec![
+        Order::Pending,
+        Order::Shipped { tracking_number: "TH001".to_string() },
+        Order::Delivered { date: "2026-09-01".to_string() },
+        Order::Cancelled { reason: "สินค้าหมด".to_string() },
+        Order::Delivered { date: "2026-09-02".to_string() },
+    ];
+
+    let (pending, shipped, delivered, cancelled) = summarize(&orders);
+    println!(
+        "รอดำเนินการ: {pending}, จัดส่งแล้ว: {shipped}, ส่งถึงแล้ว: {delivered}, ยกเลิก: {cancelled}"
+    );
+}
+```
+
+ผลลัพธ์:
+
+```
+รอดำเนินการ: 1, จัดส่งแล้ว: 1, ส่งถึงแล้ว: 2, ยกเลิก: 1
+```
+
+สังเกตว่า `summarize` รับ `orders: &[Order]` (ยืม slice มาอ่านเฉย ๆ ไม่ยึด ownership) แล้ววนลูปด้วย `for order in
+orders` — ตัวแปร `order` ที่ได้จะมี type เป็น `&Order` โดยอัตโนมัติ (จาก match ergonomics ที่เรียนในหัวข้อ 10.7.6)
+ทำให้ `match order { Order::Pending => ..., ... }` ทำงานได้ตรง ๆ โดยไม่ต้องยึด ownership ของ `Order` แต่ละตัว
+ออกมาจาก `orders` เลย — ฟังก์ชันนี้จึง "อ่าน" สถานะของทุกออเดอร์ได้โดยไม่ทำลาย ownership เดิมของผู้เรียก ซึ่งเป็น
+รูปแบบที่พบบ่อยมากในโค้ด Rust จริงที่ต้องประมวลผลข้อมูลจำนวนมากโดยไม่ต้อง clone หรือยึดข้อมูลต้นฉบับไป
+
+### 10.12 ทบทวนภาพรวม: Pattern ทุกรูปแบบที่เรียนในบทนี้
+
+ก่อนไปหัวข้อ "กับดักที่พบบ่อย" มาสรุปรูปแบบ pattern ทั้งหมดที่เรียนไปในบทนี้ไว้เป็นตารางอ้างอิงเดียว เพื่อให้เปิดดู
+ย้อนหลังได้ง่ายเวลาลืม syntax:
+
+| รูปแบบ Pattern | ตัวอย่าง Syntax | ใช้เมื่อ |
+|---|---|---|
+| Literal | `0 => ...`, `"cash" => ...` | เทียบค่าตรง ๆ กับค่าคงที่ |
+| Variable binding | `x => ...` | จับค่าอะไรก็ได้ไว้ในตัวแปรชื่อ `x` (ทำหน้าที่เป็น catch-all ที่ผูกค่าด้วย) |
+| Wildcard | `_ => ...` | จับค่าอะไรก็ได้ โดยไม่สนใจค่าจริงเลย |
+| Range | `1..=5 => ...` | จับช่วงของค่าที่เทียบลำดับได้ (integer, `char`) |
+| Or-pattern | `1 \| 2 \| 3 => ...` | จับหลายค่าที่ไม่ต่อเนื่องกัน ด้วย pattern เดียว |
+| Tuple destructure | `(x, y) => ...` | แตกค่า tuple ออกเป็นตัวแปรแยก |
+| Tuple-like variant destructure | `Enum::Variant(x, y) => ...` | แตกข้อมูลของ tuple-like variant |
+| Struct-like variant destructure | `Enum::Variant { field1, field2 } => ...` | แตกข้อมูลของ struct-like variant ด้วยชื่อ field |
+| Ignore some fields | `Enum::Variant { field1, .. } => ...` | ดึงมาใช้แค่บาง field ที่สนใจ ข้าม field อื่นด้วย `..` |
+| Match guard | `x if x > 5 => ...` | เพิ่มเงื่อนไขตรวจสอบเสริมหลัง pattern จับคู่รูปร่างสำเร็จแล้ว |
+| At-binding (`@`) | `x @ 1..=5 => ...` | ตรวจ pattern (เช่น range) พร้อมผูกค่าจริงไว้ใช้ต่อในเวลาเดียวกัน |
+| `ref` (แบบเก่า, ไม่ค่อยใช้แล้ว) | `&Enum::Variant(ref x) => ...` | ผูกค่าเป็น reference ด้วยมือ — ปัจจุบันแทนที่ด้วย match ergonomics เกือบทั้งหมด |
+
+### 10.13 เกร็ดเสริม: Macro `matches!` เมื่อต้องการแค่คำตอบ `true`/`false`
+
+บางครั้งเราไม่ต้องการดึงข้อมูลอะไรออกมาจาก pattern เลย แค่ต้องการรู้ **"ค่านี้ตรงกับรูปร่าง pattern นี้หรือไม่"**
+เป็นคำตอบ `bool` เขียน `match` เต็มรูปแบบเพื่อสิ่งนี้จะดูยาวเกินไป (เพราะต้องมี arm `true`/`false` ครบสองด้าน)
+standard library จึงมี macro ชื่อ **`matches!`** ให้ใช้แทน:
+
+```rust
+#[derive(Debug)]
+enum PaymentMethod {
+    Cash,
+    CreditCard { number: String, cvv: String },
+    BankTransfer(String),
+}
+
+fn is_cash(method: &PaymentMethod) -> bool {
+    matches!(method, PaymentMethod::Cash)
+}
+
+fn main() {
+    let a = PaymentMethod::Cash;
+    let b = PaymentMethod::BankTransfer("123".to_string());
+    println!("{}", is_cash(&a)); // true
+    println!("{}", is_cash(&b)); // false
+
+    let n = 7;
+    println!("{}", matches!(n, 1..=10));  // true — ใช้ range pattern ได้เหมือน match ปกติ
+    println!("{}", matches!(n, 1 | 2 | 3)); // false — ใช้ or-pattern ได้เหมือนกัน
+}
+```
+
+ผลลัพธ์:
+
+```
+true
+false
+true
+false
+```
+
+`matches!(method, PaymentMethod::Cash)` เทียบเท่ากับการเขียน:
+
+```rust
+match method {
+    PaymentMethod::Cash => true,
+    _ => false,
+}
+```
+
+แต่กระชับกว่ามาก และรับ pattern รูปแบบเดียวกับที่ใช้ใน `match` ได้ทุกแบบ (range, or-pattern, guard ผ่าน syntax
+`matches!(value, pattern if condition)`) `matches!` เหมาะมากกับการเขียนเงื่อนไขสั้น ๆ ใน `if`/`filter` (method
+ของ iterator ที่จะเรียนใน Part 25-26) ที่ต้องการแค่คำตอบ true/false จาก pattern โดยไม่ต้องดึงข้อมูลใด ๆ ออกมาใช้ต่อ
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

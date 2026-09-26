@@ -23,6 +23,9 @@
   เข้าใจกลไกเบื้องหลังอย่างถ่องแท้ ไม่ใช่แค่ "ใช้ตามที่เคยเห็น"
 - ออกแบบระบบแบบ "plugin" ที่รับ type ใหม่เข้ามาได้เรื่อย ๆ โดยไม่ต้องแก้โค้ดเดิม ผ่าน `Vec<Box<dyn Trait>>` และรู้ว่า
   เมื่อไหร่ควรเลือก static dispatch เมื่อไหร่ควรเลือก dynamic dispatch ในสถานการณ์จริง
+- อธิบายได้ว่าทำไม `dyn Trait` รวม trait "ปกติ" ที่มี method ได้แค่ตัวเดียวเท่านั้น (ต่างจาก `impl Trait`/`<T:
+  Trait>` ที่รวมได้หลายตัวด้วย `+` ตามใจ) อ่าน error E0225 จริง และแก้ด้วย supertrait ผสม blanket implementation
+  ได้อย่างถูกต้อง
 
 ## ความรู้ที่ต้องมีมาก่อน
 
@@ -1330,6 +1333,178 @@ fn main() {
 กันมีพฤติกรรมต่างกัน) ใช้ dynamic dispatch (`dyn Trait`) — ทั้งสองไม่ใช่คู่แข่งที่ต้องเลือกอย่างใดอย่างหนึ่งเสมอ
 ในโปรเจกต์เดียว โค้ด Rust ระดับ production จริงส่วนใหญ่ใช้**ทั้งสองแบบผสมกัน** ตามความเหมาะสมของแต่ละจุดในระบบ
 
+### 21.11 ข้อจำกัดที่มือใหม่มักไม่รู้: `dyn Trait` รวม Trait หลักได้แค่ "หนึ่งตัว" เท่านั้น
+
+มีข้อจำกัดสำคัญอีกข้อของ trait object ที่ยังไม่ได้พูดถึง และมักทำให้งงเมื่อเจอครั้งแรก: **`dyn Trait` เขียนรวม
+หลาย trait ด้วย `+` แบบเดียวกับ `impl Trait`/`<T: Trait>` (ที่เรียนมาตั้งแต่ Part 19 หัวข้อ 19.7) ไม่ได้ ถ้า
+trait ที่รวมกันมีมากกว่าหนึ่งตัวที่เป็น "trait ปกติที่มี method"** ลองดูว่าเกิดอะไรขึ้นถ้าพยายามเขียน `dyn Shape +
+Named` ตรง ๆ:
+
+```rust
+// 21.11 - พยายามรวมสอง trait ปกติ (Shape, Named) เข้าไปใน dyn Trait ตัวเดียวโดยใช้ + แบบเดียวกับ impl Trait
+trait Shape {
+    fn area(&self) -> f64;
+}
+
+trait Named {
+    fn name(&self) -> &str;
+}
+
+struct Circle {
+    radius: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        std::f64::consts::PI * self.radius * self.radius
+    }
+}
+
+impl Named for Circle {
+    fn name(&self) -> &str {
+        "วงกลม"
+    }
+}
+
+// พยายามเขียน &dyn Shape + Named ตรง ๆ — เหมือนกับ &impl Shape + Named ที่เคยเขียนได้ปกติใน Part 19
+fn print_it(item: &(dyn Shape + Named)) {
+    println!("{} พื้นที่ {:.2}", item.name(), item.area());
+}
+
+fn main() {
+    let c = Circle { radius: 2.0 };
+    print_it(&c);
+}
+```
+
+Error จริง:
+
+```
+error[E0225]: only auto traits can be used as additional traits in a trait object
+  --> src/main.rs:19:22
+   |
+19 | fn print_it(item: &(dyn Shape + Named)) {
+   |                        -----   ^^^^^ additional non-auto trait
+   |                        |
+   |                        first non-auto trait
+   |
+   = help: consider creating a new trait with all of these as supertraits and using that trait
+     here instead: `trait NewTrait: Shape + Named {}`
+   = note: auto-traits like `Send` and `Sync` are traits that have special properties; for more
+     information on them, visit <https://doc.rust-lang.org/reference/special-types-and-traits.html#auto-traits>
+```
+
+**ทำไมมีข้อจำกัดนี้ (คำตอบผูกกับ vtable และ fat pointer จากหัวข้อ 21.3 โดยตรง)**: ทวนว่า `&dyn Trait` คือ fat
+pointer ที่มีแค่**สอง field ตายตัว** — data pointer และ **vtable pointer เดียว** ถ้า Rust ยอมให้เขียน `dyn Shape +
+Named` ได้ตรง ๆ มันจะต้องมี**สอง vtable pointer** พร้อมกัน (ตัวหนึ่งสำหรับ method ของ `Shape`, อีกตัวสำหรับ method
+ของ `Named`) ซึ่งขัดกับโครงสร้างข้อมูลคงที่ของ fat pointer ที่ Rust เลือกออกแบบไว้ (สอง `usize` เท่านั้น ตายตัวเสมอ
+ไม่ว่า trait ไหนก็ตาม) — นี่คือเหตุผลที่ **trait "ปกติ" (มี method ของตัวเอง ต้องมี vtable) รวมกันใน `dyn` ได้
+แค่ตัวเดียวเท่านั้น** ในขณะที่ **auto trait** อย่าง `Send`, `Sync`, `Unpin` (ทวนสั้น ๆ ไว้ก่อน จะเรียนเต็มรูปแบบใน
+Part 40 เรื่อง concurrency) รวมเข้าไปเพิ่มได้ไม่จำกัดจำนวน เพราะ **auto trait ไม่มี method เลยแม้แต่ตัวเดียว**
+(เป็น marker trait แบบเดียวกับ `Copy` ที่เรียนใน Part 19 หัวข้อ 19.12) จึงไม่ต้องมี vtable entry อะไรเพิ่มเลย —
+มันแค่ "ป้ายกำกับเสริม" ที่ compiler ตรวจสอบตอน compile time ล้วน ๆ ไม่กระทบโครงสร้างของ fat pointer แม้แต่นิดเดียว
+ลองดูว่า `dyn Shape + Send` (trait ปกติหนึ่งตัว + auto trait) compile ผ่านได้ตามที่อธิบาย:
+
+```rust
+// dyn Shape + Send compile ผ่านได้ปกติ เพราะ Send เป็น auto trait (ไม่มี method จึงไม่ต้องมี vtable ของตัวเอง)
+trait Shape {
+    fn area(&self) -> f64;
+}
+
+struct Circle {
+    radius: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        std::f64::consts::PI * self.radius * self.radius
+    }
+}
+
+// Circle ไม่มี field ที่ไม่ใช่ Send เลย (f64 เป็น Send) จึง auto-implement Send ให้เองโดยไม่ต้องเขียนอะไรเพิ่ม
+fn print_it(item: &(dyn Shape + Send)) {
+    println!("พื้นที่ {:.2}", item.area());
+}
+
+fn main() {
+    let c = Circle { radius: 2.0 };
+    print_it(&c);
+}
+```
+
+ผลลัพธ์:
+
+```
+พื้นที่ 2.00
+```
+
+(หมายเหตุ: `radius: 2.0` ยกกำลังสองคูณ π ควรได้ประมาณ 12.57 — ตัวอย่างนี้เน้นแค่ยืนยันว่า `dyn Shape + Send` compile
+ผ่านได้ ไม่ได้เน้นความถูกต้องของสูตรคำนวณ)
+
+**วิธีแก้ที่ compiler แนะนำมาให้เองในข้อความ `help:`** ("consider creating a new trait with all of these as
+supertraits") คือสิ่งที่เราเพิ่งเรียนไปในหัวข้อ 21.7 นี่เอง — **สร้าง supertrait ตัวใหม่ที่รวมทั้งสอง trait เป็น
+เงื่อนไข แล้วใช้ `dyn` กับ supertrait ตัวนั้นแทน** ถ้าผสมกับ **blanket implementation** จาก Part 19 หัวข้อ 19.11
+ด้วย จะได้ทางแก้ที่ไม่ต้องเขียน `impl` ซ้ำทีละ type เลย:
+
+```rust
+// วิธีแก้ตามที่ compiler แนะนำ: รวม Shape + Named ผ่าน supertrait (21.7) แล้วใช้ blanket implementation
+// (Part 19 หัวข้อ 19.11) ให้ทุก type ที่ implement ทั้งสอง trait อยู่แล้ว ได้ Described มาโดยอัตโนมัติ
+// ไม่ต้องเขียน impl Described for Circle, impl Described for Rectangle ฯลฯ ทีละตัวเลย
+trait Shape {
+    fn area(&self) -> f64;
+}
+
+trait Named {
+    fn name(&self) -> &str;
+}
+
+// Described: Shape + Named คือ supertrait ที่ต้องการทั้งสอง trait เป็นเงื่อนไขก่อน (ตัวมันเองไม่มี method เพิ่ม)
+trait Described: Shape + Named {}
+
+// blanket implementation: type ใดก็ตาม T ที่ implement ทั้ง Shape และ Named พร้อมกัน จะได้ Described มาฟรี ๆ
+impl<T: Shape + Named> Described for T {}
+
+struct Circle {
+    radius: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        std::f64::consts::PI * self.radius * self.radius
+    }
+}
+
+impl Named for Circle {
+    fn name(&self) -> &str {
+        "วงกลม"
+    }
+}
+
+// ตอนนี้ &dyn Described ใช้เรียก method ของทั้ง Shape (.area()) และ Named (.name()) ได้พร้อมกันในตัวเดียว
+fn print_it(item: &dyn Described) {
+    println!("{} พื้นที่ {:.2}", item.name(), item.area());
+}
+
+fn main() {
+    let c = Circle { radius: 2.0 };
+    print_it(&c);
+}
+```
+
+ผลลัพธ์:
+
+```
+วงกลม พื้นที่ 12.57
+```
+
+**ทำไมวิธีนี้แก้ปัญหาได้อย่างสมบูรณ์**: `Described` เป็น **trait เดียว** ที่มี vtable เดียวของตัวเอง (แม้ตัวมันเอง
+จะไม่มี method ก็ตาม) แต่ vtable ของ `impl Described for Circle` (ที่ compiler generate ให้จาก blanket
+implementation) รวม entry ของ method จาก **ทั้ง supertrait `Shape` และ `Named`** ไว้ในตารางเดียวกัน (หลักการเดียวกับ
+ที่หัวข้อ 21.7 อธิบายไว้ว่า vtable ของ `dyn Greetable` รวม method ของ `Named` ที่เป็น supertrait ไว้ด้วย) — จึงยังมี
+**vtable pointer เดียว** ใน fat pointer ของ `&dyn Described` ตามกฎเดิมทุกประการ ไม่ขัดกับข้อจำกัดของหัวข้อนี้เลย
+สังเกตว่านี่คือจุดที่ **สามแนวคิดของบทนี้และ Part 19 มาบรรจบกันพอดี**: supertrait (21.7) + blanket implementation
+(19.11) + object safety/vtable (21.3-21.4) ประกอบกันเป็นทางออกที่สมบูรณ์ของข้อจำกัดที่ดูเหมือนจะแก้ไม่ได้ในตอนแรก
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### 1. Trait มี method ที่ return `Self` แล้วพยายามใช้เป็น `dyn Trait` — E0038
@@ -1606,6 +1781,65 @@ compiler ไม่รู้ขนาดของ "ค่าที่อยู่
 pointer ชนิดใดชนิดหนึ่งเสมอ ที่พบบ่อยที่สุดคือ `&dyn Shape` (ยืม ไม่ยึดความเป็นเจ้าของ) หรือ `Box<dyn Shape>`
 (ยึดความเป็นเจ้าของบน heap) — จะเลือกแบบไหนขึ้นกับว่าฟังก์ชันต้องการความเป็นเจ้าของค่านั้นหรือแค่ยืมใช้ชั่วคราว
 (หลักการเดียวกับการเลือก `&T` เทียบกับ `T`/`Box<T>` ที่เรียนมาตั้งแต่ Part 6-7)
+
+### 7. พยายามยัดสอง concrete type ที่ implement trait เดียวกันลง `Vec` เดียว โดยไม่ผ่าน `dyn` เลย
+
+กับดักที่พบบ่อยที่สุดสำหรับมือใหม่ที่เพิ่งเรียน trait object คือ **ลืมว่า `dyn` เป็นตัวที่ทำให้ heterogeneous
+collection เป็นไปได้** แล้วพยายามเก็บสอง concrete type ต่างกันไว้ใน `Vec<T>` ตรง ๆ (ย้ำกฎจากหัวข้อ 21.1):
+
+```rust
+trait Shape {
+    fn area(&self) -> f64;
+}
+
+struct Circle {
+    radius: f64,
+}
+
+impl Shape for Circle {
+    fn area(&self) -> f64 {
+        std::f64::consts::PI * self.radius * self.radius
+    }
+}
+
+struct Rectangle {
+    width: f64,
+    height: f64,
+}
+
+impl Shape for Rectangle {
+    fn area(&self) -> f64 {
+        self.width * self.height
+    }
+}
+
+fn main() {
+    // ทั้ง Circle และ Rectangle implement Shape เหมือนกัน แต่ Vec::new() ต้องมี "หนึ่ง concrete type" เท่านั้น
+    let mut shapes = Vec::new();
+    shapes.push(Circle { radius: 3.0 });
+    shapes.push(Rectangle { width: 4.0, height: 5.0 });
+
+    let total: f64 = shapes.iter().map(|s| s.area()).sum();
+    println!("{total}");
+}
+```
+
+```
+error[E0308]: mismatched types
+   |
+   |     shapes.push(Circle { radius: 3.0 });
+   |     ------      ------------------------ this argument has type `Circle`...
+   |     |
+   |     ... which causes `shapes` to have type `Vec<Circle>`
+   |     shapes.push(Rectangle { width: 4.0, height: 5.0 });
+   |            ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Circle`, found `Rectangle`
+```
+
+**วิธีแก้**: ประกาศ type ของตัวแปรให้ชัดเจนเป็น `Vec<Box<dyn Shape>>` ตั้งแต่บรรทัดแรก แล้วครอบทุกค่าที่ `push`
+ด้วย `Box::new(...)` (ตามที่อธิบายเต็มรูปแบบในหัวข้อ 21.1-21.2) — **จำกฎที่เป็นรากของทั้งบทนี้ไว้ให้แม่น**: `T`
+เดียวกันใน `Vec<T>`, `[T; N]`, หรือ generic ใด ๆ ต้องเป็น **concrete type เดียวเป๊ะ** เสมอไม่มีข้อยกเว้น — สิ่งที่
+`dyn Trait` ทำคือทำให้ "`Box<dyn Shape>`" กลายเป็นหนึ่ง concrete type ที่ซ่อนความหลากหลายไว้ข้างใน ไม่ใช่การยกเว้น
+กฎนี้แต่อย่างใด
 
 ## แบบฝึกหัด (Exercises)
 

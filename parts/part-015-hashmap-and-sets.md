@@ -197,6 +197,45 @@ Rust เลือกใส่ใน prelude เฉพาะสิ่งที่
 - `.is_empty()` — เช็คว่า map ว่างหรือไม่ (เร็วกว่า `.len() == 0` เพราะไม่ต้องนับจริง — เหมือน `Vec`/`String`
   ที่คุณเคยเห็นมาแล้ว)
 
+#### `HashMap::with_capacity()`: จองพื้นที่ล่วงหน้าเพื่อลด reallocation
+
+จาก Part 13 คุณรู้จัก `Vec::with_capacity()` ที่จองพื้นที่ heap ล่วงหน้าเพื่อลดจำนวนครั้งที่ต้อง reallocate ตอน
+`.push()` ซ้ำ ๆ — `HashMap` มีแนวคิดเดียวกันนี้ผ่าน `HashMap::with_capacity(n)`:
+
+```rust
+use std::collections::HashMap;
+
+fn main() {
+    let mut scores: HashMap<String, u32> = HashMap::with_capacity(100);
+    println!("capacity ก่อน insert: {}", scores.capacity());
+
+    scores.insert(String::from("Alice"), 90);
+    println!("capacity หลัง insert 1 ตัว: {}", scores.capacity());
+    println!("จำนวนสมาชิกจริง (len): {}", scores.len());
+}
+```
+
+ตัวอย่างผลลัพธ์ (ตัวเลข capacity จริงเป็นรายละเอียดภายในของ implementation และอาจต่างกันได้ระหว่างเวอร์ชันของ Rust
+— **ห้ามเขียนโค้ดที่พึ่งพาตัวเลขนี้ตรง ๆ**):
+
+```
+capacity ก่อน insert: 112
+capacity หลัง insert 1 ตัว: 112
+จำนวนสมาชิกจริง (len): 1
+```
+
+สังเกตว่า `capacity()` (112) ไม่เท่ากับตัวเลขที่เราขอ (100) เป๊ะ — เพราะ `HashMap` ปัดขนาด bucket ภายในให้เข้ากับ
+โครงสร้างข้อมูลของมันเอง (มักปัดเป็นเลขกำลังของ 2 หรือค่าที่คำนวณจาก load factor ที่กำหนดไว้ภายใน) ตัวเลขที่คุณส่ง
+ให้ `with_capacity()` คือ "ขอให้จองพื้นที่ได้**อย่างน้อย**เท่านี้โดยไม่ต้อง reallocate" ไม่ใช่ "ต้องได้พอดีเป๊ะ"
+
+เหตุผลเชิงประสิทธิภาพเหมือนกับ `Vec::with_capacity()` ทุกประการ: ถ้าคุณรู้ล่วงหน้าคร่าว ๆ ว่าจะ insert ข้อมูล
+ประมาณกี่รายการ (เช่น กำลังจะโหลดข้อมูลจากไฟล์ CSV ที่รู้จำนวนแถวอยู่แล้ว) การจองพื้นที่ไว้ล่วงหน้าด้วย
+`with_capacity()` ช่วยลดจำนวนครั้งที่ `HashMap` ต้อง **rehash ข้อมูลทั้งหมดใหม่** (เมื่อจำนวนสมาชิกเกิน load
+factor ที่กำหนดไว้ `HashMap` จะขยายขนาด bucket array และคำนวณ hash ของทุกคีย์ที่มีอยู่ใหม่ทั้งหมดเพื่อกระจายเข้า
+bucket ใหม่ — เป็น operation ที่มีต้นทุนสูงกว่า insert ปกติมาก) ถ้าไม่รู้จำนวนล่วงหน้าเลย การใช้ `HashMap::new()`
+เฉย ๆ ก็เป็นค่าเริ่มต้นที่เหมาะสมอยู่แล้ว เพราะ `HashMap` ขยายขนาดอัตโนมัติให้เองตาม insert อยู่แล้ว เพียงแต่ต้อง
+แลกกับ rehash เป็นครั้ง ๆ ไปตามการเติบโต — หลักการ trade-off นี้เหมือนกับ `Vec` เป๊ะทุกประการตามที่เรียนมาใน Part 13
+
 ### 15.3 Ownership semantics เมื่อ insert: `String` ถูก move เข้า map เสมอ
 
 จาก Part 6 คุณรู้แล้วว่า `String` ไม่ implement `Copy` — เมื่อส่ง `String` เข้าฟังก์ชัน หรือ assign ให้ตัวแปรอื่น
@@ -276,7 +315,34 @@ fn main() {
 ไปก่อน?"
 
 ค่าประเภท `Copy` เช่น `i32`, `u32`, `f64`, `bool`, `char` ไม่มีปัญหานี้เลย เพราะ insert จะ **copy ค่า** เข้าไปแทน
-การ move (ตัวแปรเดิมยังใช้ต่อได้ปกติ) — นี่คือกฎเดียวกับ Part 6 ที่ใช้กับทุกที่ในภาษา ไม่ใช่กฎพิเศษของ `HashMap`
+การ move (ตัวแปรเดิมยังใช้ต่อได้ปกติ) — นี่คือกฎเดียวกับ Part 6 ที่ใช้กับทุกที่ในภาษา ไม่ใช่กฎพิเศษของ `HashMap`:
+
+```rust
+use std::collections::HashMap;
+
+fn main() {
+    let mut scores: HashMap<i32, i32> = HashMap::new();
+    let key = 42; // i32 implement Copy
+    let value = 100; // i32 implement Copy
+    scores.insert(key, value);
+    println!("key เดิมยังใช้ได้: {key}, value เดิมยังใช้ได้: {value}");
+    println!("{:?}", scores.get(&key));
+}
+```
+
+ผลลัพธ์:
+
+```
+key เดิมยังใช้ได้: 42, value เดิมยังใช้ได้: 100
+Some(100)
+```
+
+สังเกตว่าโค้ดนี้ compile ผ่านโดยไม่ต้อง `.clone()` เลย แม้จะใช้ `key` และ `value` ต่อหลัง `.insert()` — เพราะ `i32`
+implement `Copy` การ insert จึงเป็นการ**คัดลอกบิตของค่าไปให้ map อีกชุดหนึ่ง** ตัวแปรเดิม (`key`, `value`) ยังคง
+สมบูรณ์และใช้ต่อได้ปกติทุกประการ ไม่มี ownership อะไรถูกโยกย้ายไปเลย — นี่คือเหตุผลที่ปัญหา E0382 ในหัวข้อนี้
+**เกิดขึ้นเฉพาะกับ type ที่ไม่ implement `Copy`เท่านั้น** (`String`, `Vec<T>`, struct ที่ไม่ derive `Copy`
+ฯลฯ) และเป็นเหตุผลว่าทำไมคีย์ที่เป็นตัวเลขล้วน ๆ (เช่น user ID เป็น `u64`) มักไม่เจอปัญหาเรื่อง ownership ให้ต้อง
+กังวลเลยเมื่อใช้กับ `HashMap`
 
 ### 15.4 การเข้าถึงค่า: `.get()`, indexing, และ `.contains_key()`
 
@@ -961,6 +1027,35 @@ fn main() {
 `HashSet<&str>` ดังนั้นสมาชิกภายในมี type เป็น `&str` อยู่แล้ว การ iterate ผ่าน `.intersection()` (ที่ยืมดูโดย
 ไม่ take ownership) จึงได้ `&&str` — ถ้าอยากได้ `Vec<&str>` ตรง ๆ ให้ใส่ `.copied()` ต่อท้าย `.collect()`
 
+#### `.is_subset()` และ `.is_superset()`: เช็คความสัมพันธ์ระหว่างเซตโดยไม่ต้องสร้างเซตใหม่
+
+นอกจากสี่ operation ข้างบนที่คืนค่าเป็น iterator ของสมาชิก `HashSet` ยังมี `.is_subset()` และ `.is_superset()`
+ที่คืนค่าเป็น `bool` ตรง ๆ — เหมาะเมื่อคุณต้องการรู้แค่ "ความสัมพันธ์" ระหว่างสองเซต ไม่ต้องการรายชื่อสมาชิกจริง:
+
+```rust
+use std::collections::HashSet;
+
+fn main() {
+    let basic_tags: HashSet<&str> = ["rust", "backend"].into_iter().collect();
+    let all_tags: HashSet<&str> = ["rust", "backend", "web", "opensource"].into_iter().collect();
+
+    println!("basic_tags เป็น subset ของ all_tags หรือไม่: {}", basic_tags.is_subset(&all_tags));
+    println!("all_tags เป็น superset ของ basic_tags หรือไม่: {}", all_tags.is_superset(&basic_tags));
+}
+```
+
+ผลลัพธ์:
+
+```
+basic_tags เป็น subset ของ all_tags หรือไม่: true
+all_tags เป็น superset ของ basic_tags หรือไม่: true
+```
+
+`.is_subset(&other)` ตอบว่า "ทุกสมาชิกของเซตนี้อยู่ใน `other` ด้วยหรือไม่" ส่วน `.is_superset(&other)` ตอบคำถาม
+ตรงกันข้าม ("เซตนี้มีสมาชิกครอบคลุม `other` ทั้งหมดหรือไม่") — ทั้งสอง method นี้มีประสิทธิภาพดีกว่าการ
+`.intersection()` แล้วเทียบ `.len()` เองตรง ๆ เพราะ implementation ภายในสามารถ**หยุดเช็คทันทีที่เจอสมาชิกแรกที่ไม่
+เข้าเงื่อนไข** ไม่ต้องไล่สร้าง intersection ทั้งชุดก่อนถึงจะรู้คำตอบ
+
 ### 15.10 `BTreeMap` / `BTreeSet`: ทางเลือกที่เรียงลำดับได้
 
 จากหัวข้อ 15.7 เราเห็นแล้วว่า `HashMap` ไม่การันตีลำดับการ iterate เลย ถ้าโปรแกรมของคุณ**ต้องการลำดับที่แน่นอน
@@ -1017,9 +1112,9 @@ fn main() {
 
 ```
 error[E0277]: the trait bound `f64: Ord` is not satisfied
- --> src/main.rs:6:12
+ --> src/main.rs:5:12
   |
-6 |     prices.insert(9.99, "ถูก");
+5 |     prices.insert(9.99, "ถูก");
   |            ^^^^^^ the trait `Ord` is not implemented for `f64`
   |
   = help: the following other types implement trait `Ord`:
@@ -1262,13 +1357,13 @@ fn main() {
 
 ```
 error[E0382]: borrow of moved value: `name`
- --> src/main.rs:6:15
+ --> src/main.rs:7:16
   |
-4 |     let name = String::from("สมชาย");
+5 |     let name = String::from("สมชาย");
   |         ---- move occurs because `name` has type `String`, which does not implement the `Copy` trait
-5 |     ages.insert(name, 30);
+6 |     ages.insert(name, 30);
   |                 ---- value moved here
-6 |     println!("{name}");
+7 |     println!("{name}"); // name ถูก move เข้า map ไปแล้ว!
   |                ^^^^ value borrowed here after move
 ```
 
@@ -1289,7 +1384,7 @@ fn main() {
 ```
 
 ```
-thread 'main' panicked at src/main.rs:5:13:
+thread 'main' panicked at src/main.rs:5:19:
 no entry found for key
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ```
@@ -1408,6 +1503,23 @@ immutable borrow (`alice_score`) ที่ยังมีชีวิตอย�
    ต่างกันอย่างไรจากข้อมูลชุดเดียวกัน (hint: ข้อ (ก) ใช้ `.sort_by()` แบบเดียวกับหัวข้อ 15.11 แล้ว `.take(3)`
    จาก iterator ก่อน `.collect()`; ข้อ (ข) แค่ `.collect()` จาก `counts.into_iter()` ตรงเป็น `BTreeMap` ได้เลย
    เพราะ `String` implement `Ord`)
+
+## ตารางสรุป: collection พื้นฐานทั้งสี่ชนิดของ Rust
+
+ก่อนสรุปบท มาดูภาพรวมทั้งหมดของ "collections มินิ-arc" (Part 13-15) รวมกันในตารางเดียว เพื่อให้เห็นว่าแต่ละชนิด
+เหมาะกับงานแบบไหน และควรเลือกใช้ตัวไหนเป็นอันดับแรกเมื่อเจอปัญหาใหม่:
+
+| Collection | เก็บอะไร | ค้นหาด้วย | ความซับซ้อนค้นหา | ลำดับตอน iterate | เหมาะกับ |
+|---|---|---|---|---|---|
+| `Vec<T>` | ลำดับของค่า (index 0, 1, 2, ...) | ตำแหน่ง index | O(1) ถ้ารู้ index, O(n) ถ้าค้นด้วยค่า | ตามลำดับ insert เสมอ | รายการที่มีลำดับความหมาย, ต้อง push/pop บ่อย |
+| `String` | ลำดับของ UTF-8 bytes | ไม่มี index แบบตัวเลขตรง ๆ | — | ตามลำดับ byte ใน UTF-8 | ข้อความ, ต้องรองรับ Unicode เต็มรูปแบบ |
+| `HashMap<K, V>` / `HashSet<T>` | คู่ key-value / ค่าที่ไม่ซ้ำ | คีย์ (ผ่าน hash) | O(1) โดยเฉลี่ย | **ไม่แน่นอน** (สุ่มทุกครั้งที่รัน) | ค้นหาเร็วที่สุด ไม่สนใจลำดับ |
+| `BTreeMap<K, V>` / `BTreeSet<T>` | คู่ key-value / ค่าที่ไม่ซ้ำ (เรียงลำดับ) | คีย์ (ผ่าน B-tree) | O(log n) | เรียงตามคีย์เสมอ | ต้องการลำดับที่แน่นอน, ต้องการ range query |
+
+หลักการเลือกแบบง่ายที่สุดสำหรับทั้งสี่ตัว: เริ่มคิดจาก **"ข้อมูลของฉันมีความหมายเป็นลำดับ (sequence) หรือเป็นคู่
+key-value?"** — ถ้าเป็นลำดับ ใช้ `Vec<T>` (หรือ `String` ถ้าเป็นข้อความ) ถ้าเป็นคู่ key-value หรือต้องเช็คว่า
+"มีอยู่ไหม" บ่อย ๆ ให้ถามต่อว่า **"ต้องการลำดับตอน iterate ไหม?"** — ไม่ต้องการ ใช้ `HashMap`/`HashSet` (เร็วสุด)
+ต้องการ ใช้ `BTreeMap`/`BTreeSet`
 
 ## สรุป
 

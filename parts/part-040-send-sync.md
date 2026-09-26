@@ -728,6 +728,29 @@ fn main() {
 ของ data race, และ memory safety ของ lifetime) พร้อมกันหมดในบรรทัดเดียว นี่คือเหตุผลที่วิศวกร Rust มักพูดว่า
 "ถ้า code ของคุณ compile ผ่าน `thread::spawn` ได้ มันมักจะไม่มีบั๊ก concurrency แบบคลาสสิกที่เจอในภาษาอื่นเลย"
 
+**`JoinHandle<T>` เองก็เป็น `Send`/`Sync` ตามกฎเดียวกัน**
+
+สิ่งที่ `thread::spawn` คืนกลับมาคือ `JoinHandle<T>` — handle ที่ใช้เรียก `.join()` เพื่อรอ thread จบและ
+ดึงค่า return กลับมา สังเกตว่า `JoinHandle<T>` เองก็เป็น struct ธรรมดาที่ต้องผ่านกฎ auto trait เหมือนกับทุก
+type อื่น มันเก็บ handle ของ OS thread ไว้ภายใน (ผ่าน layer ของระบบปฏิบัติการที่ออกแบบมาให้ปลอดภัยข้าม
+thread โดยธรรมชาติ) ทำให้ `JoinHandle<T>` เป็นทั้ง `Send` และ `Sync` เสมอ ไม่ว่า `T` จะเป็นอะไรก็ตาม
+(เพราะ `JoinHandle<T>` ไม่ได้เก็บค่า `T` ไว้ตรง ๆ ตั้งแต่ต้น — มันแค่รู้วิธี "รอและดึงค่า" ออกมาตอน `.join()`
+เท่านั้น) ซึ่งเป็นเหตุผลที่ Part 37 สามารถเก็บ `Vec<JoinHandle<T>>` แล้วส่งต่อไปมาระหว่างฟังก์ชันได้อย่าง
+อิสระโดยไม่มี compile error เรื่อง `Send`/`Sync` โผล่มาให้แก้เลย:
+
+```rust
+use std::thread::JoinHandle;
+
+fn assert_send<T: Send>() {}
+fn assert_sync<T: Sync>() {}
+
+fn main() {
+    assert_send::<JoinHandle<i32>>();
+    assert_sync::<JoinHandle<i32>>();
+    println!("JoinHandle<i32> เป็นทั้ง Send และ Sync");
+}
+```
+
 ### 40.11 `Arc<Mutex<T>>` คือทั้ง `Send` และ `Sync`: "final boss" ที่ทำให้ทุกอย่างเข้าที่
 
 ตอนนี้เรามีความรู้พอที่จะอธิบาย pattern ที่ใช้บ่อยที่สุดใน Rust concurrency — `Arc<Mutex<T>>` — แบบเจาะ

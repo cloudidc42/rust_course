@@ -456,6 +456,12 @@ compile และรันเป็น test จริง** โดยอัตโ
 มาดูตัวอย่างจริง สมมติเรามีฟังก์ชันนี้ในไฟล์ `src/lib.rs`:
 
 ```rust
+pub struct Product {
+    pub name: String,
+    pub price: f64,
+    pub quantity: u32,
+}
+
 impl Product {
     /// คำนวณมูลค่ารวมของสินค้ารายการนี้ (ราคา คูณ จำนวน)
     ///

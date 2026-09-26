@@ -54,7 +54,7 @@
 | 32 | Testing: Unit Tests (#[test], assert!, mocking เบื้องต้น) | ⏳ |
 | 33 | Testing: Integration Tests และการจัดระเบียบ test suite | ✅ |
 | 34 | Documentation: rustdoc, doc tests, docs.rs | ✅ |
-| 35 | Cargo ขั้นสูง (features, profiles, workspaces จริง, cargo.lock) | ⏳ |
+| 35 | Cargo ขั้นสูง (features, profiles, workspaces จริง, cargo.lock) | ✅ |
 | 36 | Macros: Declarative Macros (macro_rules!) | ⏳ |
 | 37 | Threads พื้นฐาน (std::thread, join, move closures) | ⏳ |
 | 38 | Channels (mpsc, message passing concurrency) | ⏳ |

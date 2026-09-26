@@ -22,7 +22,7 @@
 |---|---|---|
 | 6 | Ownership เบื้องต้น (move, copy, drop) | ⏳ |
 | 7 | Borrowing และ References (&, &mut, borrow checker) | ⏳ |
-| 8 | Slices (&str, &[T]) | ⏳ |
+| 8 | Slices (&str, &[T]) | ✅ |
 | 9 | Structs (tuple struct, unit struct, methods, impl) | ⏳ |
 | 10 | Enums และ Pattern Matching (match, if let, while let) | ⏳ |
 | 11 | Option<T> และ Null Safety | ⏳ |

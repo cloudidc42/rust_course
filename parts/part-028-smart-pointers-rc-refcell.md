@@ -399,6 +399,34 @@ strong_count หลัง drop server2 = 1
 แล้วค่าถูก drop" (กฎข้อ 3 จาก Part 6) ก็ยังถูกบังคับใช้อยู่เหมือนเดิม เพียงแค่ "เจ้าของ" ในที่นี้ไม่ได้นับเป็นคนเดียว
 แต่นับทั้งกลุ่มพร้อมกัน
 
+#### ภาพในหัวสำหรับ Rc<T>: heap allocation ที่มีตัวนับติดอยู่
+
+เพื่อให้เห็นภาพชัดเจนว่าทำไม `Rc::clone` ถึงราคาถูกและทำไมทุก `Rc` ที่ clone มาจากกันถึงชี้ไปที่ตำแหน่งเดียวกัน
+เป๊ะ ๆ ลองนึกภาพ memory layout ของ `Rc<Config>` ในตัวอย่างข้างบน (เทียบกับภาพ memory layout ของ `String` และ
+reference ที่เคยเห็นใน Part 7):
+
+```
+                     heap allocation ก้อนเดียว (จัดสรรครั้งเดียวตอน Rc::new)
+                     ┌─────────────────────────────────────┐
+                     │ strong_count: 3   (จำนวนเจ้าของ)     │
+                     │ weak_count:   0   (จะเจอใน Part 29)  │
+                     │ value: Config { max_connections:100 }│
+                     └─────────────────────────────────────┘
+                                ▲       ▲       ▲
+                                │       │       │
+   ตัวแปร config (บน stack) ────┘       │       │
+   server1.config (บน stack) ───────────┘       │
+   server2.config (บน stack) ───────────────────┘
+```
+
+สังเกตว่า `Rc<Config>` แต่ละตัว (`config`, `server1.config`, `server2.config`) เป็นแค่ **ตัวชี้เล็ก ๆ บน stack**
+ที่ชี้ไปยัง heap allocation **ก้อนเดียวกัน** ก้อนนั้นเก็บ 3 อย่างรวมกัน: (1) `strong_count` ตัวเลขบอกจำนวนเจ้าของ
+ที่ยังมีชีวิตอยู่ (2) `weak_count` ตัวเลขอีกตัวที่เกี่ยวกับ `Weak<T>` ซึ่งจะเจอใน Part 29 (ตอนนี้เป็น 0 เสมอถ้ายัง
+ไม่ได้ใช้ `Weak`) และ (3) `value` คือข้อมูล `Config` จริงที่ทุกคนแบ่งกันใช้ — เมื่อเรียก `Rc::clone()` สิ่งที่
+เกิดขึ้นคือ **สร้างตัวชี้ใหม่อีกตัวบน stack ที่ชี้ไปยัง heap allocation ก้อนเดิม** พร้อมกับเพิ่มเลข
+`strong_count` ขึ้นหนึ่ง — ไม่มีการจัดสรร heap ใหม่เลยแม้แต่ byte เดียว ต่างจาก `.clone()` ของ `String` ที่ต้อง
+จัดสรร heap ก้อนใหม่ทั้งก้อนอย่างสิ้นเชิงตามภาพที่เคยเห็นใน Part 7
+
 #### `Rc::clone(&x)` เขียนแบบไหนก็ได้ แต่มีความหมายต่างกัน
 
 ในทางเทคนิค คุณสามารถเขียน `config.clone()` (แบบ method call ผ่าน `.`) แทน `Rc::clone(&config)` ได้เหมือนกัน เพราะ
@@ -750,6 +778,27 @@ immutable — ค้างอยู่แล้ว") ส่วนกรณีท
 คุณมักไม่จำเป็นต้องใช้ `try_` เพราะการเกิด panic ในกรณีนี้มักหมายถึง **บั๊ก** ในการออกแบบ scope ของ `.borrow()`
 มากกว่าเป็นสถานการณ์ปกติที่ควรรองรับแบบ graceful
 
+#### เทียบให้เห็นชัด: borrow checker (compile time) vs RefCell (runtime)
+
+ตารางนี้เทียบแนวคิดของ Part 7 กับแนวคิดของหัวข้อนี้แบบเคียงข้างกัน เพื่อยืนยันอีกครั้งว่า **กฎที่ถูกบังคับใช้คือกฎ
+เดียวกัน** เปลี่ยนแค่ "ใครตรวจ" และ "ตรวจตอนไหน":
+
+| แง่มุม | `&T` / `&mut T` (Part 7) | `Ref<'_, T>` / `RefMut<'_, T>` จาก `RefCell<T>` |
+|---|---|---|
+| ใครตรวจกฎ "mutable หนึ่งตัว หรือ immutable หลายตัว" | Borrow checker ของ `rustc` | ตัวนับภายในของ `RefCell` เอง |
+| ตรวจตอนไหน | **Compile time** — ก่อนโปรแกรมรันด้วยซ้ำ | **Runtime** — ตอนที่ `.borrow()`/`.borrow_mut()` ถูกเรียกจริง |
+| ถ้าละเมิดกฎจะเกิดอะไรขึ้น | โปรแกรม **compile ไม่ผ่านเลย** (`E0499`, `E0502` จาก Part 7) | โปรแกรม compile ผ่าน แต่ **panic ตอนรัน** (`BorrowError`/`BorrowMutError`) |
+| ต้นทุนตอน runtime | **ไม่มีเลย** (zero-cost — ตรวจจบไปแล้วตั้งแต่ compile time) | มีเล็กน้อย (เช็ค/อัปเดตตัวนับทุกครั้งที่ยืม) |
+| เขียนโค้ดที่ผ่าน borrow checker ปกติไม่ได้ (เพราะ compiler มองไม่เห็นว่าปลอดภัยจริง) แต่ตัวเราการันตีได้เองว่าปลอดภัย | ทำไม่ได้ — compiler ตัดสินสุดท้าย | **ทำได้** — นี่คือเหตุผลหลักที่มีอยู่ของ `RefCell<T>` |
+
+แถวสุดท้ายคือใจความสำคัญที่สุด: บางครั้ง **คุณรู้ (จาก logic ของโปรแกรม) ว่าโค้ดปลอดภัยแน่นอน แต่ borrow checker
+พิสูจน์แบบ static analysis ไม่ได้** เพราะมันวิเคราะห์แค่โครงสร้างของโค้ด ไม่รู้ตรรกะเชิง runtime (เช่นในตัวอย่าง
+`Department`/`Budget` ที่ `.borrow_mut()` ของแต่ละ `Department.spend()` ไม่มีทางซ้อนกันจริงเพราะเรียกทีละครั้ง
+ตามลำดับ แต่ borrow checker ธรรมดาไม่มีทางรู้เรื่องนี้ได้เลยถ้าไม่มี `RefCell` มาช่วย) — `RefCell<T>` คือทางออก
+สำหรับสถานการณ์แบบนี้: ให้ compiler "ยกมือยอมแพ้" แล้วผลักภาระการตรวจสอบไปที่ runtime แทน โดยยังคงความปลอดภัยของ
+กฎเดิมไว้ครบถ้วน (ไม่มี undefined behavior เกิดขึ้นได้เลย แค่ต้องแลกด้วยความเสี่ยงที่จะ panic ถ้าตรรกะที่คุณ "รู้"
+ว่าปลอดภัยนั้นดันผิดจริง ๆ)
+
 #### วิธีป้องกัน: จำกัด scope ของ Ref/RefMut ให้แคบที่สุด
 
 หลักการป้องกันปัญหานี้ที่สำคัญที่สุดคือ: **ให้ `Ref`/`RefMut` หมด scope (ถูก drop) โดยเร็วที่สุดเท่าที่ทำได้** —
@@ -942,7 +991,9 @@ a.value = 1, b.value = 2
 
 ไล่ดูสถานะตัวนับทีละจุด: `a` มี `strong_count = 2` (ตัวแปร `a` ใน `main` เป็นเจ้าของหนึ่ง + `b.next` ถือ `Rc`
 ไปยัง `a` อีกหนึ่ง) และ `b` ก็มี `strong_count = 2` เช่นกัน (ตัวแปร `b` ใน `main` + `a.next` ถือ `Rc` ไปยัง `b`)
-ทั้งสองชี้ถึงกันเป็นวงจรสมบูรณ์แล้ว ณ จุดนี้
+ทั้งสองชี้ถึงกันเป็นวงจรสมบูรณ์แล้ว ณ จุดนี้ (ถ้าลองเรียก `Rc::weak_count(&a)` ดูตอนนี้ จะได้ 0 เพราะเรายังไม่ได้
+ใช้ `Weak<T>` เลยในตัวอย่างนี้ — `weak_count` จากภาพ memory layout ในหัวข้อ 28.3 จะเริ่มไม่เป็น 0 ก็ต่อเมื่อมีคน
+เรียก `Rc::downgrade()` ซึ่งเป็นเนื้อหาของ Part 29)
 
 ทีนี้ลองนึกภาพว่าถ้า `main` จบลง ตัวแปร `a` และ `b` หมด scope ทั้งคู่จะเกิดอะไรขึ้น:
 
@@ -1144,6 +1195,24 @@ fn main() {
 ทั้ง ๆ ที่ `atm_asoke` ไม่ได้เรียก `.deposit()` เองเลย — นี่คือพลังของ `Rc<RefCell<T>>` ที่ทำให้ทั้งสองตู้มองเห็น
 "บัญชีเดียวกันจริง ๆ" ไม่ใช่สำเนาคนละก้อน (`strong_count = 3` เพราะมีเจ้าของ 3 คน: ตัวแปร `account` ใน `main`,
 `atm_siam`, และ `atm_asoke`)
+
+เพื่อให้เห็นภาพว่ายอดเงินและตัวนับเปลี่ยนแปลงไปตามลำดับการเรียกใช้งานอย่างไร มาไล่ทีละบรรทัดเป็นตารางกัน:
+
+| ลำดับ | การกระทำ | balance หลังทำ | strong_count |
+|---|---|---|---|
+| 1 | `Account::new("สมชาย", 1000.0)` | 1000.00 | 1 (แค่ตัวแปร `account`) |
+| 2 | สร้าง `atm_siam` ด้วย `Rc::clone(&account)` | 1000.00 | 2 |
+| 3 | สร้าง `atm_asoke` ด้วย `Rc::clone(&account)` | 1000.00 | 3 |
+| 4 | `atm_siam.deposit(500.0)` | 1500.00 | 3 (ไม่เปลี่ยน — deposit ไม่กระทบตัวนับ) |
+| 5 | `atm_asoke.withdraw(300.0)` | 1200.00 | 3 |
+| 6 | `atm_siam.print_balance()` (แค่อ่าน) | 1200.00 | 3 |
+| 7 | `atm_asoke.print_balance()` (แค่อ่าน) | 1200.00 | 3 |
+
+สังเกตว่า **คอลัมน์ `strong_count` กับคอลัมน์ `balance` เปลี่ยนแปลงจากสาเหตุที่ต่างกันโดยสิ้นเชิง**: `strong_count`
+เปลี่ยนเฉพาะตอนที่มีการสร้าง/ทำลาย `Rc` (ตอนสร้าง `atm_siam`/`atm_asoke` เท่านั้นในตารางนี้) ในขณะที่ `balance`
+เปลี่ยนเฉพาะตอนที่มีการเรียก `.deposit()`/`.withdraw()` ผ่าน `.borrow_mut()` ของ `RefCell` — สองอย่างนี้เป็นกลไก
+คนละชั้นกันอย่างสิ้นเชิง: **`Rc` จัดการ "ใครเป็นเจ้าของ" ส่วน `RefCell` จัดการ "ข้อมูลถูกแก้ไขเมื่อไหร่"** ตรงตาม
+หลักการที่สรุปไว้ในหัวข้อ 28.12
 
 #### เวอร์ชันที่มีบั๊ก: BorrowError จากการ Borrow ซ้อนโดยไม่ตั้งใจ
 
@@ -1549,12 +1618,69 @@ fn main() {
    playlist เพื่อยืนยันว่าตัวนับเปลี่ยนตามที่คาดไว้จริง
    (hint: โครงสร้างเหมือนตัวอย่าง `Config`/`Server` ในหัวข้อ 28.3 เป๊ะ ๆ แค่เปลี่ยนชนิดข้อมูล)
 
+   โครงเริ่มต้น (ไม่ใช่เฉลยเต็ม แค่ช่วยตั้งต้น):
+   ```rust
+   use std::rc::Rc;
+
+   struct Playlist {
+       name: String,
+       songs: Rc<Vec<String>>,
+   }
+
+   fn main() {
+       let weekly_hits = Rc::new(vec![
+           "เพลงที่ 1".to_string(),
+           "เพลงที่ 2".to_string(),
+       ]);
+       println!("strong_count เริ่มต้น = {}", Rc::strong_count(&weekly_hits));
+
+       let playlist_a = Playlist { name: "ของ A".to_string(), songs: Rc::clone(&weekly_hits) };
+       // TODO: พิมพ์ strong_count หลังสร้าง playlist_a
+
+       let playlist_b = Playlist { name: "ของ B".to_string(), songs: Rc::clone(&weekly_hits) };
+       // TODO: พิมพ์ strong_count หลังสร้าง playlist_b
+
+       println!("{}: {:?}", playlist_a.name, playlist_a.songs);
+       println!("{}: {:?}", playlist_b.name, playlist_b.songs);
+   }
+   ```
+
 2. **โจทย์ระดับกลาง**: ต่อยอดจากข้อ 1 — เปลี่ยน `Playlist` ให้ใช้ `Rc<RefCell<Vec<String>>>` แทน `Rc<Vec<String>>`
    เพื่อให้ playlist ใดก็ได้สามารถ `.push()` เพลงใหม่เข้าไปในชุดเพลงที่ใช้ร่วมกันได้ (ผ่าน `.borrow_mut()`) เขียน
    เมธอด `add_song(&self, title: &str)` ให้ `Playlist` แล้วทดสอบว่าเมื่อ playlist ตัวแรกเพิ่มเพลง playlist ตัวที่
    สองก็ต้องเห็นเพลงใหม่นั้นด้วย (พิมพ์เนื้อหาทั้งหมดของทั้งสอง playlist ออกมาเทียบกัน) — สังเกตว่าเมธอด
    `add_song` รับ `&self` ไม่ใช่ `&mut self` แต่ยังแก้ไขข้อมูลที่ใช้ร่วมกันได้จริง
    (hint: โครงสร้างเหมือนตัวอย่าง `Department`/`Budget` ในหัวข้อ 28.8)
+
+   โครงเริ่มต้น (ไม่ใช่เฉลยเต็ม แค่ช่วยตั้งต้น):
+   ```rust
+   use std::cell::RefCell;
+   use std::rc::Rc;
+
+   struct Playlist {
+       name: String,
+       songs: Rc<RefCell<Vec<String>>>,
+   }
+
+   impl Playlist {
+       fn add_song(&self, title: &str) {
+           // TODO: push ชื่อเพลงใหม่เข้าไปใน self.songs ผ่าน .borrow_mut()
+           todo!()
+       }
+   }
+
+   fn main() {
+       let shared_songs = Rc::new(RefCell::new(vec!["เพลงที่ 1".to_string()]));
+
+       let playlist_a = Playlist { name: "ของ A".to_string(), songs: Rc::clone(&shared_songs) };
+       let playlist_b = Playlist { name: "ของ B".to_string(), songs: Rc::clone(&shared_songs) };
+
+       playlist_a.add_song("เพลงใหม่จาก A");
+
+       println!("{}: {:?}", playlist_a.name, playlist_a.songs.borrow());
+       println!("{}: {:?}", playlist_b.name, playlist_b.songs.borrow());
+   }
+   ```
 
 3. **โจทย์ระดับยาก**: เขียนโปรแกรมที่ตั้งใจทำให้เกิด panic แบบ `BorrowMutError`/`BorrowError` ขึ้นมาให้เห็นจริง
    ๆ ด้วยตัวเอง (ไม่ใช่ copy จากบทนี้ตรง ๆ แต่ออกแบบสถานการณ์ของตัวเอง เช่น struct `Inventory` ที่มีเมธอด
@@ -1576,6 +1702,46 @@ fn main() {
    หลังจบโปรแกรม แล้วอธิบายว่าทำไมตัวเลขนั้นถึงไม่มีวันลดลงถึง 0 แม้ตัวแปรทั้งหมดใน `main()` จะหมด scope ไปแล้ว
    (hint: ข้อสุดท้ายนี้จะบังคับให้ `User` implement บางอย่างเพื่อให้ `ChatRoom` ถือ `Rc<User>` ได้ — ลองคิดดูว่า
    ต้องปรับโครงสร้างยังไงให้ compile ผ่าน และคำตอบสุดท้ายควรจะสอดคล้องกับสิ่งที่อธิบายไว้ในหัวข้อ 28.9 พอดี)
+
+   โครงเริ่มต้น (ไม่ใช่เฉลยเต็ม แค่ช่วยตั้งต้นสำหรับส่วนห้องแชทพื้นฐาน ยังไม่รวมส่วน reference cycle):
+   ```rust
+   use std::cell::RefCell;
+   use std::rc::Rc;
+
+   struct ChatRoom {
+       messages: RefCell<Vec<String>>,
+   }
+
+   struct User {
+       name: String,
+       room: Rc<RefCell<ChatRoom>>,
+   }
+
+   impl User {
+       fn send(&self, text: &str) {
+           // TODO: เพิ่มข้อความ (พร้อมชื่อผู้ส่ง) ลงใน self.room.borrow().messages
+           todo!()
+       }
+
+       fn read_all(&self) {
+           // TODO: พิมพ์ข้อความทั้งหมดในห้อง
+           todo!()
+       }
+   }
+
+   fn main() {
+       let room = Rc::new(RefCell::new(ChatRoom { messages: RefCell::new(Vec::new()) }));
+
+       let alice = User { name: "Alice".to_string(), room: Rc::clone(&room) };
+       let bob = User { name: "Bob".to_string(), room: Rc::clone(&room) };
+
+       alice.send("สวัสดีครับ");
+       bob.send("สวัสดีค่ะ");
+
+       alice.read_all();
+       bob.read_all();
+   }
+   ```
 
 ## สรุป
 

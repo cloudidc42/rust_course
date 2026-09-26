@@ -1030,7 +1030,7 @@ fn main() {
   `.map()`/`.unwrap_or()`/`.unwrap_or_else()` แทนการเขียน `match`/`if let` ซ้ำทุกครั้ง — สังเกตว่า `price_of`
   ใช้ `.unwrap_or(0)` (eager, ค่า `0` ไม่มีต้นทุนสร้าง) ในขณะที่ `display_name` ใช้ `.unwrap_or_else(|| format!(...))`
   (lazy, เพราะ `format!` ต้อง allocate `String` ใหม่ ไม่ควรทำทุกครั้งถ้าไม่จำเป็น) — นี่คือการนำหลักการจากหัวข้อ
-  11.4 มาใช้ตัดสินใจจริงในโค้ด ไม่ใช่แค่ท่องจำ syntax
+  11.5 มาใช้ตัดสินใจจริงในโค้ด ไม่ใช่แค่ท่องจำ syntax
 - `require_in_stock` แสดงการ **chain `.ok_or_else()` ต่อด้วย `?`** ในฟังก์ชันเดียว: แปลง `Option<&Product>` เป็น
   `Result<&Product, String>` ก่อน (ถ้าไม่พบสินค้าเลย ให้ error บอกว่า "ไม่พบสินค้ารหัสนี้") แล้วใช้ `?` ดึงค่า
   `&Product` ออกมาใช้ต่อทันทีถ้าสำเร็จ จากนั้นเช็คเงื่อนไขทางธุรกิจเพิ่ม (`stock == 0`) ที่ **ไม่เกี่ยวกับ `Option`
@@ -1267,6 +1267,55 @@ help: try using `.as_ref()` to convert `&Option<String>` to `Option<&String>`
 แม้จะ "ประกอบด้วยส่วนเดียวกัน" ก็ตาม สังเกตว่า compiler แนะนำวิธีแก้ให้ตรง ๆ อีกแล้ว (`help: try using .as_ref()`)
 **วิธีแก้**: เรียก `.as_ref()` แปลงรูปร่างก่อนส่งเข้าฟังก์ชันเสมอ (`session.user_note.as_ref()`) — error แบบนี้
 เป็นสัญญาณที่ดีมากว่าคุณต้องใช้ `.as_ref()`/`.as_mut()` ณ จุดนั้น ไม่ใช่สัญญาณว่าการออกแบบฟังก์ชันผิด
+
+**7. ใช้ `.unwrap_or_default()` กับ struct ที่ไม่ได้ `derive(Default)` (E0277)**
+
+```rust
+struct Coordinates {
+    lat: f64,
+    lng: f64,
+}
+
+fn main() {
+    let maybe_coords: Option<Coordinates> = None;
+    let coords = maybe_coords.unwrap_or_default();
+    println!("{} {}", coords.lat, coords.lng);
+}
+```
+
+```
+error[E0277]: the trait bound `Coordinates: Default` is not satisfied
+ --> src/main.rs:8:31
+  |
+8 |     let coords = maybe_coords.unwrap_or_default();
+  |                               ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `Coordinates`
+  |
+note: required by a bound in `Option::<T>::unwrap_or_default`
+help: consider annotating `Coordinates` with `#[derive(Default)]`
+  |
+1 + #[derive(Default)]
+2 | struct Coordinates {
+  |
+```
+
+ตามที่อธิบายไว้ในหัวข้อ 11.5 — `.unwrap_or_default()` ทำงานได้ก็ต่อเมื่อ type ข้างใน `Option<T>` implement trait
+`Default` เท่านั้น (เพื่อให้ compiler รู้ว่าจะเรียก `T::default()` แบบไหน) type พื้นฐานของ Rust (ตัวเลข, `bool`,
+`String`, `Vec<T>`, ...) implement `Default` มาให้อยู่แล้วโดยอัตโนมัติ แต่ **struct ที่เราสร้างขึ้นเองไม่ได้
+implement `Default` ให้เองโดย default** (คนละเรื่องกับชื่อ trait ที่บังเอิญคล้ายกัน) เหมือนกับที่ต้องขอ
+`#[derive(Debug)]` เพื่อใช้ `{:?}` (ตามที่เรียนใน Part 9) **วิธีแก้**: เพิ่ม `#[derive(Default)]` เหนือ struct
+(ใช้ได้ก็ต่อเมื่อทุก field ของ struct implement `Default` ด้วยเช่นกัน — `f64` ทั้งสอง field ในตัวอย่างนี้
+implement `Default` อยู่แล้ว ค่า default ของมันคือ `0.0`):
+
+```rust
+#[derive(Debug, Default)]
+struct Coordinates {
+    lat: f64,
+    lng: f64,
+}
+```
+
+หลังเพิ่ม `#[derive(Default)]` แล้ว `maybe_coords.unwrap_or_default()` จะได้ `Coordinates { lat: 0.0, lng: 0.0 }`
+กลับมาเมื่อ `maybe_coords` เป็น `None`
 
 ## แบบฝึกหัด (Exercises)
 

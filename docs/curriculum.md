@@ -28,7 +28,7 @@
 | 11 | Option<T> และ Null Safety | ⏳ |
 | 12 | Result<T,E> และ Error Handling เบื้องต้น (? operator) | ⏳ |
 | 13 | Collections: Vec<T> | ✅ |
-| 14 | Collections: String และการจัดการข้อความ (UTF-8) | ⏳ |
+| 14 | Collections: String และการจัดการข้อความ (UTF-8) | ✅ |
 | 15 | Collections: HashMap, HashSet, BTreeMap/BTreeSet | ⏳ |
 | 16 | Modules และการจัดระเบียบโค้ด (mod, pub, use, super, crate) | ⏳ |
 | 17 | Packages, Crates, Workspaces | ⏳ |

@@ -383,7 +383,7 @@ fn main() {
 โปรแกรมนี้ compile ผ่าน (syntax ถูกต้องสมบูรณ์) แต่ตอนรันจะ panic ด้วยข้อความ:
 
 ```
-thread 'main' panicked at src/main.rs:6:22:
+thread 'main' panicked at src/main.rs:6:27:
 no entry found for key
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ```

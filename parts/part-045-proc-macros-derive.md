@@ -62,29 +62,68 @@
 ### 45.1 ทวนความจำจาก Part 44 และภาพรวมของบทนี้
 
 ใน Part 44 เราสร้าง `#[derive(Describe)]` เวอร์ชันแรกที่ทำสิ่งเดียวคือ: รับ struct ที่มี named field
-แล้ว generate `impl Describe for MyStruct { fn describe(&self) -> String { ... } }` ที่ print ชื่อ
-field พร้อมค่าออกมา โค้ดหน้าตาประมาณนี้ (สรุปจาก Part 44):
+แล้ว generate **inherent method** `pub fn describe(&self)` ที่ `println!` ชื่อ struct และชื่อของทุก
+field ออกมาตรง ๆ (ไม่คืนค่าอะไรกลับ ไม่มี `trait Describe` เกี่ยวข้องเลยด้วยซ้ำ — เป็นแค่ `impl
+StructName { pub fn describe(&self) { ... } }` ธรรมดา) โค้ดหน้าตาประมาณนี้ (สรุปจาก Part 44 หัวข้อ
+44.6):
 
 ```rust
-// เวอร์ชันของ Part 44 — รองรับแค่ named-field struct เท่านั้น
+// สรุปแนวคิดจาก Part 44 — รองรับแค่ named-field struct เท่านั้น และ describe() print ตรง ๆ
+// ไม่มี trait, ไม่คืนค่า
 #[proc_macro_derive(Describe)]
 pub fn derive_describe(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
+    let struct_name = &input.ident;
 
-    // สมมติว่าเป็น struct ที่มี named field เสมอ — ไม่ตรวจสอบอะไรเลย
-    let fields = match &input.data {
-        Data::Struct(s) => match &s.fields {
-            Fields::Named(f) => &f.named,
-            _ => panic!("รองรับแค่ named field"), // <- panic! หยาบ ๆ
+    let field_names: Vec<String> = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Named(fields) => fields
+                .named
+                .iter()
+                .map(|f| f.ident.as_ref().unwrap().to_string())
+                .collect(),
+            _ => return syn::Error::new_spanned(struct_name, "รองรับแค่ named field")
+                .to_compile_error(),
         },
-        _ => panic!("รองรับแค่ struct"),
+        _ => return syn::Error::new_spanned(struct_name, "รองรับแค่ struct").to_compile_error(),
     };
 
-    // ... generate โค้ดจาก fields ...
-    todo!()
+    quote! {
+        impl #struct_name {
+            pub fn describe(&self) {
+                println!("struct ชื่อ: {}", stringify!(#struct_name));
+                // ... print ชื่อ field แต่ละตัว ...
+            }
+        }
+    }
 }
 ```
+
+Part 44 ทำสิ่งที่ถูกต้องอย่างหนึ่งไปแล้วคือใช้ `syn::Error`/`to_compile_error()` แทน `panic!` ตั้งแต่
+ต้น (หัวข้อ 44.9) — บทนี้จะไม่สอนเรื่องนั้นซ้ำ แต่จะ**ขยาย**มันให้ครอบคลุมทุกจุดของ macro ไม่ใช่แค่จุด
+ปฏิเสธ input ผิดเงื่อนไข (หัวข้อ 45.10-45.11)
+
+**การปรับเปลี่ยนที่บทนี้จะทำกับ `Describe` และเหตุผล:** เพื่อให้บทนี้พาไปถึงหัวข้อที่ซับซ้อนกว่า
+(enum ที่มี field ให้ format, generics ที่ต้องมี bound, helper attribute) ได้อย่างเป็นธรรมชาติ เราจะ
+ปรับ `Describe` สองจุดจากเวอร์ชันของ Part 44:
+
+1. **เปลี่ยนจาก inherent method (`impl StructName { fn describe(&self) }`) เป็น trait
+   (`impl Describe for StructName`)** — เหตุผล: เมื่อต้อง generate โค้ดให้ทั้ง struct และ enum ที่มี
+   variant หลายแบบ (หัวข้อ 45.4) การมี `trait Describe { fn describe(&self) -> String; }` ที่ตายตัว
+   ทำให้เขียนโค้ดที่**เรียกใช้ `describe()` ซ้อนกัน**ได้ง่ายขึ้นมาก (เช่น field ตัวหนึ่งเป็น struct อีก
+   ตัวที่ implement `Describe` ไว้แล้ว ก็เรียก `.describe()` ซ้อนได้ทันทีถ้ามี trait ที่แน่นอน) และเป็น
+   รูปแบบที่ตรงกับ derive macro ระดับ production ส่วนใหญ่ (`Debug`, `Serialize`, `Error`) ที่ล้วน
+   generate `impl Trait for Type` ทั้งนั้น ไม่ใช่ inherent method
+2. **เปลี่ยนจากการ `println!` ตรง ๆ (คืนค่า `()`) เป็นการคืนค่า `String`** — เหตุผล: การคืนค่ากลับทำให้
+   ผลลัพธ์**ทดสอบได้ง่ายขึ้นมาก** (`assert_eq!(p.describe(), "...")` โดยไม่ต้อง capture stdout) และทำให้
+   ผู้ใช้เอาผลลัพธ์ไปต่อกับอย่างอื่นได้ (เช่น เก็บ log, ส่งผ่าน network) ไม่ใช่ผูกติดกับการ print ไปที่
+   stdout เพียงอย่างเดียว — Part 44 หัวข้อ 44.6.1 ก็แสดงให้เห็นแล้วว่าการทดสอบ token ที่ expand ออกมา
+   ด้วย `.to_string()` แล้วเช็ค substring เป็นวิธีที่ใช้ได้ แต่การให้ฟังก์ชันที่ generate คืนค่าที่เทียบ
+   ได้ตรง ๆ ยิ่งทดสอบง่ายกว่าไปอีกขั้น
+
+ทั้งสองจุดนี้**ไม่ใช่การแก้ไขความผิดของ Part 44** (เวอร์ชันเดิมถูกต้องสมบูรณ์สำหรับเป้าหมายของมันคือสอน
+กลไกพื้นฐาน) แต่เป็นการ**ปรับ design ให้เหมาะกับเนื้อหาที่ลึกขึ้น**ของบทนี้ — เช่นเดียวกับที่ Part 21
+ปรับปรุง trait จาก Part 19 ให้รองรับ `dyn Trait`/default method ได้ ไม่ใช่บอกว่า Part 19 สอนผิด
 
 นี่คือจุดเริ่มต้นที่ดีสำหรับการเข้าใจกลไกพื้นฐาน แต่ในโลกจริง แทบไม่มี derive macro ระดับ production
 ตัวไหนหยุดอยู่แค่นี้เลย ลองนึกถึง `#[derive(Debug)]` ของ standard library เอง — มันต้อง derive ได้กับ
@@ -593,6 +632,59 @@ Wrapper { value: "hello" }
 compile ผ่านและทำงานถูกต้องทั้งกับ `Wrapper<i32>` และ `Wrapper<String>` — ยืนยันว่าการเติม bound ให้
 generated `impl` เองคือวิธีแก้ที่ถูกต้องและครบถ้วน (ไม่ต้องพึ่ง `T: Debug` ที่ struct ต้นทางเลย)
 
+### 45.7.1 แล้ว lifetime parameter ล่ะ? (`struct Ref<'a, T> { value: &'a T }`)
+
+ก่อนไปต่อ ควรตอบคำถามที่ค้างไว้: ถ้า struct มี **lifetime parameter** ปนกับ type parameter (ทวนจาก
+Part 20/23) เช่น
+
+```rust
+#[derive(Describe)]
+struct Ref<'a, T> {
+    value: &'a T,
+}
+```
+
+`add_debug_bound` (หัวข้อ 45.6) ต้องทำอะไรเพิ่มไหมกับ `'a`? คำตอบคือ**ไม่ต้อง** และนี่คือเหตุผลที่
+ควรเข้าใจให้ชัด: `generics.type_params_mut()` คืนแค่ **type parameter** (`T`, `U`, ...) เท่านั้น ไม่รวม
+**lifetime parameter** (`'a`, `'b`, ...) หรือ **const parameter** (`const N: usize`) เพราะ trait bound
+แบบ `T: Debug` มีความหมายกับ type parameter เท่านั้น — lifetime ไม่มี "trait" ให้ bound แบบนั้น (มันมี
+`'a: 'b` ซึ่งเป็นความสัมพันธ์ระหว่าง lifetime สองตัว คนละเรื่องกับ trait bound โดยสิ้นเชิง Part 23
+อธิบายเรื่องนี้ไว้แล้ว)
+
+field `value: &'a T` มี type เป็น**reference** (`&'a T`) ไม่ใช่ `T` ตรง ๆ — และ standard library มี
+`impl<T: Debug> Debug for &T` ให้อยู่แล้ว (reference implement `Debug` ได้ทันทีถ้าตัวที่มันชี้ไปมี
+`Debug`) ดังนั้น bound ที่เราเติมให้ `T` (`T: std::fmt::Debug`) ก็เพียงพอให้ `{:?}` ใช้กับ `self.value`
+(ซึ่งมี type `&'a T`) ได้ทันที**โดยไม่ต้องเติมอะไรเกี่ยวกับ `'a` เลย** `split_for_impl()` (หัวข้อ 45.6)
+จะนำ `'a` ไปวางไว้ใน `impl_generics`/`ty_generics` ให้ถูกตำแหน่งโดยอัตโนมัติอยู่แล้ว (เรียงตามลำดับที่
+struct ต้นทางประกาศไว้ — ปกติ lifetime มาก่อน type parameter เสมอตามกฎไวยากรณ์ของ Rust) โดยที่โค้ด
+macro ของเราไม่ต้องรู้จักหรือแยกแยะ `'a` ออกจาก `T` เลยแม้แต่นิดเดียว
+
+ทดสอบจริง:
+
+```rust
+#[derive(Describe)]
+struct Ref<'a, T> {
+    value: &'a T,
+}
+
+fn main() {
+    let x = 99;
+    let r = Ref { value: &x };
+    println!("{}", r.describe());
+}
+```
+
+ผลลัพธ์จริง:
+
+```
+Ref { value: 99 }
+```
+
+compile ผ่านและทำงานถูกต้องทันที ยืนยันว่า `type_params_mut()` "มองข้าม" lifetime parameter ไปอย่าง
+ถูกต้องโดยอัตโนมัติ — นี่คือเหตุผลที่ชื่อ method คือ `type_params_mut()` (เจาะจงว่า **type** parameter)
+ไม่ใช่ `generic_params_mut()` แบบกว้าง ๆ ถ้า `syn` ออกแบบให้เราต้อง "เดา" ว่า generic parameter ตัวไหน
+เป็น lifetime ตัวไหนเป็น type เอง จะเสี่ยงเขียนโค้ดผิดได้ง่ายกว่านี้มาก
+
 ### 45.8 Helper attributes: กลไกเบื้องหลัง `#[serde(rename = "...")]`
 
 ถ้าคุณเคยใช้ `serde` (จะได้เจอเต็ม ๆ ใน Part 57-58) คุณเคยเห็นโค้ดแบบนี้:
@@ -875,21 +967,22 @@ runtime error (`panic!` vs `Result<T, E>`) — proc macro ก็มีหลั�
 
 ### 45.12 การทดสอบ proc macro: ทำไม `#[test]` ธรรมดาไม่พอ และ `trybuild` เข้ามาช่วยยังไง
 
-Part 32-33 สอนการเขียน `#[test]`/integration test สำหรับโค้ด Rust ทั่วไปไว้อย่างละเอียด แต่ลองคิดดูว่า
-จะเขียน `#[test]` ทดสอบ **`describe_derive` เอง** (ไม่ใช่ทดสอบ consumer ที่ใช้ macro) อย่างไร
+Part 32-33 สอนการเขียน `#[test]`/integration test สำหรับโค้ด Rust ทั่วไปไว้อย่างละเอียด และ Part 44
+หัวข้อ 44.6.1 ก็แสดงให้เห็นแล้วว่าเราเขียน `#[test]` ทดสอบ `expand_describe()` ได้จริง (โดยแยก entry
+point ที่ "บาง" ออกจาก logic ที่ "หนา" ตามที่ Part 44 สอนไว้) ด้วยการสร้าง `DeriveInput` จาก
+`syn::parse_str::<DeriveInput>("struct Customer { ... }")` ตรง ๆ แล้วเช็คว่า
+`expand_describe(input).to_string()` มี substring ที่ควรมีอยู่จริง (เช่น `.contains("impl Customer")`)
+— เทคนิคนี้ใช้งานได้จริงและเราใช้แนวทางเดียวกันในการพัฒนา `describe_derive`/`builder_derive` ของบทนี้
+เองตลอดทั้งบท
 
-ปัญหาคือ: ฟังก์ชันในตัว macro (`derive_describe`, `expand_describe`, ฯลฯ) รับ/คืน `proc_macro::
-TokenStream` ซึ่ง**ใช้ได้แค่ตอน compiler กำลัง expand macro จริง ๆ เท่านั้น** — คุณเขียน `#[test] fn
-it_works() { let ts = derive_describe(...); assert_eq!(...) }` แบบตรง ๆ ไม่ได้เลย เพราะ:
+แต่เทคนิคนั้นตอบได้แค่คำถามว่า **"token ที่ generate ออกมาหน้าตาถูกไหม"** (มี string ที่ควรมีอยู่จริง
+หรือไม่) มันตอบ**ไม่ได้**อีกคำถามที่สำคัญไม่แพ้กัน คือ **"เอา token นี้ไป compile จริงแล้วมันผ่านไหม
+และถ้าควร fail (เช่น กรณี `union`) มันควร fail ด้วย error message ที่ถูกต้องเป๊ะหรือไม่"** เหตุผลคือ
+`expand_describe()` ทำงานบน `proc_macro2::TokenStream` ล้วน ๆ (ตามที่ Part 44 อธิบายไว้) ซึ่งเป็นแค่
+"ข้อมูล" ในหน่วยความจำ — การจะรู้ว่ามันคอมไพล์ผ่านจริงหรือไม่ ต้องเอา token นั้นไปเขียนเป็นไฟล์ `.rs`
+แล้วเรียก `rustc` แยกกระบวนการอีกรอบเสมอ ซึ่ง `#[test]` ธรรมดาไม่ได้ทำสิ่งนี้ให้อัตโนมัติ
 
-1. `proc_macro::TokenStream` สร้างเองนอก context ของ macro expansion ไม่ได้ (ต้องมาจาก compiler
-   เรียกให้เท่านั้น) — ต้องใช้ `proc_macro2::TokenStream` แทนสำหรับเขียน unit test เชิง logic (ซึ่งก็
-   ทดสอบได้แค่ "โครงสร้าง token ที่ generate ออกมาถูกไหม" ไม่ได้ทดสอบว่า**มัน compile ผ่านจริงหรือไม่**)
-2. สิ่งที่เราอยากรู้จริง ๆ ไม่ใช่แค่ "token ที่ generate ออกมาหน้าตายังไง" แต่คือ **"เอา token นี้ไป
-   compile จริงแล้วมันผ่านไหม และถ้าควร fail มันควร fail ด้วย error message ที่ถูกต้องไหม"** — คำถาม
-   แบบนี้ทดสอบด้วย `#[test]` ธรรมดาไม่ได้เลย เพราะต้องมีการเรียก `rustc` แยกกระบวนการอีกรอบ
-
-นี่คือปัญหาที่ทำให้ ecosystem proc macro ของ Rust สร้างเครื่องมือเฉพาะทางขึ้นมา ที่ได้รับความนิยม
+นี่คือช่องว่างที่ทำให้ ecosystem proc macro ของ Rust สร้างเครื่องมือเฉพาะทางขึ้นมา ที่ได้รับความนิยม
 สูงสุดคือ **`trybuild`** (สร้างโดย David Tolnay ผู้เขียน `syn`/`quote`/`serde` เองด้วย) หลักการทำงาน
 ของ `trybuild` คือ: เขียนไฟล์ `.rs` ตัวอย่างเล็ก ๆ แยกไว้ (เรียกว่า "UI test case") แล้วให้ `trybuild`
 เรียก `rustc` compile ไฟล์นั้นแยกกระบวนการจริง ๆ จากนั้นเช็คว่าผลลัพธ์ตรงกับที่คาดไว้หรือไม่ — แบ่งเป็น
@@ -1512,11 +1605,11 @@ compile error เสียอีก เพราะ compile ผ่านหม�
    `.timeout(Some(30))`) และ (ข) `build()` ไม่บังคับว่าต้อง set field นี้ก่อน (ถ้าไม่ set ให้เป็น `None`
    ไปเลยไม่ error) ในขณะที่ field ที่**ไม่ใช่** `Option<T>` ยังคงบังคับต้อง set เหมือนเดิมทุกอย่าง
    เขียนโปรแกรมทดสอบที่มี struct ผสมทั้ง field บังคับและ field แบบ `Option<T>` แล้วยืนยันว่า
-   `build()` สำเร็จได้แม้ไม่ set field แบบ `Option<T>` เลย (hint: ต้อง parse `field.ty` ด้วย
-   `if let syn::Type::Path(type_path) = &field.ty { ... เช็ค segment สุดท้ายชื่อ "Option" ... }`
-   แล้วถ้าเป็น `Option<T>` ต้อง**ดึง `T` ข้างในออกมา**ด้วยเพื่อใช้เป็น parameter type ของ setter —
-   ลองค้นดูว่า `syn::PathArguments::AngleBracketed` ใช้ดึง generic argument ข้างใน `<...>` ออกมา
-   อย่างไร)
+   `build()` สำเร็จได้แม้ไม่ set field แบบ `Option<T>` เลย (hint: Part 44 หัวข้อ 44.5 สอนเทคนิคการ
+   "มองเข้าไปข้างใน" `syn::Type` ไว้แล้วผ่านฟังก์ชัน `is_option_of` ที่เช็ค `Type::Path` → segment
+   สุดท้ายชื่อ `"Option"` → ดึง `T` ข้างในออกมาผ่าน `PathArguments::AngleBracketed` + `GenericArgument::
+   Type` — เอาฟังก์ชันนั้นมาปรับใช้ตรงนี้ได้เกือบทั้งดุ้น แค่เปลี่ยนจากการ print ผลลัพธ์ ไปเป็นการใช้
+   `Type` ที่ดึงได้เป็น parameter type ของ setter method แทน)
 
 ## สรุป
 

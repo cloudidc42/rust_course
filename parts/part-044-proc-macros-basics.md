@@ -213,8 +213,31 @@ proc-macro2 = "1"
 
 ผลข้างเคียงที่สำคัญของกฎนี้:
 
-- **proc macro crate ปกติไม่สามารถ `#[test]` เนื้อหาทดสอบแบบธรรมดาไว้ในตัวมันเองได้อย่างสมบูรณ์** เพราะมันไม่ใช่ library ที่ import แล้วเรียกฟังก์ชันได้ตรง ๆ แบบ crate ปกติ (วิธีทดสอบ proc macro ที่นิยมกันจริงคือมี **crate แยกสำหรับทดสอบ** ที่ `#[derive(...)]` แล้วตรวจสอบผลลัพธ์ — ตรงกับโครงสร้าง 2 crate ที่เราจะสร้างในหัวข้อ 44.6)
+- **proc macro crate ใช้ macro ของตัวเองไม่ได้เลย** ลองนึกดูว่าถ้า `describe_derive` เขียน `#[cfg(test)] mod tests { #[derive(Describe)] struct Foo { x: i32 } ... }` ไว้ในไฟล์เดียวกัน จะเกิด**ปัญหาไข่กับไก่ (chicken-and-egg)**: การจะใช้ `#[derive(Describe)]` ได้ ต้องมี `describe_derive` ที่ compile เสร็จสมบูรณ์แล้ว**ก่อน** แต่นี่คือการ compile ตัว `describe_derive` เองอยู่ — มันยังไม่มีตัวเองที่ compile เสร็จให้ใช้ได้เลย ลองจริงจะได้ error ตรงตัวแบบนี้ (ตรวจสอบแล้ว):
+
+  ```
+  error: can't use a procedural macro from the same crate that defines it
+    --> src/lib.rs:21:14
+     |
+  21 |     #[derive(Describe)]
+     |              ^^^^^^^^
+     |
+     = help: you can define integration tests in a directory named `tests`
+  ```
+
+  สังเกตว่า compiler เองก็แนะนำวิธีแก้ไว้ในข้อความ `help:` แล้ว: ใช้ **integration test** (โฟลเดอร์ `tests/` ที่ Part 33 สอนไว้ — ไฟล์ในนั้นถูก compile เป็น**crate แยก**ที่ `extern crate`/`use` ตัว `describe_derive` ที่ compile เสร็จแล้วเข้ามา ไม่ใช่ส่วนหนึ่งของ `describe_derive` เอง) นี่คือเหตุผลเชิงกลไกอีกข้อที่ทำให้เราต้องมี**crate consumer แยก** (`describe_consumer` ในหัวข้อ 44.6) — ไม่ใช่แค่เพื่อความสะดวก แต่เป็นข้อจำกัดที่ compiler บังคับไว้จริง ๆ อย่างไรก็ตาม ตรรกะ**ภายใน**ของ macro (ฟังก์ชันที่ทำงานบน `proc_macro2::TokenStream` ไม่ใช่ตัว entry point ที่มี `#[proc_macro_derive]` ติดอยู่) ยัง `#[test]` ได้ตามปกติในไฟล์เดียวกัน เพราะมันเป็นฟังก์ชัน Rust ธรรมดาที่ไม่ต้องพึ่งกลไก "เรียกใช้ derive macro ของตัวเอง" เลย — นี่คือสิ่งที่เราจะพิสูจน์และใช้จริงในหัวข้อ 44.6.1
 - **proc macro crate มักไม่ใส่ business logic ปนเข้าไปเยอะ** เพราะมันแยกโลกกับ target platform อย่างชัดเจน (บาง project จะมี 2 crate คือ `foo` (library หลักที่ผู้ใช้ import มาใช้ทั้งหมด) กับ `foo-derive` หรือ `foo_macros` (proc macro crate ที่ `foo` เอง depend on อีกที เพื่อ re-export `#[derive(Foo)]` ผ่าน `pub use foo_derive::Foo;`) — pattern นี้พบได้ในหลาย crate ที่มีชื่อเสียง เช่น `serde`/`serde_derive`, `thiserror` ภายในก็มี proc macro crate ซ่อนอยู่ (ที่จริง `thiserror` ที่คุณใช้มาแล้วใน Part 31 คือตัวอย่างจริงของ derive macro ที่ generate `impl std::error::Error` ให้!)
+
+**ตารางเปรียบเทียบ crate type ทั้งหมดที่เกี่ยวข้อง** (ต่อเนื่องจาก Part 17 ที่พูดถึงแค่ library crate กับ binary crate):
+
+| Crate type | ประกาศใน `Cargo.toml` | คอมไพล์เป็นโค้ดของ platform ไหน | ใช้ทำอะไร |
+|---|---|---|---|
+| Binary crate | `src/main.rs` (ค่าเริ่มต้น ไม่ต้องประกาศ) | **target** | โปรแกรมที่รันได้จริงบนเครื่องปลายทาง |
+| Library crate (`rlib`) | `src/lib.rs` (ค่าเริ่มต้น) | **target** | โค้ดที่ crate อื่นใน**โลกของ target เดียวกัน** import ไปใช้/link |
+| `cdylib`/`staticlib` | `[lib] crate-type = ["cdylib"]` (Part 43 เรื่อง FFI) | **target** | โค้ด Rust ที่ให้ภาษาอื่น (เช่น C) เรียกใช้แบบ dynamic/static library |
+| **`proc-macro`** | `[lib] proc-macro = true` | **host** (เครื่องที่กำลัง compile อยู่ — คนละแนวคิดกับที่ผ่านมาทั้งหมด) | โปรแกรมที่ `rustc` โหลดมา**รัน**เพื่อช่วย generate โค้ดให้ crate อื่นตอน compile time |
+
+สังเกตว่า `proc-macro` เป็น crate type**เดียว**ในตารางที่ compile สำหรับ **host** ไม่ใช่ **target** — นี่สำคัญมากเวลา cross-compile (เช่นสร้างโปรแกรมสำหรับ ARM บนเครื่อง x86_64) สมมติคุณรัน `cargo build --target aarch64-unknown-linux-gnu` สำหรับโปรเจกต์ที่ใช้ `describe_derive`: `describe_consumer` (binary crate) จะถูกคอมไพล์เป็นโค้ดเครื่อง ARM ตามที่ `--target` ระบุ แต่ **`describe_derive` จะยังคงถูกคอมไพล์เป็นโค้ดเครื่อง x86_64 เสมอ** (ตาม host จริงที่กำลังรัน `cargo build` อยู่) เพราะมันต้อง**รันได้บนเครื่องที่กำลัง compile** ไม่ใช่รันบนเครื่อง ARM ปลายทาง — ถ้า Rust คอมไพล์ `describe_derive` เป็นโค้ด ARM ตาม `--target` ไปด้วย มันจะกลายเป็นโปรแกรมที่รันบนเครื่อง x86_64 ที่กำลัง build อยู่ไม่ได้เลย ทำให้กระบวนการ compile ทั้งหมดล้มเหลว — นี่คือเหตุผลเชิงลึกอีกชั้นที่ตอกย้ำว่า proc-macro crate ไม่ได้อยู่ใน "โลกของ target" เดียวกับโค้ดส่วนที่เหลือของโปรเจกต์คุณเลย
 
 ### 44.4 `TokenStream`: หัวใจของ Proc Macro ทุกตัว
 
@@ -360,6 +383,8 @@ ty2 ไม่ใช่ Option
 ```
 
 สังเกตกลไกที่เกิดขึ้น: `syn::Type` เป็น `enum` ที่มีหลาย variant (`Type::Path`, `Type::Reference`, `Type::Tuple`, `Type::Array`, ...) — `Type::Path` เก็บ `path.segments` เป็นลำดับของชื่อ (เหมือน `Option`, หรือ `std`/`collections`/`HashMap` ถ้าเขียนแบบเต็ม) แต่ละ segment มี `.arguments` ที่เก็บ generic argument (`PathArguments::AngleBracketed` สำหรับ `<...>`) — เราไล่ pattern match ลงไปทีละชั้นด้วย `if let` ธรรมดา (Part 10) จนดึง type ข้างในออกมาได้ **นี่คือสิ่งที่ `$ty:ty` ของ `macro_rules!` ทำไม่ได้เลยในหลักการ** เพราะ fragment specifier แค่ "จับคู่และเก็บ" ทั้งก้อนไว้ ไม่มีทาง pattern-match ลงไปในโครงสร้างภายในของสิ่งที่จับคู่ได้แล้ว ในขณะที่ `syn::Type` เป็น AST ที่มีโครงสร้างสมบูรณ์ให้ `match`/`if let` ได้เหมือน enum ปกติทุกประการ (ความสามารถนี้จะถูกนำไปใช้จริงในการ generate โค้ดแบบ "ข้าม field ที่เป็น `Option`" ใน Part 45)
+
+**หมายเหตุเชื่อมกับ Part 36 เรื่อง hygiene:** Part 36 พิสูจน์ให้เห็นว่า `macro_rules!` เป็น **hygienic** — ตัวแปรที่ macro ประกาศขึ้นมาเองจะไม่ชนกับตัวแปรของผู้เรียกใช้ แม้ชื่อจะซ้ำกันก็ตาม เพราะ compiler ติดตาม "ที่มา" (site) ของแต่ละ identifier แยกกันโดยอัตโนมัติ proc macro ที่ generate โค้ดผ่าน `quote!{}` **ไม่ได้รับ hygiene ระดับเดียวกันแบบอัตโนมัติ** — ค่าเริ่มต้นของ `quote!` ใช้ `Span::call_site()` สำหรับ identifier ที่มัน generate ขึ้น ซึ่งหมายความว่า identifier เหล่านั้นจะ**ผูกกับ scope ของจุดที่ macro ถูกเรียกใช้** (call site) ไม่ใช่ผูกกับ "โลกของตัว macro เอง" แบบ def-site hygiene ของ `macro_rules!` ในทางปฏิบัติ นี่มักไม่เป็นปัญหาสำหรับ derive macro ที่ generate `impl` block ใหม่ทั้งก้อน (เพราะ body ของ method ที่ generate เป็น scope ใหม่ของตัวเองอยู่แล้ว ไม่ทับซ้อนกับโค้ดของผู้ใช้) แต่เป็นสิ่งที่ต้องระมัดระวังมากขึ้นถ้าคุณเขียน **attribute macro ที่ต้องผสมโค้ดที่ generate เข้ากับ body เดิมของผู้ใช้โดยตรง** (แบบที่ `#[log_call]` ในหัวข้อ 44.2 ทำ) — เป็นอีกเหตุผลที่ตอกย้ำว่า attribute macro ซับซ้อนกว่า derive macro จริง ๆ ไม่ใช่แค่เรื่อง signature
 
 ### 44.6 ตัวอย่างเต็มรูปแบบ: เขียน `#[derive(Describe)]` ตั้งแต่ต้นจนจบ
 
@@ -824,6 +849,53 @@ error: Validated ใช้ได้กับ struct เท่านั้น ไ
 แม้แต่ `#[test]` ที่คุณใช้มาตั้งแต่ Part 32 ก็มีความคล้ายคลึงในเชิงแนวคิดกับ attribute macro (มันเป็น attribute ที่ compiler ปฏิบัติเป็นพิเศษ แม้จะ implement ด้วยกลไกภายในของ `rustc`/`libtest` ที่ต่างจาก proc macro ทั่วไปที่ผู้ใช้เขียนเอง ไม่ใช่ proc macro แบบที่เราสร้างในบทนี้ตรง ๆ) — สิ่งที่สำคัญคือ**แนวคิด**ของ "attribute ที่แปลง/ตรวจสอบ item ที่มันติดอยู่" ที่คุณใช้อยู่แล้วโดยไม่รู้ตัว
 
 **ข้อสรุปเชิงปฏิบัติ:** ลงทุนเวลาให้เข้าใจ **derive macro อย่างลึก** (ตามที่บทนี้สอน) เพราะมีโอกาสได้เขียนเองจริง ส่วน attribute macro และ function-like macro ที่ซับซ้อน ให้เข้าใจ**แนวคิดและ entry point ของมัน** พอที่จะอ่าน source code ของ crate ที่คุณใช้เข้าใจได้ (เช่น ตอนเจอ error แปลก ๆ จาก `#[tokio::main]` จะรู้ว่าต้องไปดูตรงไหน) มากกว่าจะต้องเขียนมันขึ้นมาเองตั้งแต่ต้น — Part 45 จะพาคุณกลับไปที่ derive macro อีกครั้งเพื่อเจาะลึกเทคนิคขั้นสูงกว่านี้ (attribute บน field แบบ `#[describe(skip)]`, การรองรับ generic, และการจัดการ enum)
+
+**ตัวอย่างจากโลกจริง (crate ที่คุณอาจเคยใช้มาแล้ว หรือจะได้ใช้ในโมดูลถัด ๆ ไปของหลักสูตรนี้) เพื่อให้เห็นภาพว่า proc macro ทั้ง 3 ชนิดถูกใช้แก้ปัญหาอะไรจริง ๆ ในระบบนิเวศของ Rust:**
+
+| Crate | ชนิด proc macro ที่ใช้ | แก้ปัญหาอะไร |
+|---|---|---|
+| `serde` (`serde_derive`) | Derive — `#[derive(Serialize, Deserialize)]` | generate โค้ดแปลง struct/enum เป็น/จาก รูปแบบข้อมูล (JSON, YAML, ...) โดยอัตโนมัติ จากโครงสร้าง struct จริง (จะเรียนใน Part 57-58) |
+| `thiserror` | Derive — `#[derive(Error)]` (ที่คุณใช้มาแล้วใน Part 31) | generate `impl std::error::Error`, `impl Display`, และ `impl From` ให้ enum error ของคุณ จากโครงสร้าง variant จริง |
+| `tokio` | Attribute — `#[tokio::main]` | เปลี่ยน `async fn main()` ให้กลายเป็น `fn main()` ที่สร้าง async runtime แล้วรัน future ข้างในให้ (จะเรียนเต็ม ๆ ใน Part 46/48) |
+| `async-trait` | Attribute — `#[async_trait]` | แปลง `async fn` ภายใน trait ให้ compile ได้ (แก้ข้อจำกัดของภาษาที่ trait ไม่รองรับ `async fn` ตรง ๆ ในบางเวอร์ชันของ Rust) |
+| `sqlx` | Function-like — `sqlx::query!("SELECT ...")` | parse SQL string แล้ว**เชื่อมต่อ database จริงตอน compile time**เพื่อตรวจสอบว่า query ถูกต้องและ type ของ column ตรงกับที่ใช้ในโค้ด |
+| `clap` (`clap_derive`) | Derive — `#[derive(Parser)]` | generate CLI argument parser ทั้งหมดจากโครงสร้าง struct ที่นิยาม field ไว้ (จะเรียนใน Part 59) |
+
+สังเกตว่า derive macro ครองสัดส่วนมากที่สุดในตาราง — ตอกย้ำข้อสรุปที่บอกไว้ข้างบนว่ามันคือชนิดที่พบเจอ (และมีโอกาสเขียนเอง) มากที่สุดในทางปฏิบัติ
+
+### 44.11 สรุปอ้างอิงเร็ว (Quick Reference)
+
+ก่อนไปหัวข้อกับดัก มาสรุป "checklist" ที่ใช้อ้างอิงเร็วตอนเริ่มเขียน proc macro ใหม่ทุกครั้ง:
+
+**`Cargo.toml` ของ proc-macro crate ต้องมีเสมอ:**
+
+```toml
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }  # "full" จำเป็นถ้าต้อง parse ItemFn/ItemImpl/ฯลฯ
+quote = "1"
+proc-macro2 = "1"                              # จำเป็นถ้าต้องการแยก logic ไปทดสอบแบบ 44.6.1
+```
+
+**Attribute และ signature ของแต่ละชนิด:**
+
+| ชนิด | Attribute ที่แปะบนฟังก์ชัน | Signature ของฟังก์ชัน | เรียกใช้แบบไหน |
+|---|---|---|---|
+| Derive | `#[proc_macro_derive(TraitName)]` | `fn(TokenStream) -> TokenStream` | `#[derive(TraitName)]` |
+| Attribute | `#[proc_macro_attribute]` | `fn(TokenStream, TokenStream) -> TokenStream` | `#[macro_name]` หรือ `#[macro_name(args)]` |
+| Function-like | `#[proc_macro]` | `fn(TokenStream) -> TokenStream` | `macro_name!(...)` |
+
+**ลำดับขั้นตอนมาตรฐานภายในฟังก์ชัน (สำหรับ derive/function-like):**
+
+1. `parse_macro_input!(input as ประเภทที่ต้องการ)` — แปลง `TokenStream` ดิบเป็น AST ของ `syn`
+2. วิเคราะห์/ดึงข้อมูลจาก AST ด้วยโค้ด Rust ธรรมดา (`match`, `if let`, `.iter()`)
+3. ถ้าพบ input ที่ไม่ถูกต้อง → `return syn::Error::new_spanned(...).to_compile_error()` (แปลงเป็น `proc_macro::TokenStream` ด้วย `.into()` ถ้าฟังก์ชันนี้คือ entry point เอง)
+4. สร้างโค้ดใหม่ด้วย `quote! { ... }` โดย interpolate ค่าผ่าน `#variable` และ repeat ด้วย `#(...)* `
+5. `.into()` แปลง `proc_macro2::TokenStream` กลับเป็น `proc_macro::TokenStream` ก่อนคืนค่า (ครั้งเดียวที่จุดที่เป็น entry point จริง ๆ)
+
+**เครื่องมือ debug ที่ควรมีติดตัว:** `cargo expand` (ติดตั้งด้วย `cargo install cargo-expand`) และ `eprintln!` ในโค้ด macro (แสดงตอน `cargo build`/`cargo check` ไม่ใช่ตอนโปรแกรมรัน)
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

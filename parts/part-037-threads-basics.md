@@ -1385,25 +1385,53 @@ Heisenbug ในหัวข้อ 37.1 — ใช้ `.join()` (ถ้าต้
 
 ```rust
 use std::thread;
+use std::time::Instant;
 
 fn main() {
-    let mut handles = Vec::new();
-    for i in 0..100_000 {
-        // ผิด: งานแต่ละอันเบามาก (บวกเลขครั้งเดียว) แต่ต้นทุนสร้าง thread สูงกว่างานจริงมาก
+    let n: usize = 10_000;
+
+    // วิธีที่ผิด: spawn thread ใหม่หนึ่งตัวต่องานหนึ่งงาน ทั้งที่งานแต่ละอันเบามาก (บวกเลขครั้งเดียว)
+    let start = Instant::now();
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
         handles.push(thread::spawn(move || i + 1));
     }
+    let mut total_threaded: usize = 0;
     for h in handles {
-        let _ = h.join().unwrap();
+        total_threaded += h.join().unwrap();
     }
+    let threaded_elapsed = start.elapsed();
+
+    // วิธีเทียบ: loop ธรรมดาบน thread เดียว ทำงานเดียวกันทุกประการ
+    let start2 = Instant::now();
+    let mut total_single: usize = 0;
+    for i in 0..n {
+        total_single += i + 1;
+    }
+    let single_elapsed = start2.elapsed();
+
+    println!("แบบ spawn thread ทีละงาน ({n} thread): {threaded_elapsed:?} (ผลรวม {total_threaded})");
+    println!("แบบ loop ธรรมดา:                    {single_elapsed:?} (ผลรวม {total_single})");
 }
 ```
 
-โค้ดนี้ compile และรันผ่านได้ (ไม่ใช่ compile error) แต่ **ช้ากว่าการรันแบบ single-thread ธรรมดามาก** เพราะต้นทุน
-การสร้าง/ทำลาย thread 100,000 ตัว (แต่ละตัวต้อง allocate stack, ลงทะเบียนกับ OS, แล้ว join) สูงกว่างานจริงที่ทำ
-ข้างในลูป (`i + 1` ที่ใช้เวลาระดับ nanosecond) อย่างมหาศาล — **วิธีแก้**: ใช้ pattern แบบ chunk processing ใน
-หัวข้อ 37.11 เสมอ (แบ่งงานจำนวนมากออกเป็น**ก้อนใหญ่**เท่ากับจำนวน CPU ที่มี ไม่ใช่ spawn ทีละงานเล็ก ๆ) หรือถ้า
-งานมีจำนวนมากและแต่ละงานเล็กจริง ๆ ให้พิจารณาใช้ thread pool (เช่น crate `rayon` สำหรับงาน data-parallel ที่พบบ่อย
-มาก หรือ async runtime อย่าง Tokio สำหรับงาน I/O-bound ที่จะเรียนใน Part 46-50) แทนการสร้าง raw OS thread เอง
+รันจริง 3 ครั้งติดกันได้ผลลัพธ์ (ตัวเลขเวลาแน่นอนจะต่างกันไปตามเครื่องที่รัน แต่**สัดส่วนความต่างระดับล้านเท่า**นี้
+สอดคล้องกันเสมอ — เครื่องที่ใช้เขียนบทนี้มี 4 CPU core):
+
+```
+แบบ spawn thread ทีละงาน (10000 thread): 411.34823ms (ผลรวม 50005000)
+แบบ loop ธรรมดา:                    57ns (ผลรวม 50005000)
+```
+
+ผลรวมตรงกันทั้งสองวิธี (50005000 ทั้งคู่ — ถูกต้อง ไม่มีบั๊ก) แต่เวลาที่ใช้ต่างกันมหาศาล: **ประมาณ 57 นาโนวินาที
+เทียบกับ 411 มิลลิวินาที** — คิดเป็นสัดส่วนหลาย**ล้านเท่า**สำหรับงานที่เนื้อแท้แล้วเบามาก (บวกเลขครั้งเดียว) ต้นทุน
+ของการสร้าง/ทำลาย OS thread 10,000 ตัว (แต่ละตัวต้อง allocate stack, ลงทะเบียนกับ OS scheduler, แล้ว join) ครอบงำ
+เวลาทั้งหมดไปหมด — งานจริง (`i + 1`) แทบไม่มีผลต่อเวลารวมเลยเมื่อเทียบกับ overhead ของการจัดการ thread
+
+**วิธีแก้**: ใช้ pattern แบบ chunk processing ในหัวข้อ 37.11 เสมอ (แบ่งงานจำนวนมากออกเป็น**ก้อนใหญ่**เท่ากับจำนวน
+CPU ที่มี ไม่ใช่ spawn ทีละงานเล็ก ๆ) หรือถ้างานมีจำนวนมากและแต่ละงานเล็กจริง ๆ ให้พิจารณาใช้ thread pool (เช่น
+crate `rayon` สำหรับงาน data-parallel ที่พบบ่อยมาก หรือ async runtime อย่าง Tokio สำหรับงาน I/O-bound ที่จะเรียน
+ใน Part 46-50) แทนการสร้าง raw OS thread เอง
 
 ## แบบฝึกหัด (Exercises)
 

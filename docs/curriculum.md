@@ -70,7 +70,7 @@
 | 43 | FFI: การเชื่อมต่อกับ C (extern "C", bindgen) | ✅ |
 | 44 | Procedural Macros เบื้องต้น | ✅ |
 | 45 | Procedural Macros: Derive Macros ขั้นสูง | ✅ |
-| 46 | Async/Await เบื้องต้น | ⏳ |
+| 46 | Async/Await เบื้องต้น | ✅ |
 | 47 | Futures และ Executors (วิธีทำงานภายใน) | ⏳ |
 | 48 | Tokio: Runtime และ Tasks | ⏳ |
 | 49 | Tokio: I/O และ Networking (TCP/UDP) | ⏳ |

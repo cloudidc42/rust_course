@@ -1,6 +1,6 @@
 # Part 50: Async Channels และ Synchronization (tokio::sync)
 
-> โมดูล: Async และ Tokio (Advanced) | ระดับ: สูง | เวลาโดยประมาณ: 200 นาที
+> โมดูล: ระดับสูง (Advanced) | ระดับ: สูง | เวลาโดยประมาณ: 240 นาที
 
 ## เป้าหมายของบทเรียน
 

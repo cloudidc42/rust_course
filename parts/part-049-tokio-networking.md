@@ -1298,7 +1298,102 @@ async fn main() -> std::io::Result<()> {
 (วิธีตรวจสอบ: รันโปรแกรมนี้จริงหลายครั้งด้วย `cargo run` ในสภาพแวดล้อมที่มี `cargo` และสามารถ bind/connect TCP บน
 `127.0.0.1` ได้ ผลลัพธ์ข้างต้นคือผลจริงที่จับภาพได้จากการรันซ้ำ 3 ครั้งติดกันโดยไม่มีการแก้ไขโค้ดระหว่างรัน)
 
-### 49.14 ตารางสรุป API ทั้งหมดของบทนี้
+### 49.14 การทดสอบ TCP Server ด้วย `#[tokio::test]`
+
+โค้ด networking ทั้งบทนี้ถูกตรวจสอบด้วยการรันจริงและอ่านผลลัพธ์ด้วยตา แต่ในโปรเจกต์จริงเราต้องการ **automated test**
+ที่รันซ้ำได้ตลอดเวลาโดยไม่ต้องเปิด terminal สองอันด้วยมือ — Tokio มี attribute macro `#[tokio::test]` (คู่กับ
+`#[tokio::main]` ที่ใช้มาตลอดทั้งบท) ที่แปลง `async fn` ให้กลายเป็น test function ที่ `cargo test` (จาก Part 32)
+เรียกใช้ได้ตรง ๆ โดยสร้าง runtime ของ Tokio ขึ้นมาเองให้ภายใน (default เป็น current-thread runtime แบบเดียวกับที่
+Part 48 อธิบายไว้ว่าเบากว่า multi-thread runtime เหมาะกับ test แต่ละตัวที่มักไม่ต้องการ parallelism มาก):
+
+```rust
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+async fn run_one_shot_echo(listener: TcpListener) {
+    let (mut socket, _) = listener.accept().await.unwrap();
+    let mut buf = [0u8; 1024];
+    let n = socket.read(&mut buf).await.unwrap();
+    socket.write_all(&buf[..n]).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn echo_server_echoes_back() {
+        // bind ที่ port 0 ให้ OS สุ่ม port ว่างให้ -- ป้องกัน AddrInUse (หัวข้อ 49.4)
+        // ตอนรัน test หลายตัวพร้อมกัน ซึ่ง cargo test ทำเป็นค่าเริ่มต้นอยู่แล้ว
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(run_one_shot_echo(listener));
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"ping").await.unwrap();
+
+        let mut buf = [0u8; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+    }
+}
+```
+
+ผลลัพธ์จริงจากการรัน `cargo test`:
+
+```
+running 1 test
+test tests::echo_server_echoes_back ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+จุดที่ควรสังเกตสองจุด: **(1) การ bind ที่ `"127.0.0.1:0"` แล้วอ่าน port จริงกลับมาด้วย `.local_addr()`** คือเทคนิค
+มาตรฐานสำหรับเขียน test ของ networking code เสมอ (ต่างจากตัวอย่างสอนในบทที่ผ่านมาซึ่งตั้ง port คงที่ไว้เพื่อความ
+ชัดเจนในการอธิบาย) เพราะถ้า test หลายตัวรันพร้อมกัน (ซึ่ง `cargo test` ทำเป็นค่าเริ่มต้นอยู่แล้ว รันหลาย test
+function แบบ parallel เพื่อความเร็ว) การใช้ port คงที่ในหลาย test จะชนกันจน `bind()` ล้มเหลวด้วย `AddrInUse`
+ตามที่หัวข้อ 49.4 อธิบายไว้ — **(2) `tokio::spawn(run_one_shot_echo(listener))` ทำงานได้เพราะ `#[tokio::test]`
+สร้าง Tokio runtime ที่สมบูรณ์ให้ภายใน test function** เหมือนที่ `#[tokio::main]` ทำให้ `main()` ทุกประการ ทำให้
+เขียน test ของโค้ด async ได้ในรูปแบบเดียวกับโค้ดจริงเป๊ะ ๆ ไม่ต้องมี boilerplate พิเศษอะไรเพิ่มเติมเลย
+
+หลักปฏิบัติที่ดีสำหรับการทดสอบ networking code ในโปรเจกต์จริง: แยก logic ของการจัดการ connection ออกมาเป็นฟังก์ชัน
+เดี่ยว ๆ ที่รับ `TcpStream`/`TcpListener` เป็น parameter ตรง ๆ (เหมือน `handle_client()` และ `handle_booking_client()`
+ที่เขียนไว้ในหัวข้อ 49.12/49.13) แทนการฝัง logic ทั้งหมดไว้ใน `main()` เดียว — ทำให้ test เขียนเรียกฟังก์ชันเหล่านั้น
+ตรง ๆ ได้โดยไม่ต้องรัน binary ทั้งตัว ตรงกับหลักการแยก "โครงสร้างที่ทดสอบได้" ออกจาก "จุดเริ่มโปรแกรม" ที่ Part 32/33
+สอนไว้ตอนพูดถึง unit test กับ integration test
+
+### 49.15 เกร็ดเพิ่มเติม: `set_nodelay()` และ Nagle's Algorithm
+
+ปกติ TCP stack ของ OS จะหน่วงการส่ง packet เล็ก ๆ ไว้เล็กน้อย (รวมหลาย write เข้าด้วยกันก่อนส่งจริง) ตามอัลกอริทึมที่
+เรียกว่า **Nagle's algorithm** เพื่อลดจำนวน packet เล็ก ๆ ที่ต้องส่งออกไป (ลด network overhead) — พฤติกรรมนี้ **คือ
+อีกสาเหตุหนึ่งของปัญหา merging ที่พิสูจน์ไว้ในหัวข้อ 49.6** และสำหรับ protocol แบบ request-response ที่ต้องการความ
+หน่วงต่ำที่สุด (เช่น เกม, RPC เล็ก ๆ ที่ยิงถี่) การหน่วงนี้อาจไม่พึงประสงค์ `TcpStream` ของ Tokio มี method
+`.set_nodelay(true)` สำหรับปิดพฤติกรรมนี้ (เทียบเท่า socket option `TCP_NODELAY` ระดับ OS):
+
+```rust
+use tokio::net::TcpStream;
+
+async fn connect_low_latency(addr: &str) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect(addr).await?;
+    stream.set_nodelay(true)?; // ปิด Nagle's algorithm ส่งข้อมูลทันทีไม่หน่วงรวม packet
+    Ok(stream)
+}
+```
+
+ผลลัพธ์จริงจากการเรียก `.set_nodelay(true)` แล้วอ่านค่ากลับด้วย `.nodelay()`:
+
+```
+nodelay set: true
+```
+
+ข้อแลกเปลี่ยน: การปิด Nagle's algorithm ทำให้ข้อมูลถูกส่งทันทีโดยไม่รวม packet เล็ก ๆ เข้าด้วยกัน ซึ่งลด **latency**
+ของแต่ละข้อความลงได้ แต่แลกมาด้วย **overhead ของ network** ที่สูงขึ้นเล็กน้อยถ้าแอปพลิเคชันส่งข้อมูลเป็นชิ้นเล็ก ๆ
+ถี่มาก — สำหรับ chat server หรือ real-time protocol ที่ตอบสนองเร็วสำคัญกว่าการประหยัด bandwidth เล็กน้อย มักเปิด
+`set_nodelay(true)` ไว้เป็นค่าเริ่มต้น ในขณะที่ระบบที่โอนข้อมูลก้อนใหญ่ (bulk transfer) มักปล่อยให้ Nagle's algorithm
+ทำงานตามปกติเพราะ throughput สำคัญกว่า latency ของแต่ละ write
+
+### 49.16 ตารางสรุป API ทั้งหมดของบทนี้
 
 ก่อนไปหัวข้อกับดักและแบบฝึกหัด สรุปชนิดข้อมูลและ method หลักทั้งหมดที่เรียนมาในบทนี้ไว้เป็นตารางอ้างอิงเดียว
 (quick reference) สำหรับกลับมาเปิดดูเวลาเขียนโค้ดจริง:

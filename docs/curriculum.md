@@ -140,11 +140,11 @@
 | 98 | Observability: Metrics ด้วย Prometheus | ✅ |
 | 99 | Observability: Distributed Tracing ด้วย OpenTelemetry | ✅ |
 | 100 | Security Best Practices ใน Rust | ✅ |
-| 101 | Deployment: Cloud Platforms (AWS/GCP/Fly.io) | ⏳ |
+| 101 | Deployment: Cloud Platforms (AWS/GCP/Fly.io) | ✅ |
 | 102 | Embedded Rust เบื้องต้น | ⏳ |
 | 103 | Game Development ด้วย Bevy Engine เบื้องต้น | ⏳ |
-| 104 | Blockchain และ Smart Contracts ด้วย Rust | ⏳ |
-| 105 | Contributing to Open Source Rust Projects | ⏳ |
+| 104 | Blockchain และ Smart Contracts ด้วย Rust | ✅ |
+| 105 | Contributing to Open Source Rust Projects | ✅ |
 | 106 | Rust Design Patterns สำหรับ Enterprise Applications | ⏳ |
 | 107 | Capstone: Building a Production-Grade CLI Tool | ⏳ |
 | 108 | Capstone: Building a Production-Grade Web Service | ⏳ |

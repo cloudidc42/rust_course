@@ -12,6 +12,7 @@
 - สร้าง derived signal และ `Memo` ที่ recompute เฉพาะเมื่อ dependency ที่มันอ่านจริง ๆ เปลี่ยนค่า พร้อมพิสูจน์ด้วย log จริงว่า memo "เงียบ" เมื่อ signal อื่นที่ไม่เกี่ยวข้องเปลี่ยนค่า
 - เขียน component ที่รับ props ได้ด้วย `#[component]` (เทียบเคียงกับ `#[derive(Properties)]` ของ Yew ใน Part 88) และเข้าใจ **server function** (`#[server]`) ซึ่งเป็นจุดขายหลักของ Leptos — ฟังก์ชันที่ compile เป็นโค้ดฝั่ง server จริง แต่เรียกจากฝั่ง client ได้เหมือนฟังก์ชัน async ธรรมดา โดย Leptos สร้างทั้ง HTTP endpoint ฝั่ง server และโค้ด fetch ฝั่ง client ให้อัตโนมัติ — พร้อมตัวอย่างที่ query/mutate ฐานข้อมูล PostgreSQL จริงผ่าน SQLx (ต่อจาก Part 70)
 - อธิบายความแตกต่างระหว่าง Client-Side Rendering (CSR) กับ Server-Side Rendering (SSR) ของ Leptos ได้ รวมถึงกลไก **hydration** (การที่ WASM ฝั่ง client "จับคู่" กับ HTML ที่ server ส่งมาแล้วผูก event listener เข้าไป โดยไม่ทำลาย DOM เดิมแล้วสร้างใหม่) และรันแอป Leptos SSR จริงที่ฝังอยู่ภายใน Axum Router เดียวกับ route ธรรมดาที่เรียนมาตั้งแต่ Module 4
+- อธิบายแนวคิด **islands architecture** (partial hydration — ส่งเฉพาะส่วนที่ต้อง interactive จริง ๆ เป็น WASM ไปให้ client ส่วนที่เหลือยังเป็น static HTML) ในระดับที่เพียงพอต่อการอ่านโค้ดตัวอย่างและตัดสินใจว่าแอปของตัวเองควรพิจารณาใช้หรือไม่ และสรุปเปรียบเทียบ Leptos กับ Yew (Part 88) ได้อย่างเป็นธรรม (จุดแข็ง/จุดอ่อนของทั้งคู่) โดยไม่ตัดสินว่าตัวใด "ดีที่สุด" ก่อนที่จะเห็น Dioxus ใน Part 90
 
 ## ความรู้ที่ต้องมีมาก่อน
 
@@ -21,18 +22,22 @@
 - **Part 70 (Database: เชื่อมต่อ PostgreSQL ด้วย SQLx)**: ตัวอย่าง server function ที่คุยกับฐานข้อมูลใช้ `PgPool`, `sqlx::query!`/`query_as!`, และ transaction (`pool.begin()`/`commit()`) ตรงตามที่ Part 70 สอนไว้ทั้งหมด — ถ้ายังไม่แน่นเรื่อง SQLx ควรทวนก่อน เพราะบทนี้จะไม่สอน SQLx ใหม่ตั้งแต่ต้น
 - **Part 48 (Tokio Runtime) และ Part 39 (Shared State)**: การผูก `PgPool` เข้ากับ context ของ server function เป็นรูปแบบหนึ่งของ shared state ข้าม async task ที่ Part 39/48 ปูพื้นไว้แล้ว
 - **Part 57 (Serde เบื้องต้น)**: struct ที่ server function ส่งกลับไปให้ client ต้อง `Serialize`/`Deserialize` เพราะข้อมูลเดินทางผ่าน network จริง ๆ (ไม่ใช่แค่ function call ในหน่วยความจำเดียวกัน)
+- **Part 24 (Closures)**: signal, memo, และ effect ของ Leptos ล้วนรับ closure เป็น argument (`move || ...`) ตลอดทั้งบท — บทนี้ถือว่าคุณเข้าใจเรื่อง `move`, การ capture ตัวแปร, และ `Fn`/`FnMut`/`FnOnce` จาก Part 24 มาแล้ว ไม่อธิบาย closure syntax ใหม่
+- **Part 44-45 (Procedural Macros)**: `#[component]`, `#[server]`, และ `view!` ล้วนเป็น procedural macro (attribute macro และ function-like macro ตามลำดับ) — บทนี้ไม่สอนวิธีเขียน proc macro เอง แต่ใช้ความเข้าใจจาก Part 44-45 เพื่ออธิบายว่าทำไม macro เหล่านี้ถึง generate โค้ดคนละแบบได้ตามเงื่อนไข feature flag ที่ compile
+- **Part 46-48 (Async/Await, Futures, Tokio Runtime)**: server function ต้องเป็น `async fn` เสมอ (หัวข้อ 89.6) และ Action/Resource ในบทนี้ทำงานบนพื้นฐาน `Future` ที่ Part 46-47 สอนไว้ — บทนี้ไม่อธิบาย `async`/`.await` พื้นฐานซ้ำ
 
 ## หมายเหตุเรื่องการตรวจสอบเนื้อหา (สำคัญ — อ่านก่อนเริ่ม)
 
 Leptos เป็น ecosystem ที่ API เปลี่ยนเร็วมากในช่วงหลัง (โดยเฉพาะชื่อฟังก์ชันสร้าง signal/memo) จึงตรวจสอบทุกอย่างในบทนี้จากซอร์สโค้ดจริงของ crate ที่ resolve ได้จริงในเครื่อง ไม่ใช่จากความจำหรือบทความเก่า:
 
-- ตั้งโปรเจกต์ scratch **สามโปรเจกต์แยกไว้นอก repo** (ไม่กระทบไฟล์ใด ๆ ในหลักสูตร): โปรเจกต์ CSR ล้วน ๆ, โปรเจกต์ SSR+Axum+SQLx, และไฟล์ทดสอบ Playwright แยก
+- ตั้งโปรเจกต์ scratch **หลายโปรเจกต์แยกไว้นอก repo ทั้งหมด** (ไม่กระทบไฟล์ใด ๆ ในหลักสูตร): โปรเจกต์ CSR ล้วน ๆ (ทดสอบทั้งด้วย `wasm-pack` และ `trunk`), โปรเจกต์ SSR+Axum+SQLx ที่ต่อมาขยายให้ compile ได้สอง feature (`ssr`/`hydrate`) จากซอร์สโค้ดชุดเดียวกัน, โปรเจกต์เปล่าสำหรับเทียบ "endpoint มือ" กับ server function, และสคริปต์ Playwright/Node แยกสำหรับขับเบราว์เซอร์จริง
 - `cargo add leptos` บนเครื่องจริง (rustc/cargo 1.94.1) resolve ได้ **leptos 0.8.21** (ซึ่งดึง `reactive_graph 0.2.15`, `leptos_macro 0.8.18`, `tachys 0.2.19` เป็น dependency ภายใน) — เวอร์ชันนี้คือ snapshot ณ วันที่เขียนบทนี้ ถ้าคุณ `cargo add leptos` แล้วได้เลขเวอร์ชันอื่น ให้ยึดของคุณเป็นความจริงล่าสุด (ecosystem นี้ออกเวอร์ชันใหม่บ่อย)
 - **อ่านซอร์สโค้ดจริงของ `reactive_graph-0.2.15/src/signal.rs` และ `computed.rs`** เพื่อยืนยันสถานะ deprecation ของ `create_signal`/`create_memo`/`create_rw_signal` แบบตรงตัวอักษร (จะยกมาเป็น quote ในหัวข้อ 89.3)
 - **อ่านซอร์สโค้ดจริงของ `tachys-0.2.19/src/view/primitives.rs` และ `src/renderer/dom.rs`** เพื่อยืนยันกลไก "ไม่มี diffing" — เห็นโค้ดจริงที่เรียก `node.set_node_value(Some(text))` เขียนทับ DOM Text node เดิมตรง ๆ
 - คอมไพล์และรัน **CSR ตัวจริง** ด้วย `wasm-pack build --target web` ได้ WASM bundle จริง เสิร์ฟด้วย `http-server` แล้วเปิดด้วย **headless Chromium จริงผ่าน Playwright** (`chromium.launch()`) คลิกปุ่มจริง อ่าน `textContent` จริง และที่สำคัญที่สุด — **จับ reference ของ DOM Text node object ก่อน/หลัง update แล้วเทียบด้วย `===`** เพื่อพิสูจน์ว่าเป็น node เดิมที่ไม่ได้ถูกสร้างใหม่ (ผลลัพธ์จริงที่ได้และวิธีอ่านผลจะอยู่ในหัวข้อ 89.1 และ 89.4)
 - ตั้งฐานข้อมูล PostgreSQL จริงชื่อ `leptos_scratch` (ใช้ cluster เดียวกับที่ตั้งไว้ตั้งแต่ Part 70 — `pg_ctlcluster 16 main start`) สร้างตาราง `events` (โดเมนจองตั๋วงานสัมมนา ต่อเนื่องจากโดเมนที่ Part 62-70 ใช้) เขียน server function จริงสองตัว (query กับ mutation) ที่คุยกับฐานข้อมูลนี้ตรง ๆ
 - คอมไพล์และรัน **SSR server จริง** (Axum + `leptos_axum` + SQLx) แล้วยิง `curl` จริงทั้ง route หน้าเว็บ (SSR HTML), route server function (query และ mutation ผ่าน `/api/...`), และ route Axum ธรรมดาที่เขียนมือ (`/healthz`) ที่อยู่ใน `Router` เดียวกัน — พิสูจน์ทั้ง SSR และ error path (จองตั๋วตอนที่นั่งเต็ม) ด้วยผลลัพธ์จริงจาก `curl`
+- ขยายโปรเจกต์ SSR ให้ compile เป็น**สอง target จริง** (native binary ด้วย feature `ssr`, WASM ด้วย feature `hydrate`) แล้วเปิดหน้าเว็บด้วยเบราว์เซอร์จริงผ่าน Playwright จับ reference ของ DOM node ก่อน/หลัง hydration เทียบด้วย `===` และคลิกปุ่มที่ผูกกับ server function จริงจนเห็นแถวในฐานข้อมูล PostgreSQL เปลี่ยนค่าจริง (หัวข้อ 89.7-89.8)
 - ทุก error message และผลลัพธ์ที่ยกมาในบทนี้คือสิ่งที่**รันจริงแล้วคัดลอกมา** — ถ้าคุณลองทำตามแล้วได้ผลต่างเล็กน้อย (เช่น hash suffix ของ route หรือ warning เพิ่มเติมจาก dependency version ใหม่กว่า) ให้ยึดผลจากเครื่องคุณเป็นความจริงล่าสุด
 
 ## เนื้อหา
@@ -605,6 +610,47 @@ fn App() -> impl IntoView {
 
 ข้อสังเกตสำคัญ: `BookCard` ในตัวอย่างนี้รับ `title: String` แบบ owned value ธรรมดา ไม่ใช่ signal — เหมาะสำหรับข้อมูลที่ "ตั้งค่าครั้งเดียวตอนสร้าง component แล้วไม่เปลี่ยนอีก" ถ้าต้องการให้ `BookCard` reactive ตามข้อมูลที่เปลี่ยนได้ (เช่นสถานะการยืมที่อัปเดตแบบ real-time) ต้องเปลี่ยน prop type เป็น `ReadSignal<bool>` หรือ `Signal<bool>` แทน แล้วเรียก `.get()` ข้างในแทนการใช้ค่าตรง ๆ — หลักการเดียวกับหัวข้อ 89.3 ที่ต้องมี signal (ไม่ใช่ค่าธรรมดา) ถึงจะเกิด reactive effect ได้
 
+#### เทียบเคียงกับ `BookCard` ของ Yew (Part 88) แบบตรงจุด
+
+Part 88 สร้าง `BookCard` จาก struct `Book` (field `id`, `title`, `author`, `available`) ผ่าน `#[derive(Properties, PartialEq)]` + `#[function_component(BookCard)]` — ลองเขียน component เดียวกันด้วย struct `Book` ชุดเดียวกันเป๊ะใน Leptos เพื่อเทียบแบบไม่มีตัวแปรกวนสายตา (ทดสอบ compile และ render จริงแล้ว):
+
+```rust
+use leptos::prelude::*;
+
+// struct ข้อมูลหนังสือ — โครงสร้างเดียวกับ Book ใน Part 88 (Yew) เป๊ะ ๆ
+// สังเกตว่า Leptos ไม่ต้อง derive PartialEq เพื่อการ "ข้าม re-render" เหมือน Yew เลย
+// (เพราะ fine-grained reactivity ในหัวข้อ 89.1 ไม่มีขั้นตอน re-render/diff ให้ข้ามตั้งแต่ต้น)
+#[derive(Clone, Debug)]
+pub struct Book {
+    pub id: u32,
+    pub title: String,
+    pub author: String,
+    pub available: bool,
+}
+
+#[component]
+fn BookCard(book: Book) -> impl IntoView {
+    let status_text = if book.available { "ว่าง" } else { "ถูกยืมแล้ว" };
+    let status_class = if book.available { "status-available" } else { "status-borrowed" };
+
+    view! {
+        <div class="book-card">
+            <h3>{book.title}</h3>
+            <p>{format!("ผู้เขียน: {}", book.author)}</p>
+            <span class=status_class>{status_text}</span>
+        </div>
+    }
+}
+```
+
+ผลลัพธ์ HTML ที่ render จริง (จาก `sample_book` ตัวเดียวกับใน Part 88):
+
+```html
+<div class="book-card"><h3>The Rust Programming Language</h3><p>ผู้เขียน: Steve Klabnik และ Carol Nichols</p><span class="status-available">ว่าง</span></div>
+```
+
+จุดต่างที่เห็นได้ทันทีจากโค้ดที่หน้าตาใกล้เคียงกันมากที่สุดในทั้งบท: (1) Yew ต้อง `#[derive(Properties, PartialEq)]` บน struct props แยก (`BookCardProps`) ส่วน Leptos รับ `book: Book` เป็น parameter ตรง ๆ ไม่ต้องมี struct props แยกให้ macro generate ให้เอง (2) Yew ต้อง derive `PartialEq` บน `Book` เพราะ Yew ใช้มันเทียบ props เก่า/ใหม่เพื่อตัดสินใจว่าจะ "ข้าม" การ re-render component ลูกหรือไม่ (เป็น optimization ที่จำเป็นเพราะ Yew re-render ทั้ง component function ทุกครั้งที่ parent เปลี่ยน) — Leptos ไม่ต้องมี `PartialEq` เลยเพราะไม่มีแนวคิด "re-render component แล้วเทียบ" อยู่ตั้งแต่ต้น (หัวข้อ 89.1) (3) `props.book` (ต้อง `&props.book` เพราะ Yew รับ props เป็น reference) เทียบกับ `book` ตรง ๆ ใน Leptos (รับเป็น owned value) — ความต่างเล็ก ๆ นี้สะท้อนภาพใหญ่เดียวกันตลอดทั้งบท: Yew ยืมแนวคิดมาจาก React ที่ "component รับ props แล้ว render" ทุกครั้งที่มีการเปลี่ยนแปลง ส่วน Leptos treat การสร้าง component เป็น setup ที่เกิดขึ้นครั้งเดียว
+
 #### Prop attribute ที่ใช้บ่อย: `#[prop(optional)]`, `#[prop(into)]`, และ `children`
 
 นอกจาก `#[prop(default = ...)]` ที่เห็นข้างบน Leptos ยังมี attribute อื่นที่ใช้บ่อยเวลาออกแบบ props ให้ยืดหยุ่น ลองดูตัวอย่าง `BookCard` เวอร์ชันที่ใช้ครบทุกแบบ (ทดสอบ compile และ render จริงในเบราว์เซอร์แล้ว):
@@ -1098,6 +1144,23 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 #### `ServerFnError` มีอะไรมากกว่าที่เห็น
 
 `ServerFnError::new(...)` ที่ใช้มาตลอดหัวข้อนี้เป็นแค่การสร้าง custom error message string — แต่ `ServerFnError<E>` เป็น enum ที่มีหลาย variant ครอบคลุม failure mode ที่พบบ่อยของ "การเรียกฟังก์ชันข้าม network" (ต่างจาก error ของฟังก์ชันธรรมดาที่ Part 12 สอน ซึ่งมักมีสาเหตุจำกัดกว่า) เช่น error ตอน serialize/deserialize argument ล้มเหลว, error ตอน network request ล้มเหลว (client หลุดการเชื่อมต่อกลางทาง), หรือ error ตอนหา endpoint ไม่เจอ (เผลอเรียก path ผิด) — ทั้งหมดนี้ Leptos ห่อให้เป็น `ServerFnError` เดียวกันเพื่อให้โค้ดฝั่ง client จัดการ error แบบเดียวกันได้ไม่ว่าจะ fail ที่ขั้นไหนของ pipeline (ตามที่ระบุไว้ใน doc comment ของ macro: "arguments need to be serialized... and the return type must be serialized... this means that the set of valid server function argument and return types is a subset of all possible Rust types") — ในทางปฏิบัติ สำหรับ error ทางธุรกิจของแอปคุณเอง (เช่น "ที่นั่งเต็มแล้ว" ในตัวอย่างนี้) การใช้ `ServerFnError::new(...)` เพียงพอแล้ว ส่วน variant อื่น ๆ ส่วนใหญ่ Leptos สร้างให้อัตโนมัติเมื่อเกิด failure ระดับ transport ที่ไม่ใช่ business logic ของคุณ
+
+ทดสอบจริงด้วยการยิง request ที่ไม่ส่ง `event_id` ไปให้ `get_event` (ลืมใส่ argument ที่ต้องมี) เทียบกับยิงไปที่ path ที่ไม่มีอยู่จริง เพื่อดู variant อื่นของ error ที่ Leptos สร้างให้อัตโนมัติ (ไม่ใช่ business error ที่เราเขียนเอง):
+
+```bash
+$ curl -sS -i -X POST http://127.0.0.1:3009/api/get_event \
+    -H "Content-Type: application/x-www-form-urlencoded" --data ""
+HTTP/1.1 500 Internal Server Error
+serverfnerror: /api/get_event
+content-type: text/plain
+
+Args|missing field `event_id`
+
+$ curl -sS -i http://127.0.0.1:3009/api/nonexistent_fn
+HTTP/1.1 404 Not Found
+```
+
+`Args|missing field` คือ error ที่เกิดจากขั้น**deserialize argument** (ตรงกับ variant `ServerFnError::Args` — ต่างจาก `ServerFnError::ServerError` ที่ error ทางธุรกิจของเราใช้ ซึ่งจะขึ้น prefix `ServerError|` ตามที่เห็นในตัวอย่าง "ที่นั่งเต็มแล้ว" ก่อนหน้านี้) เกิดขึ้น**ก่อน**ที่โค้ดข้างในฟังก์ชัน `get_event` จะได้รันด้วยซ้ำ เพราะ Leptos ต้อง deserialize argument ให้สำเร็จก่อนเสมอ — พิสูจน์ว่า `ServerFnError` มีหลาย "ชั้น" ของความล้มเหลวจริง ไม่ใช่แค่ error message เดียวที่เราเขียนเอง ส่วน path ที่ไม่มีอยู่จริงได้ 404 ธรรมดาจาก Axum เลย (ไม่ผ่านชั้น server function เลยด้วยซ้ำ เพราะ router ของ Axum เองเป็นคนตอบก่อนที่จะถึงชั้นของ server function)
 
 ### 89.7 Rendering Modes: CSR, SSR, และ Hydration
 
@@ -1717,6 +1780,15 @@ note: future is not `Send` as it awaits another future which is not `Send`
 5. **(ยากมาก/ประยุกต์เต็มรูปแบบ)** ทำตามหัวข้อ 89.7-89.8 ให้ครบ: ตั้งโปรเจกต์ที่ compile ได้ทั้ง feature `ssr` (native binary, รัน Axum server) และ feature `hydrate` (WASM ผ่าน `wasm-pack build --target web --features hydrate`) จากซอร์สโค้ด `App` component ชุดเดียวกัน แล้วเปิดหน้าเว็บด้วยเบราว์เซอร์จริง (Chromium headless ผ่าน Playwright หรือเบราว์เซอร์ปกติก็ได้) เขียนสคริปต์ทดสอบที่ (ก) จับ DOM node reference ของ element หนึ่งตัว **ก่อน** WASM โหลดเสร็จ (ข) รอให้ hydrate เสร็จแล้วคลิกปุ่มที่ผูกกับ signal (ค) เทียบ node reference เดิมกับที่อ่านได้หลัง hydrate ด้วย `===` — ถ้าทำถูก ค่าที่ได้ต้องเป็น `true` เสมอ (ตามที่พิสูจน์ไว้จริงในหัวข้อ 89.7) — Hint: จุดที่มักพลาดคือลืมเสิร์ฟไฟล์ `pkg/*.js`/`pkg/*.wasm` เป็น static file จาก Axum (ต้องมี route หรือ `ServeDir` ชี้ไปที่โฟลเดอร์ `pkg/` ให้ตรงกับ path ที่ `<HydrationScripts>` generate ไว้ใน HTML)
 
 ## สรุป
+
+**เช็คลิสต์ก่อนขึ้น production** (รวมข้อควรระวังจากทั้งบทที่มักถูกมองข้ามตอน deploy จริง แต่ละข้ออ้างอิงหัวข้อที่อธิบายรายละเอียดไว้แล้ว):
+
+- [ ] build ด้วย `--release` ทั้งฝั่ง `ssr` (native binary) และ `hydrate`/`csr` (WASM) เสมอ — วัดจริงในหัวข้อ 89.2 ว่าขนาด `.wasm` ต่างกันมากกว่าครึ่งหนึ่งระหว่าง debug กับ release
+- [ ] ตรวจให้ `leptos`, `leptos_axum`, `leptos_router`, `leptos_meta` (ถ้าใช้) เป็นเวอร์ชัน**สายเดียวกันเสมอ** — ไม่ตรงกันจะได้ compile error ที่อ่านยากตามที่พิสูจน์ไว้ในกับดักข้อ 5
+- [ ] เว็บเซิร์ฟเวอร์/reverse proxy ที่วางไว้หน้า static asset ต้องมี **SPA fallback** ถ้าใช้ `leptos_router` แบบ CSR ล้วน ๆ (ไม่จำเป็นถ้าเป็น SSR เพราะ Axum ตอบทุก route ที่รู้จักเองอยู่แล้ว — ตามที่อธิบายในหัวข้อ 89.8)
+- [ ] path ของไฟล์ WASM/JS ที่ `<HydrationScripts>` generate ต้องตรงกับที่ web server เสิร์ฟจริง (`site_pkg_dir`/`output_name` ต้องสอดคล้องกับผลลัพธ์ของ `wasm-bindgen`) — พิสูจน์การต่อกันถูกต้องในหัวข้อ 89.7 ด้วยการรันจริง
+- [ ] ตรวจสอบ struct ที่ server function คืนค่าว่าไม่มี field ที่ควรอยู่ฝั่ง server เท่านั้นหลุดออกไป (เช่น password hash) ตามที่เตือนไว้ในกับดักข้อ 3 — เพราะ server function คือ public HTTP endpoint จริง ไม่มีการกรองอัตโนมัติ
+- [ ] ถ้าใช้ transaction ในการ mutate ข้อมูล (เช่น `book_seat`) ตรวจให้แน่ใจว่า error path ทุกจุด `return Err(...)` เกิด**ก่อน** `tx.commit()` เสมอ เพื่อให้ rollback อัตโนมัติทำงานถูกต้องตามที่ Part 70 สอนไว้
 
 บทนี้พาไปรู้จัก Leptos ในฐานะ framework ที่ตั้งใจต่างจาก Yew (Part 88) ในระดับสถาปัตยกรรม ไม่ใช่แค่ syntax: **fine-grained reactivity** ทำให้ signal ที่เปลี่ยนค่าไปอัปเดตเฉพาะ DOM node ที่เกี่ยวข้องโดยตรง ไม่มีขั้นตอน diffing เลย (พิสูจน์แล้วด้วยทั้งซอร์สโค้ดจริงของ `tachys` และการทดสอบ DOM node identity จริงในเบราว์เซอร์) API ปัจจุบัน (`signal()`, `Memo::new()`) มาแทน `create_signal()`/`create_memo()` รุ่นเก่าที่ deprecate ไปแล้วเพื่อให้สอดคล้องกับธรรมเนียม Rust มากขึ้น และที่สำคัญที่สุด — **server function** (`#[server]`) คือจุดขายที่ทำให้ Leptos เป็น "full-stack" อย่างแท้จริง: เขียนฟังก์ชันเดียวที่คุยกับฐานข้อมูลผ่าน SQLx (Part 70) ตรง ๆ แล้ว Leptos generate ทั้ง HTTP endpoint ฝั่ง server และโค้ด fetch ฝั่ง client ให้อัตโนมัติ ทั้งหมดนี้รันได้จริงภายใน `axum::Router` เดียวกับที่เรียนมาตั้งแต่ Module 4 — เห็นได้จากตัวอย่าง SSR+Axum+SQLx ที่ทดสอบด้วย `curl` จริงทั้ง query, mutation, และ error path และพิสูจน์ครบวงจรที่สุดในหัวข้อ 89.8 ที่คลิกปุ่มบนหน้าที่ hydrate แล้วในเบราว์เซอร์จริง แล้วเห็นแถวในฐานข้อมูล PostgreSQL เปลี่ยนค่าจริงตามไปด้วย โดยไม่มีการเขียนโค้ด fetch/JSON มือแม้แต่บรรทัดเดียว
 

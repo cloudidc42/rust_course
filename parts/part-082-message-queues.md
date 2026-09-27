@@ -24,6 +24,7 @@
 - **Part 48-50 (Tokio Runtime, Networking, Sync)**: `lapin` และ `rdkafka` (ฝั่ง async) ทั้งคู่วิ่งอยู่บน Tokio runtime และใช้ `Stream`/`async fn` ตามแนวทางที่ Part 48-50 สอนไว้ — โค้ด consumer ในบทนี้ใช้ `while let Some(x) = stream.next().await` ตรงตามรูปแบบที่ Part 50 แนะนำ
 - **Part 39-40 (Send/Sync, Shared State)**: capstone ในหัวข้อ 82.12 เก็บ `lapin::Channel` ไว้ใน `Arc<AppState>` เพื่อแชร์ข้าม request handler ของ Axum เหมือนที่ Part 39-40 สอนเรื่อง `Arc`/`Mutex` สำหรับ state ที่แชร์ข้าม task
 - **Part 62-66 (Axum)**: capstone ใช้ Axum handler, `State` extractor, และ `Router` ตามรูปแบบพื้นฐานที่ Part 62-64 สอนไว้ ไม่สอนพื้นฐาน Axum ซ้ำในบทนี้
+- **Part 60 (Logging และ Tracing เบื้องต้น)**: หัวข้อ 82.15 จะพูดถึงการแนบ trace/correlation ID เข้าไปใน message header เพื่อเชื่อม `tracing` span ข้าม service ที่คุยกันผ่าน queue — ต้องเข้าใจแนวคิด span/event ของ `tracing` crate จาก Part 60 มาก่อนถึงจะเห็นภาพว่าปัญหาคืออะไรและวิธีแก้ทำงานอย่างไร
 
 ## หมายเหตุเรื่องการตรวจสอบเนื้อหา (สำคัญ — อ่านก่อนเริ่ม)
 
@@ -174,6 +175,46 @@ Producer --publish--> Exchange --routing rule--> Queue(s) <--consume-- Consumer
 ```
 
 แผนภาพนี้คือโครงสร้างที่ capstone ในหัวข้อ 82.12 และแบบฝึกหัดข้อ 2 ท้ายบทจะ implement จริง สังเกตว่า `booking-service` เห็นแค่กล่อง "Exchange" กล่องเดียว มันไม่รู้เลยว่ามี queue กี่ใบ bind อยู่ หรือมี consumer กี่ตัวรออยู่ปลายทาง — สอดคล้องกับหลักการ decoupling ที่อธิบายไว้ในหัวข้อ 82.1 ทุกประการ
+
+#### สาธิตจริง: direct exchange แยกงานตาม region, fanout exchange broadcast ให้ทุก queue
+
+ทดสอบทั้งสอง exchange type จริงในโปรแกรมเดียว เพื่อให้เห็นความต่างของกลไก routing ชัดเจนที่สุด:
+
+```rust
+// ===== DIRECT: routing key ต้องตรงเป๊ะ เพื่อแยก order ตาม region =====
+channel.exchange_declare("orders.direct", ExchangeKind::Direct, ExchangeDeclareOptions::default(), FieldTable::default()).await?;
+channel.queue_bind("orders.th", "orders.direct", "region.th", QueueBindOptions::default(), FieldTable::default()).await?;
+channel.queue_bind("orders.us", "orders.direct", "region.us", QueueBindOptions::default(), FieldTable::default()).await?;
+
+channel.basic_publish("orders.direct", "region.th", BasicPublishOptions::default(), b"order-A (TH)", BasicProperties::default()).await?.await?;
+channel.basic_publish("orders.direct", "region.us", BasicPublishOptions::default(), b"order-B (US)", BasicProperties::default()).await?.await?;
+```
+
+ผลลัพธ์จริง: `order-A (TH)` ไปตกที่ queue `orders.th` เท่านั้น และ `order-B (US)` ไปตกที่ `orders.us` เท่านั้น — แยกกันเด็ดขาดตาม routing key ที่ตรงกับ binding key แบบเป๊ะ ๆ:
+
+```
+[orders.th queue] ได้รับ: "order-A (TH)"
+[orders.us queue] ได้รับ: "order-B (US)"
+```
+
+```rust
+// ===== FANOUT: ไม่สนใจ routing key เลย ส่งให้ทุก queue ที่ bind ไว้ =====
+channel.exchange_declare("audit.fanout", ExchangeKind::Fanout, ExchangeDeclareOptions::default(), FieldTable::default()).await?;
+channel.queue_bind("audit.log_service", "audit.fanout", "", QueueBindOptions::default(), FieldTable::default()).await?;
+channel.queue_bind("audit.security_service", "audit.fanout", "", QueueBindOptions::default(), FieldTable::default()).await?;
+
+// สังเกต: routing key ใส่เป็นอะไรก็ได้ ("ignored-key") -- fanout ไม่สนใจเลย
+channel.basic_publish("audit.fanout", "ignored-key", BasicPublishOptions::default(), b"user 42 deleted booking 99", BasicProperties::default()).await?.await?;
+```
+
+ผลลัพธ์จริง: message เดียวที่ publish ไปตกที่**ทั้งสอง queue พร้อมกัน** ทั้งที่ routing key ที่ใส่ไป (`"ignored-key"`) ไม่ตรงกับอะไรเลยและไม่มีความหมายต่อ fanout exchange แม้แต่นิดเดียว:
+
+```
+[audit.log_service] ได้รับ: "user 42 deleted booking 99"
+[audit.security_service] ได้รับ: "user 42 deleted booking 99"
+```
+
+นี่คือหลักฐานที่ชัดเจนที่สุดของความต่างระหว่าง exchange type สามแบบ: **direct** แยกเป๊ะ 1-ต่อ-1 ตาม key, **fanout** กระจาย 1-ต่อ-ทุกคน ไม่สนใจ key เลย ส่วน **topic** (ที่ใช้เป็นหลักตลอดบทนี้) คือจุดกึ่งกลางที่ยืดหยุ่นที่สุด (1-ต่อ-หลายคนตามเงื่อนไข pattern)
 
 capstone ของบทนี้ (หัวข้อ 82.12) เลือกใช้ **topic exchange** ชื่อ `booking.events` เพราะเข้ากับสถานการณ์จริงที่สุด: ในระบบจริงอาจมี event หลายแบบ (`booking.created`, `booking.cancelled`, `booking.updated`) ผ่าน exchange เดียวกัน แล้วให้ consumer แต่ละตัวเลือก bind กับ pattern ที่ตัวเองสนใจ — `notification-service` อาจ bind แค่ `booking.created` (สนใจแค่ตอนสร้างใหม่) ในขณะที่ `analytics-service` อาจ bind `booking.#` (สนใจทุกอย่างที่เกิดกับ booking)
 
@@ -1029,7 +1070,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 อ่านลำดับเวลาให้ตรงกัน (ทั้งสอง log มาจาก run เดียวกัน คนละ process ที่ start ห่างกัน 5 วินาที): ช่วงแรก `consumer-A` เข้ากลุ่มคนเดียว ได้รับ assign **ทั้ง 3 partition** (`[0]`, `[1]`, `[2]`) ไปคนเดียว — พอ `consumer-B` เข้ากลุ่มที่ t≈500ms (นับจากตอน B start) broker สั่ง rebalance: `consumer-B` ได้รับ partition `[0]` และ `[1]` ไป ในขณะที่ `consumer-A` ถูกเหลือแค่ partition `[2]` เท่านั้น (สังเกตว่าที่ t=5513ms ของ A ยังเห็น assignment เก่าอยู่เพราะ rebalance ยังไม่เสร็จสมบูรณ์ ณ ตอนนั้น กว่าจะเห็นผล rebalance จริงต้องรอถึง t=6815ms) — และเมื่อ `consumer-B` ออกจากกลุ่มไปที่ t≈10 วินาที (log ของ B หยุดที่ t=10740ms) `consumer-A` ก็ได้รับ **partition ทั้ง 3 คืนกลับมาทั้งหมด** ที่ t=18542ms (rebalance รอบที่สองใช้เวลานานกว่าเพราะ `session.timeout.ms=6000` ทำให้ broker ต้องรอให้แน่ใจว่า B หายไปจริงก่อนถึงจะ trigger rebalance)
 
-นี่คือพฤติกรรมจริงของ **eager rebalancing** (ค่า default แบบเก่าของ `rdkafka`/`librdkafka`): ตอน rebalance เกิดขึ้น **partition assignment ทั้งหมดถูกเพิกถอนจากทุก instance ก่อน แล้วค่อย assign ใหม่ทั้งหมด** (ไม่ใช่แค่ partition ที่ต้องย้าย) ซึ่งเป็นเหตุผลที่เห็น assignment เป็น `[]` (ว่าง) ชั่วครู่ในช่วงเริ่มต้นของ A ก่อนได้รับ assignment จริง — Kafka รุ่นใหม่มี **cooperative-sticky rebalancing** ที่ฉลาดกว่า (ย้ายเฉพาะ partition ที่จำเป็นต้องย้ายจริง ๆ ลด downtime ของ partition ที่ไม่ต้องย้าย) ซึ่งตั้งได้ผ่าน `partition.assignment.strategy = cooperative-sticky` — บทนี้สาธิตด้วยค่า default เพื่อให้เห็นพฤติกรรม rebalance ชัดที่สุด ส่วนรายละเอียดเชิงลึกของ rebalancing protocol (generation, JoinGroup/SyncGroup RPC) เกินขอบเขตของบทนี้ที่เน้นระดับ awareness ว่า "มันเกิดขึ้นได้ และเกิดขึ้นยังไงในภาพกว้าง"
+นี่คือพฤติกรรมจริงของ **eager rebalancing** (ค่า default แบบเก่าของ `rdkafka`/`librdkafka`): ตอน rebalance เกิดขึ้น **partition assignment ทั้งหมดถูกเพิกถอนจากทุก instance ก่อน แล้วค่อย assign ใหม่ทั้งหมด** (ไม่ใช่แค่ partition ที่ต้องย้าย) ซึ่งเป็นเหตุผลที่เห็น assignment เป็น `[]` (ว่าง) ชั่วครู่ในช่วงเริ่มต้นของ A ก่อนได้รับ assignment จริง — Kafka รุ่นใหม่มี **cooperative-sticky rebalancing** ที่ฉลาดกว่า (ย้ายเฉพาะ partition ที่จำเป็นต้องย้ายจริง ๆ ลด downtime ของ partition ที่ไม่ต้องย้าย) ตั้งได้ผ่าน config เพิ่มอีกหนึ่งบรรทัดตอนสร้าง consumer:
+
+```rust
+let consumer: StreamConsumer = ClientConfig::new()
+    .set("bootstrap.servers", "127.0.0.1:9092")
+    .set("group.id", "rebalance-demo-group")
+    .set("partition.assignment.strategy", "cooperative-sticky") // แทน eager (range/roundrobin) ที่เป็น default
+    .create()?;
+```
+
+*(บทนี้สาธิตพฤติกรรม rebalance ด้วยค่า default — eager assignment — เพื่อให้เห็นการเพิกถอน assignment ทั้งหมดก่อน assign ใหม่อย่างชัดเจนที่สุดตามผลลัพธ์จริงที่แสดงไว้ข้างบน ส่วนพฤติกรรมของ `cooperative-sticky` ที่ลด downtime ระหว่าง rebalance เป็นพฤติกรรมที่ documented ไว้ชัดเจนในเอกสารของ Kafka/`librdkafka` เอง — บทนี้ไม่ได้รันเทียบทั้งสอง strategy แบบ side-by-side จริงเพื่อวัดความต่างของ downtime เพราะต้องใช้ topic ที่มีข้อมูลไหลเข้าต่อเนื่องระหว่างการ rebalance ถึงจะเห็นผลต่างชัด ซึ่งเกินขอบเขตของการสาธิตแบบสั้นในบทนี้)* ส่วนรายละเอียดเชิงลึกของ rebalancing protocol (generation, JoinGroup/SyncGroup RPC) เกินขอบเขตของบทนี้ที่เน้นระดับ awareness ว่า "มันเกิดขึ้นได้ และเกิดขึ้นยังไงในภาพกว้าง"
 
 **ข้อสรุปเชิงปฏิบัติจากการสาธิตนี้**: การ scale consumer ขึ้น (เพิ่ม instance) จะช่วยเพิ่ม throughput ได้จริง **จนถึงจำนวน partition สูงสุด** — เพิ่ม instance เกินจำนวน partition จะไม่ได้อะไรเพิ่ม (instance ส่วนเกินไม่ได้รับ partition ใดเลย ไม่มีงานทำ) การวางแผนจำนวน partition ของ topic ล่วงหน้าจึงสำคัญมาก (เปลี่ยนจำนวน partition ทีหลังทำได้แต่ **ไม่แนะนำ** เพราะกระทบ partition key hashing เดิมที่มีอยู่)
 
@@ -1523,6 +1574,99 @@ loop {
 | อ่านย้อนหลังทั้งหมดตอนเริ่มใหม่ | (ไม่ต้องตั้ง — message ที่ยังไม่ ack ก็รออยู่ใน queue แล้ว) | `.set("auto.offset.reset", "earliest")` (หัวข้อ 82.9, สำคัญมาก ดูกับดักข้อ 3) |
 | ป้องกันงานตกค้างตลอดไปเมื่อ fail ซ้ำ | ตั้ง `x-dead-letter-exchange` ตอน `queue_declare` (หัวข้อ 82.6) | ไม่มีในตัว — ต้อง implement เองด้วย topic แยกสำหรับ "dead" record |
 
+### 82.15 ความสัมพันธ์กับ Distributed Tracing (ต่อยอด Part 60)
+
+Part 60 สอนเรื่อง `tracing` crate สำหรับติดตามการทำงานของโปรแกรมผ่าน span/event ซึ่งใน HTTP request แบบ synchronous (Part 61-66) การติดตามทำได้ตรงไปตรงมา เพราะทุกอย่างเกิดขึ้นใน call stack เดียวกันที่ต่อเนื่องกัน — แต่ asynchronous messaging ทำลายความต่อเนื่องนี้โดยธรรมชาติ: `booking-service` publish message แล้ว**จบการทำงานของมันตรงนั้น** ส่วน `notification-service` ที่ consume message นั้นทำงานอยู่ใน**process คนละตัว เริ่ม span ของตัวเองใหม่หมด** ไม่มีทางเชื่อม trace ทั้งสองฝั่งเข้าด้วยกันได้เลยถ้าไม่ได้เตรียมอะไรไว้ล่วงหน้า
+
+วิธีแก้ที่ใช้กันทั่วไปคือ **แนบ trace/correlation ID ไปกับ message ผ่าน header** ตั้งแต่ตอน publish แล้วให้ consumer อ่านค่านี้ออกมาสร้าง span ใหม่ที่ผูกกับ trace เดิม (แทนที่จะเริ่ม trace ใหม่ที่ไม่เกี่ยวข้องกันเลย) — ทดสอบจริงด้วยการแนบ header `x-trace-id` ไปกับ message:
+
+```rust
+use lapin::types::AMQPValue;
+
+// trace_id ที่มาจาก HTTP request เดิม (สมมติว่ามาจาก tracing span ของ Part 60 ตอนรับ HTTP request)
+let trace_id = Uuid::new_v4().to_string();
+
+let mut headers = FieldTable::default();
+headers.insert("x-trace-id".into(), AMQPValue::LongString(trace_id.clone().into()));
+
+let props = BasicProperties::default().with_headers(headers);
+channel.basic_publish("", "queue_name", BasicPublishOptions::default(), &payload, props)
+    .await?.await?;
+```
+
+ผลลัพธ์จริงจากการรัน (ยืนยันว่า header ถูกแนบไปกับ message จริง compile และรันผ่าน):
+
+```
+[producer] แนบ x-trace-id=2b347f7c-b795-45ca-a9c1-727afdd9ddd6 ไปกับ message แล้ว
+```
+
+ฝั่ง `notification-service` ที่ consume message นี้จะอ่านค่า `x-trace-id` จาก `delivery.properties.headers()` (รูปแบบการอ่าน header เดียวกับที่ใช้อ่าน `x-death`/`x-retry-count` ในหัวข้อ 82.6 และแบบฝึกหัดข้อ 4) แล้วใส่ค่านี้เข้าไปใน `tracing::info_span!("process_booking_created", trace_id = %trace_id)` ตามรูปแบบที่ Part 60 สอน — ทำให้เมื่อไปดู log ของทั้ง `booking-service` และ `notification-service` ในระบบ log aggregation (เช่น ผ่าน `tracing-subscriber` ที่ export ไปยัง backend ภายนอก) จะสามารถ**กรองด้วย `trace_id` เดียวกัน**แล้วเห็น timeline เต็มของเหตุการณ์เดียวนี้ข้าม service ได้ ทั้งที่มันเกิดขึ้นในสอง process ที่ไม่เชื่อมกันโดยตรงเลย — นี่คือรายละเอียดเชิงปฏิบัติที่มักถูกมองข้ามตอนออกแบบระบบที่พึ่ง message queue เป็นครั้งแรก แล้วมาเจอปัญหา "debug ยากมากตอน production เพราะไม่รู้ว่า event ไหนที่ทำให้เกิดอะไรต่อ" ทีหลัง
+
+### 82.16 สรุปคำสั่ง CLI ที่ใช้บ่อยระหว่างพัฒนา
+
+ระหว่างพัฒนาและ debug ระบบที่พึ่ง message queue คำสั่ง command-line ต่อไปนี้ (ที่ใช้จริงตลอดบทนี้ในการตรวจสอบผลลัพธ์) มักจำเป็นต้องใช้บ่อยจนควรจำไว้:
+
+**RabbitMQ** (ผ่าน `rabbitmqctl` ที่มาพร้อม RabbitMQ เสมอ หรือรันผ่าน `docker exec <container> rabbitmqctl ...` ถ้ารันเป็น container):
+
+```bash
+# ดูรายชื่อ queue ทั้งหมดพร้อมจำนวน message ที่ค้างอยู่ -- ใช้ตรวจสอบว่า message ไปถึงจริงไหม
+rabbitmqctl list_queues name messages messages_unacknowledged consumers
+
+# ดู exchange ทั้งหมด (ตรวจสอบว่า exchange ที่ประกาศไว้มีอยู่จริงตามที่คาด)
+rabbitmqctl list_exchanges name type
+
+# ดู binding ทั้งหมด (ตรวจสอบว่า routing key ที่ bind ไว้ตรงกับที่ตั้งใจจริงหรือไม่ -- แก้กับดักข้อ 1 ท้ายบท)
+rabbitmqctl list_bindings
+
+# ล้าง message ทั้งหมดใน queue ทิ้ง (มีประโยชน์มากตอนทดสอบซ้ำ ๆ ไม่อยากให้ message เก่าค้างป้วนผลลัพธ์)
+rabbitmqctl purge_queue <queue_name>
+```
+
+ผลลัพธ์จริงจาก `list_queues` (สภาพแวดล้อมนี้หลังผ่านการทดสอบหลายหัวข้อของบทนี้มา สังเกตว่าแต่ละ queue ที่สร้างไว้ระหว่างบททั้งหมดยังปรากฏอยู่ครบ):
+
+```
+name                                messages  messages_unacknowledged  consumers
+notification.booking_created.dlq   0         0                        0
+confirm_test_queue                 1         0                        0
+crash_test_queue                   5         0                        0
+notification.booking_created       0         0                        0
+poison_test_queue                  0         0                        0
+```
+
+คอลัมน์ **`messages_unacknowledged`** สำคัญมากตอน debug ปัญหาแบบหัวข้อ 82.4 (prefetch/QoS): ถ้าค่านี้สูงติดต่อกันนาน ๆ ทั้งที่มี `consumers` ต่ออยู่ แปลว่า consumer รับ message ไปแล้วแต่ ack ช้าหรือไม่ ack เลย (อาจเพราะ logic ค้างหรือ crash แบบเดียวกับที่สาธิตในหัวข้อ 82.5) ส่วน **`consumers`** เท่ากับ 0 ทั้งที่ `messages` มีค่าอยู่ (เช่นแถว `crash_test_queue` ที่มี 5 message ค้างแต่ไม่มี consumer ต่ออยู่เลย ณ ขณะตรวจสอบ) คือสัญญาณของ temporal decoupling ที่อธิบายไว้ในหัวข้อ 82.1 พอดี — message รอได้แม้ไม่มีใครมารับ ไม่ได้แปลว่าระบบมีปัญหา
+
+**Kafka** (เครื่องมือทั้งหมดอยู่ใต้ `/opt/kafka/bin/` ในดิสทริบิวชันมาตรฐาน หรือรันผ่าน `docker exec <container> /opt/kafka/bin/...` ถ้ารันเป็น container):
+
+```bash
+# สร้าง topic ใหม่พร้อมกำหนดจำนวน partition ล่วงหน้า (สำคัญมากตามหัวข้อ 82.10 -- เปลี่ยนทีหลังไม่แนะนำ)
+kafka-topics.sh --create --topic <topic_name> --partitions 3 --replication-factor 1 --bootstrap-server localhost:9092
+
+# ดูรายละเอียด partition/leader ของ topic ที่มีอยู่
+kafka-topics.sh --describe --topic <topic_name> --bootstrap-server localhost:9092
+
+# ดู offset/lag ของ consumer group -- metric ที่สำคัญที่สุดสำหรับ monitor ว่า consumer ตามทันการผลิตหรือไม่
+kafka-consumer-groups.sh --describe --group <group_name> --bootstrap-server localhost:9092
+
+# ตั้งค่า retention ของ topic (ตามที่สาธิตจริงในหัวข้อ 82.7)
+kafka-configs.sh --bootstrap-server localhost:9092 --entity-type topics --entity-name <topic_name> \
+  --alter --add-config retention.ms=<milliseconds>
+```
+
+**Docker** (สำหรับรัน broker ทั้งสองแบบเป็น container ระหว่างพัฒนา ตามแนวทางที่ใช้ตรวจสอบทั้งบทนี้):
+
+```bash
+# RabbitMQ พร้อม management UI (เข้าดูผ่าน http://localhost:15672 ด้วย guest/guest)
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management-alpine
+
+# Kafka โหมด KRaft (ไม่ต้องมี ZooKeeper แยก) -- ต้อง map port ให้ตรงกับ advertised.listeners ตามที่อธิบายไว้ในหมายเหตุต้นบท
+docker run -d --name kafka -p 9092:9092 apache/kafka:3.7.0
+
+# เลิกใช้แล้วให้ลบทิ้งทั้งคู่ (หยุด container แล้วลบไปด้วยในคำสั่งเดียว)
+docker rm -f rabbitmq kafka
+```
+
+ควรจำไว้ว่า container ทั้งสองตัวนี้**ไม่มี data persistence ข้าม container restart** เว้นแต่จะ mount volume ไว้ (`-v` flag) ดังนั้นสำหรับ environment พัฒนา/ทดสอบที่รีเซ็ตข้อมูลบ่อย ๆ (เหมือนที่ใช้ตรวจสอบทั้งบทนี้) การไม่ mount volume คือพฤติกรรมที่ต้องการอยู่แล้ว (เริ่มต้นสะอาดทุกครั้งที่ container ใหม่) แต่สำหรับ environment ที่ต้องการเก็บข้อมูลจริงข้าม restart (staging/production) ต้องเพิ่ม `-v rabbitmq_data:/var/lib/rabbitmq` หรือเทียบเท่าสำหรับ Kafka เสมอ
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. publish ไปที่ exchange ที่ไม่มี queue ใด bind ไว้เลย — message หายไปเงียบ ๆ ไม่มี error**
@@ -1640,7 +1784,20 @@ producer.send(record, Duration::from_secs(5)).await
 
 ## สรุป
 
+สิ่งที่ทำได้แล้วหลังจบบทนี้ สรุปเป็นรายการตรวจสอบสั้น ๆ:
+
+- อธิบายได้ว่า asynchronous messaging decouple producer/consumer ทั้งมิติเวลาและความรู้จักอย่างไร ต่างจาก synchronous call แบบ gRPC/REST ตรงไหน
+- อธิบายโมเดล AMQP (exchange/queue/binding/routing key) ได้ถูกต้อง เลือก exchange type (direct/topic/fanout) ให้เหมาะกับ use case ได้
+- เขียน RabbitMQ producer/consumer ด้วย `lapin` ที่ compile และรันได้จริง ครบทั้ง publish, manual ack/nack, prefetch/QoS
+- อธิบายและพิสูจน์ at-least-once delivery, การ requeue ตอน consumer crash, และเหตุผลที่ consumer ต้อง idempotent
+- ตั้งค่า Dead-Letter Queue ทั้งจาก manual nack และจาก message TTL ได้ถูกต้อง
+- อธิบายความต่างเชิงสถาปัตยกรรมของ Kafka (topic/partition/consumer group/log retention) เทียบกับ RabbitMQ ได้ลึกถึงระดับ "ทำไม" ไม่ใช่แค่ "ต่างกันอย่างไร"
+- เขียน Kafka producer/consumer ด้วย `rdkafka` พร้อม partition key และ consumer group ที่ compile และรันได้จริง เข้าใจพฤติกรรม rebalancing เมื่อ scale consumer
+- เลือกได้อย่างมีเหตุผลระหว่าง RabbitMQ, Kafka, และ `LISTEN`/`NOTIFY` โดยยึดหลัก "เรียบง่ายที่สุดที่ตอบโจทย์จริง"
+
 บทนี้เติมเต็มสิ่งที่ Part 81 foreshadow ไว้ให้สมบูรณ์: **asynchronous messaging** คือคำตอบสำหรับสถานการณ์ที่ synchronous call แบบ gRPC (Part 80) ไม่เหมาะ — โดย decouple ผู้ส่งกับผู้รับทั้งในมิติเวลา (ไม่ต้องออนไลน์พร้อมกัน) และมิติความรู้จัก (ไม่ต้องรู้จักกัน) เราเรียน AMQP model ของ RabbitMQ อย่างละเอียด (exchange/queue/binding/routing key และเหตุผลที่ producer publish ไปที่ exchange ไม่ใช่ queue ตรง ๆ) implement producer/consumer จริงด้วย `lapin` พร้อมพิสูจน์ manual ack, at-least-once delivery, การ requeue ตอน consumer crash, และ dead-letter queue ด้วยการรันจริงทุกขั้นตอน จากนั้นข้ามไปดูสถาปัตยกรรมที่ต่างออกไปโดยสิ้นเชิงของ **Kafka** (topic/partition/consumer group, log-based retention ที่เปิดทางให้ replay ได้ซึ่ง RabbitMQ ทำไม่ได้) พร้อม implement ด้วย `rdkafka` และพิสูจน์พฤติกรรม partition-by-key และ consumer group rebalancing ด้วยข้อมูลจริงจากการรัน ปิดท้ายด้วยตารางตัดสินใจที่ชัดเจนระหว่าง RabbitMQ, Kafka, และ `LISTEN`/`NOTIFY` จาก Part 71 — พร้อมย้ำหลักการสำคัญว่าให้เลือกเครื่องมือที่เรียบง่ายที่สุดที่ตอบโจทย์จริง ไม่ใช่ไล่ตามความล้ำของเทคโนโลยี และปิดด้วย capstone ที่ทำให้ event `booking.created` จาก Part 81 เดินได้จริงแบบ end-to-end ทุกขั้นตอน
+
+*(หมายเหตุ: Part 84 ที่จะมาถึงคือ "Background Jobs และ Task Queues" ซึ่งฟังดูคล้ายกับเนื้อหาบทนี้ แต่เป็นคนละเรื่องกัน — message queue ในบทนี้เน้นการสื่อสาร**ระหว่าง service คนละตัว**ที่ deploy แยกกัน ในขณะที่ background job/task queue ของ Part 84 เน้นการส่งงานหนัก ๆ ออกจาก request-response cycle เดียวกันของ service ตัวเดียว ให้ไปทำงานเบื้องหลังแทน (เช่น resize รูปภาพ, generate PDF รายงาน) ทั้งสองแนวคิดใช้กลไกคล้ายกันได้ (บาง background job library ก็ใช้ Redis หรือ RabbitMQ เป็น backend เหมือนกัน) แต่วัตถุประสงค์ต่างกันคนละเรื่อง)*
 
 จาก Part 82 นี้ไป **Part 83 (Caching ด้วย Redis)** จะพาไปสำรวจอีกเครื่องมือ infrastructure หนึ่งที่ระบบจริงต้องมี — ต่างจาก message queue ที่เน้นการสื่อสารแบบ asynchronous ระหว่าง service, Redis เน้นการเก็บข้อมูลแบบ in-memory ที่เร็วมากสำหรับ caching และ pattern อื่น ๆ ที่ตัดปัญหาโหลด PostgreSQL ซ้ำ ๆ ในงานที่อ่านบ่อยกว่าเขียนมาก
 

@@ -53,7 +53,11 @@
   ซ้ำ (สมมติว่าคุณมี `AppState { db: PgPool, ... }` และ handler ที่ทำงานถูกต้องอยู่แล้วตามที่ Part 92 สอนไว้)
 - **Part 96 (Docker และ Containerization สำหรับ Rust)**: หัวข้อ 98.8 รัน Prometheus server จริงผ่าน `docker run`
   — บทนี้ใช้ Docker image สำเร็จรูป (`prom/prometheus`) ไม่ใช่ build image เอง จึงไม่จำเป็นต้องเขียน
-  `Dockerfile` ใหม่ แต่สมมติว่าคุณมี Docker ทำงานอยู่แล้วตามที่ Part 96 ติดตั้งไว้
+  `Dockerfile` ใหม่ แต่สมมติว่าคุณมี Docker ทำงานอยู่แล้วตามที่ Part 96 ติดตั้งไว้ (หัวข้อ 98.10 ยังโยงกลับไปที่
+  `docker-compose` ซึ่ง Part 96 แนะนำไว้เป็นทางเลือกเมื่อ containerize ทั้งแอปและ Prometheus พร้อมกัน)
+- **Part 95 (Testing Web Applications แบบครบวงจร)**: หัวข้อ 98.11 เขียน integration test ให้ metrics
+  middleware ด้วย `tower::ServiceExt::oneshot()` ตามเทคนิคเดียวกับที่ Part 95 สอนไว้สำหรับทดสอบ Axum handler
+  ทั่วไป — บทนี้ไม่อธิบายกลไก `oneshot()`/`tokio::test` ซ้ำจากศูนย์
 - **Part 99 (Observability: Distributed Tracing ด้วย OpenTelemetry)**: บทถัดไปจะพาไปดูเสาที่สามของ
   observability triad ที่บทนี้แค่แนะนำแนวคิดไว้ก่อน (98.1) — เมื่อจบ Part 99 คุณจะมีภาพครบทั้งสามเสา logs +
   metrics + traces พร้อมกัน
@@ -204,6 +208,33 @@ Prometheus ecosystem แนะนำให้ใช้ Histogram เป็นค
 latency ตลอดทั้งบท และหัวข้อ 98.9 จะพิสูจน์ให้เห็นจริงว่าทำไมการเผลอปล่อยให้กลายเป็น Summary (ถ้าลืมตั้ง
 bucket) ถึงเป็นกับดักที่ต้องระวัง
 
+#### กรอบการตัดสินใจ: เลือก Metric Type ให้ถูกโดยไม่ต้องเดา
+
+ก่อนเขียน metric ใหม่ทุกครั้ง ให้ไล่คำถามสามข้อนี้ตามลำดับ — คำตอบจะนำไปสู่ประเภทที่ถูกต้องเสมอโดยไม่ต้องท่อง
+นิยาม:
+
+1. **"ค่านี้มีทางลดลงได้ไหม ในความเป็นจริงของโดเมนนี้?"**
+   - **ไม่มีทาง** (มีแต่เพิ่มขึ้นตลอดชีวิตของโปรเซส) → **Counter** เช่น "จำนวนครั้งที่ยืมหนังสือสำเร็จสะสม" —
+     ต่อให้คืนหนังสือไปแล้วเมื่อไหร่ ตัวเลข "เคยยืมสำเร็จไปกี่ครั้ง" ก็ไม่มีทางลดกลับ
+   - **มีทาง** (ขึ้นได้ลงได้ตามสถานะจริง) → ไปคำถามที่ 2
+2. **"สิ่งที่อยากรู้คือค่า ณ ขณะนี้ (สถานะปัจจุบัน) หรือคือการกระจายตัวของหลาย ๆ ค่าที่วัดมา?"**
+   - **ค่า ณ ขณะนี้ตัวเดียว** (เช่น "ตอนนี้เหลือสำเนาว่างกี่เล่ม", "ตอนนี้มี connection เปิดอยู่กี่ตัว") →
+     **Gauge**
+   - **การกระจายตัวของหลายค่าที่วัดซ้ำ ๆ** (เช่น "latency ของ request แต่ละตัวที่ผ่านมา", "ขนาด payload ของ
+     แต่ละ request") → ไปคำถามที่ 3
+3. **"ระบบนี้รันหลาย instance พร้อมกันไหม และต้องการรวม quantile ข้าม instance หรือไม่?"**
+   - **ใช่ (รันหลาย instance และต้องการ p95 รวมทุกตัว)** → **Histogram** (ค่าเริ่มต้นที่ควรใช้เกือบทุกกรณีตาม
+     ที่อธิบายไว้ข้างบน)
+   - **ไม่ (รันแค่ instance เดียว หรือไม่สนใจรวมข้าม instance เลย และต้องการความแม่นยำสูงสุดของ quantile)** →
+     **Summary** เป็นตัวเลือกที่ยอมรับได้ แต่ถ้าไม่แน่ใจให้เลือก Histogram ไว้ก่อนเสมอ (ย้อนกลับไปดูใน dashboard
+     ทีหลังง่ายกว่าการเปลี่ยนจาก Summary เป็น Histogram ทีหลัง ซึ่งทำให้ query ที่เขียนไว้ก่อนหน้าใช้ไม่ได้ทันที)
+
+**ตัวอย่างที่มักเลือกผิดในทางปฏิบัติ**: มือใหม่มักเลือก **Gauge** สำหรับ "จำนวน request ทั้งหมดที่ได้รับ" เพราะ
+คิดว่า "เดี๋ยวก็ set ค่าใหม่ทุกครั้งที่มี request เข้ามา" — ปัญหาคือ Gauge ไม่ได้ถูกออกแบบมาให้ query ด้วย
+`rate()` อย่างมีความหมาย (Prometheus ยอมให้เขียน `rate(some_gauge[1m])` ได้ทางเทคนิคก็จริง แต่ผลลัพธ์ไม่มี
+ความหมายที่ถูกต้องเพราะ Gauge ไม่มีสมบัติ "สะสมไม่ลด" ที่ `rate()` ต้องพึ่งพา) — "จำนวน request ทั้งหมด" ควรเป็น
+**Counter** เสมอ (เพิ่มทีละ 1 ทุกครั้งที่มี request) แล้วค่อยผ่าน `rate()` ตอน query ตามที่หัวข้อ 98.9 สอน
+
 ### 98.3 โมเดล Pull-Based ของ Prometheus: ทำไม Server ต้องมา "ดูด" ข้อมูลเอง
 
 ความแตกต่างเชิงสถาปัตยกรรมที่สำคัญที่สุดของ Prometheus เทียบกับระบบ metrics แบบเดิม (เช่น StatsD ที่นิยมมา
@@ -240,6 +271,20 @@ bucket) ถึงเป็นกับดักที่ต้องระวั
 Pushgateway ตามปกติ) ซึ่งเป็นกรณีพิเศษที่ยืม pattern ของ push-based มาแก้ข้อจำกัดของ pull-based เฉพาะจุด — บท
 นี้จะไม่ลงรายละเอียด Pushgateway เพราะ web service ที่รันตลอดเวลา (long-running, ซึ่งคือ 99% ของสิ่งที่หลักสูตร
 นี้สอน) ใช้โมเดล pull ตรง ๆ ได้เต็มรูปแบบอยู่แล้วโดยไม่ต้องพึ่ง Pushgateway เลย
+
+**Exporter: metric ของสิ่งที่ไม่ใช่โค้ดของคุณเอง (ระดับ awareness)** — บทนี้ทั้งบทสอนการเปิด `/metrics`
+endpoint ใน**แอปพลิเคชันของคุณเอง** (ผ่าน `metrics-exporter-prometheus` ที่ห่อ business logic ของคุณตรง ๆ)
+แต่ในระบบจริงยังมีความต้องการวัด metric ของ**สิ่งที่ไม่ได้เขียนโค้ดเอง** เช่น "CPU/memory ของเครื่อง server
+ทั้งเครื่องใช้ไปเท่าไหร่" (ไม่ใช่แค่ของโปรเซสแอปตัวเดียว) หรือ "container ตัวไหนใน Docker กิน memory มากผิด
+ปกติ" — Prometheus ecosystem มี **exporter สำเร็จรูป**ที่เขียนไว้แล้วสำหรับงานลักษณะนี้โดยเฉพาะ ไม่ต้องเขียนโค้ด
+เอง: **`node_exporter`** เปิด `/metrics` ที่รายงานสถานะของทั้งเครื่อง (CPU, memory, disk, network) และ
+**`cAdvisor`** ทำแบบเดียวกันแต่เจาะจงระดับ container — ทั้งสองตัวทำงานตามโมเดล pull-based เดียวกันเป๊ะกับที่
+บทนี้สอน (Prometheus scrape `/metrics` ของมันเหมือนที่ scrape แอป Axum ของเรา) เพียงแต่**คนอื่นเขียน exporter
+ให้แล้ว** คุณแค่รันมันคู่กับแอปแล้วเพิ่ม target ใหม่ใน `prometheus.yml` — บทนี้ไม่ลงรายละเอียดเพราะโฟกัสที่
+metric ระดับแอปพลิเคชัน (application-level metrics) ที่คุณเขียนโค้ดเองผ่าน `metrics` crate ตรง ๆ ซึ่งเป็น
+เนื้อหาหลักที่สำคัญกว่าสำหรับนักพัฒนา ส่วน metric ระดับ infrastructure (infrastructure-level metrics) เป็น
+ความรับผิดชอบของทีม platform/DevOps มากกว่า แต่ทั้งสองแบบ query ผ่าน PromQL เดียวกันและแสดงบน Grafana
+dashboard เดียวกันได้ตามที่หัวข้อ 98.10 อธิบายไว้
 
 ### 98.4 ติดตั้ง `metrics` + `metrics-exporter-prometheus`: เปิด `/metrics` Endpoint แรก
 
@@ -336,6 +381,45 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 ```
+
+**ทางเลือกอื่นที่ควรรู้จัก: `.install()` เปิด HTTP server แยกของตัวเอง โดยไม่ต้องพึ่ง Axum route**
+— ตัวอย่างข้างบนใช้ `.install_recorder()` แล้วสร้าง route `/metrics` เข้ากับ `Router` ของ Axum เอง (วิธีที่
+บทนี้แนะนำเพราะควบคุมได้เต็มที่ ผสานเข้ากับ middleware/state ของแอปได้ตรงไปตรงมา) แต่
+`metrics-exporter-prometheus` ยังมีเมธอด **`.install()`** ที่**สปอว์น HTTP server ของตัวเองแยกไปเลย** บน
+address ที่กำหนด — เหมาะกับสถานการณ์ที่แอปของคุณ**ไม่ใช่** web server อยู่แล้ว (เช่น CLI tool ที่ Part 59 สอน,
+หรือ background worker ที่ Part 84 สอน ที่ไม่มี `Router`/`axum::serve` ให้แนบ route เข้าไปอยู่แล้วตั้งแต่ต้น):
+
+```rust
+use metrics_exporter_prometheus::PrometheusBuilder;
+
+#[tokio::main]
+async fn main() {
+    // .install() สปอว์น task ของตัวเองที่ฟัง HTTP request บน port 9500 แยกจากส่วนอื่นของโปรแกรมทั้งหมด
+    PrometheusBuilder::new()
+        .with_http_listener(([127, 0, 0, 1], 9500))
+        .install()
+        .expect("ติดตั้ง standalone exporter ไม่สำเร็จ");
+
+    metrics::counter!("standalone_demo_total").increment(7);
+    // ... ตรรกะหลักของโปรแกรม (ไม่ใช่ web server) ทำงานต่อไปตามปกติ ...
+}
+```
+
+รันจริงแล้วยิง `curl` ไปที่พอร์ตแยกที่ตั้งไว้ (9500 ไม่ใช่ 3300) ได้ output จริง:
+
+```bash
+curl -sS http://127.0.0.1:9500/metrics
+```
+
+```
+# TYPE standalone_demo_total counter
+standalone_demo_total 7
+```
+
+**หลักการเลือกระหว่างสองวิธี**: ถ้าแอปของคุณเป็น Axum web server อยู่แล้ว (ซึ่งคือกรณีหลักของบทนี้ทั้งบท)
+ใช้ `.install_recorder()` แล้วแนบ `/metrics` เป็นอีก route หนึ่งของ `Router` เดิม (ตามตัวอย่างหลักของบทนี้)
+เพราะไม่ต้องเปิด port ที่สองแยก, ใช้ middleware/logging stack เดียวกันได้, และ deploy ง่ายกว่า (มี port
+เดียวให้ดูแล) — ใช้ `.install()` เฉพาะเมื่อโปรแกรมของคุณไม่มี HTTP server อยู่แล้วตั้งแต่ต้น
 
 `cargo build` ผ่านสะอาด (เวอร์ชันจริงที่ทดสอบ: axum 0.8.9, metrics 0.24.6, metrics-exporter-prometheus
 0.18.3) รันแล้วยิง `curl` จริง:
@@ -1420,6 +1504,134 @@ query ที่เขียนได้ในหัวข้อ 98.9 นำไ�
 ที่ลงรายละเอียดการตั้งค่า Grafana เต็มรูปแบบ — ถ้าคุณต้องทำ dashboard จริงในงาน ขั้นตอนถัดไปที่ควรลองด้วยตัวเอง
 คือติดตั้ง Grafana (มี Docker image สำเร็จรูปเช่นเดียวกับ Prometheus ที่ทดสอบในบทนี้), เพิ่ม Prometheus เป็น
 data source ผ่านหน้า UI, แล้วเอา PromQL query ที่เขียนไว้แล้วในหัวข้อ 98.9 มาวางเป็น panel ได้ทันที
+
+#### Alertmanager: แจ้งเตือนอัตโนมัติจาก Metric (ระดับ Awareness)
+
+Dashboard (Grafana) แก้ปัญหา "อยากดูตัวเลขภาพรวม" แต่ไม่แก้ปัญหา "อยากรู้**ทันที**ตอนมีอะไรผิดปกติโดยไม่ต้อง
+เปิด dashboard เฝ้าดูตลอดเวลา" — Prometheus มี component เสริมชื่อ **Alertmanager** ที่ทำหน้าที่นี้โดยเฉพาะ:
+คุณกำหนด**alerting rule** เป็น PromQL expression ที่ถ้าเป็นจริงต่อเนื่องนานเกินเวลาที่กำหนด (เช่น "p95 latency
+สูงกว่า 1 วินาทีต่อเนื่อง 5 นาที") Prometheus จะส่ง alert ไปให้ Alertmanager แล้ว Alertmanager เป็นคนจัดการ
+เรื่อง**ช่องทางแจ้งเตือน** (ส่ง Slack, email, PagerDuty, ...) รวมถึงกฎการจัดกลุ่ม/ระงับ alert ที่ซ้ำกัน (เช่น
+ไม่ต้องส่ง alert เดิม 100 ครั้งถ้ามันยังไม่หาย) — ตัวอย่าง alerting rule ที่ใช้ query จากหัวข้อ 98.9 ตรง ๆ:
+
+```yaml
+# alert.rules.yml (ตัวอย่างแนวคิด — ไม่ได้รันจริงในบทนี้)
+groups:
+  - name: library_api_alerts
+    rules:
+      - alert: HighP95Latency
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 5m
+        annotations:
+          summary: "p95 latency สูงกว่า 1 วินาทีต่อเนื่องเกิน 5 นาที"
+```
+
+สังเกตว่า `expr` คือ PromQL query แบบเดียวกับที่เรียนในหัวข้อ 98.9 เป๊ะ (`histogram_quantile()` รวมกับ
+`rate()`) — ความรู้ PromQL ที่ได้จากบทนี้ใช้ต่อยอดไปเขียน alerting rule ได้ตรง ๆ โดยไม่ต้องเรียนภาษาใหม่ เช่น
+เดียวกับที่ใช้ต่อยอดไปเขียน Grafana panel ได้ — บทนี้ไม่ลงรายละเอียดการตั้งค่า Alertmanager เต็มรูปแบบ เพราะ
+เป็นเนื้อหาที่ควรมาหลังจากมี metric ที่ออกแบบถูกต้องแล้ว (ตามที่บทนี้ทั้งบทปูพื้นไว้) — เขียน alerting rule
+ที่ query metric ที่ label ผิด/cardinality สูงจะได้ alert ที่ไม่น่าเชื่อถือหรือช้าเกินจะมีประโยชน์
+
+#### รันแอปคู่กับ Prometheus ด้วย `docker-compose` (ทางเลือกที่ใช้บ่อยกว่าในงานจริง)
+
+บทนี้ใช้ `docker run --network host` ในหัวข้อ 98.8 เพราะแอป Axum รันอยู่บนเครื่อง host โดยตรง — แต่ระบบ
+production จริงส่วนใหญ่ containerize **ทั้งแอปและ Prometheus พร้อมกัน** (ต่อยอด Part 96) ซึ่งเปิดโอกาสให้ใช้
+`docker-compose` จัดการทั้งคู่ในไฟล์เดียว โดยไม่ต้องพึ่ง `--network host` เลย (Docker network แบบ default ของ
+compose ทำให้ container คุยกันด้วย**ชื่อ service** ได้ตรง ๆ):
+
+```yaml
+# docker-compose.yml — ตัวอย่างแนวทาง (ไม่ได้รันจริงในบทนี้ แต่เป็น pattern มาตรฐานเมื่อ containerize ทั้งคู่)
+services:
+  metrics_demo:
+    build: .
+    ports:
+      - "3300:3300"
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - metrics_demo
+```
+
+จุดที่ต้องเปลี่ยนคือ `prometheus.yml` — แทนที่จะชี้ไปที่ `127.0.0.1:3300` (ซึ่งข้างใน container ของ
+`prometheus` หมายถึง container ตัวเองเสมอ ไม่ใช่ container อื่นในเครือข่ายเดียวกัน) ให้ใช้**ชื่อ service**
+ที่ compose ตั้งให้ตรง ๆ:
+
+```yaml
+scrape_configs:
+  - job_name: "metrics_demo"
+    static_configs:
+      - targets: ["metrics_demo:3300"] # ชื่อ service ใน docker-compose.yml ไม่ใช่ IP/127.0.0.1
+```
+
+Docker network ภายใน compose มี DNS ในตัวที่ resolve ชื่อ service เป็น IP ของ container นั้นให้อัตโนมัติ — นี่
+คือเหตุผลที่ `--network host` ไม่จำเป็นอีกต่อไปเมื่อทั้งสองฝั่งอยู่ใน compose stack เดียวกัน (ต่างจากหัวข้อ
+98.8 ที่แอปรันบน host โดยตรงและ Prometheus รันใน container แยก จึงต้องพึ่ง `--network host` เพื่อให้มองเห็น
+`127.0.0.1` ร่วมกัน)
+
+### 98.11 ทดสอบ Metrics Middleware อัตโนมัติด้วย `tower::ServiceExt` (ต่อยอด Part 95)
+
+ทุกอย่างที่บทนี้พิสูจน์มาจนถึงตอนนี้ทำผ่าน `curl` แบบ manual — เหมาะกับการเรียนรู้และ debug ครั้งเดียว แต่ระบบ
+production จริงต้องมั่นใจว่า middleware ยังบันทึก metric ถูกต้องอยู่**ทุกครั้งที่มีคนแก้โค้ด** ไม่ใช่แค่ตอน
+เขียนครั้งแรก — **Part 95 (Testing Web Applications แบบครบวงจร)** สอนวิธีเขียน integration test ให้ Axum
+router ด้วย `tower::ServiceExt::oneshot()` (ยิง request หนึ่งตัวเข้า `Router` ตรง ๆ ในหน่วยความจำ โดยไม่ต้อง
+เปิด TCP listener จริงเลย) — เทคนิคเดียวกันนี้ใช้ยืนยันพฤติกรรมของ metrics middleware ได้โดยตรง:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn health_endpoint_increments_request_counter() {
+        // ติดตั้ง recorder ใหม่แยกต่างหากสำหรับ test นี้ — สำคัญมาก: ห้ามใช้ recorder ตัวเดียวกับที่
+        // main() ติดตั้งไว้ (ถ้า test รันพร้อมกันหลายตัว จะแย่ง global recorder กันจนค่านับผิด)
+        let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+            .install_recorder()
+            .unwrap();
+
+        let app = build_app(); // ฟังก์ชันที่คืน Router พร้อม middleware ตามหัวข้อ 98.5
+
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
+
+        // ยืนยันว่า middleware บันทึก metric จริง ไม่ใช่แค่ handler ตอบ response ถูกต้องอย่างเดียว
+        let rendered = handle.render();
+        assert!(rendered.contains(
+            r#"http_requests_total{method="GET",path="/health",status="200"} 1"#
+        ));
+    }
+}
+```
+
+รันจริงด้วย `cargo test` ได้ผลลัพธ์จริง:
+
+```
+running 1 test
+test tests::health_endpoint_increments_request_counter ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**สิ่งที่ test นี้พิสูจน์**: ไม่ใช่แค่ "handler ตอบ 200 ถูกต้อง" (ซึ่ง test ปกติของ Part 95 ก็เช็คได้อยู่แล้ว)
+แต่พิสูจน์ว่า **middleware ที่แนบไว้ด้วย `.route_layer()` บันทึก metric ที่ label ถูกต้องเป๊ะจริง** — ถ้ามีคน
+มาแก้ path ของ route ในอนาคต (เช่นเปลี่ยน `/health` เป็น `/healthz`) โดยลืมอัปเดต assertion ในเทสต์ (หรือกลับกัน
+ลืมว่า `MatchedPath` จะเปลี่ยนตาม route ใหม่โดยอัตโนมัติ) — test นี้จะ fail ทันทีเป็นสัญญาณเตือนแทนที่จะไปรู้
+ตัวอีกทีตอน dashboard ใน production แสดงข้อมูลผิดเงียบ ๆ — นี่คือคุณค่าของการทดสอบ observability infrastructure
+เองด้วย เช่นเดียวกับที่ Part 95 สอนให้ทดสอบ business logic
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

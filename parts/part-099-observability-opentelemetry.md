@@ -204,6 +204,40 @@ structured field ของ `tracing::info_span!(..., book_id = 42)` เป๊ะ
 ข้อมูลที่ Jaeger เก็บไว้ (หัวข้อ 99.5 จะแสดงให้เห็นจริงว่า event เหล่านี้ปรากฏเป็น `logs` array ในข้อมูลที่
 Jaeger's API คืนมา)
 
+#### Span Kind: บอกว่า Span นี้ "ทำหน้าที่อะไร" ในเชิงเครือข่าย
+
+นอกจากเวลาเริ่ม/จบและ attribute แล้ว แต่ละ span ยังมี **Span Kind** ที่บอกบทบาทของมันในเชิง network เพื่อให้
+backend อย่าง Jaeger วาดภาพความสัมพันธ์ระหว่าง service ได้ถูกต้อง (เช่น แยกว่า span ไหนคือ "ฝั่งที่ถูกเรียก"
+กับ "ฝั่งที่เรียกออก" เมื่อดูภาพรวมทั้งระบบ):
+
+| Span Kind | ใช้เมื่อไหร่ |
+|---|---|
+| `INTERNAL` (ค่าเริ่มต้นของ `#[tracing::instrument]`) | งานภายใน process เดียว ไม่ข้าม network เลย (เช่น `check_stock`, `charge_payment` ในหัวข้อ 99.4 ที่เป็นแค่ฟังก์ชัน async ธรรมดา) |
+| `SERVER` | span ของฝั่งที่ **รับ** request จาก network เข้ามา (เช่น handler ของ Axum ที่รับ HTTP request) |
+| `CLIENT` | span ของฝั่งที่ **ยิง** request ออกไปยัง service อื่น (เช่น การเรียก `reqwest::Client` ในหัวข้อ 99.6) |
+| `PRODUCER` / `CONSUMER` | สำหรับระบบ asynchronous messaging (เชื่อมกับ Part 82 — message queue) ฝั่งที่ publish/consume event |
+
+ตัวอย่างในบทนี้ (หัวข้อ 99.4-99.9) ไม่ได้ตั้ง span kind อย่างชัดเจน จึงเป็น `INTERNAL` ทั้งหมดโดยปริยาย — ใน
+ระบบ production จริงที่อยากให้ Jaeger UI วาด "service map" (แผนภาพว่า service ไหนเรียก service ไหนบ้าง) ได้
+ถูกต้อง ควรตั้ง span kind ให้ตรงบทบาทจริงด้วย `tracing::info_span!("...", otel.kind = "server")` หรือใช้
+middleware สำเร็จรูปอย่าง `axum-tracing-opentelemetry` ที่ตั้งค่านี้ให้อัตโนมัติทุก request
+
+#### Baggage: ส่ง Context เพิ่มเติมข้าม Service โดยไม่ต้องผูกกับ Span ใดตัวหนึ่ง
+
+มีแนวคิดที่ห้าที่เกี่ยวข้องแต่แยกจาก Span Context เรียกว่า **Baggage** — ต่างจาก Attribute (ที่ผูกกับ span
+**หนึ่งตัว**เท่านั้น และไม่ propagate ต่อไปยัง service ถัดไปโดยอัตโนมัติ) Baggage คือ key-value ที่ **ผูกกับ
+trace ทั้งเส้น** และ propagate ไปกับทุก hop เหมือน Span Context (ผ่าน header `baggage` คู่กับ `traceparent`)
+— ใช้เมื่อต้องการให้ข้อมูลบางอย่าง "ติดตัวไปกับ request" ตลอดทาง โดยไม่ต้องส่งมันเป็น parameter ของทุกฟังก์ชัน
+ที่เกี่ยวข้องด้วยมือ เช่น "user tier" (free/premium) ที่อยากให้ทุก service ในสายรู้ได้ทันทีเพื่อปรับ log
+level หรือ feature flag ตาม tier โดยไม่ต้อง query database ซ้ำที่ทุก hop
+
+ข้อควรระวังสำคัญ: **Baggage ถูกส่งเป็น plain text ผ่าน HTTP header ในทุก request ที่ตามมา** (ไม่ได้เข้ารหัส
+หรือเก็บแบบ private เหมือน attribute ที่แนบกับ span ตัวเดียวแล้วจบ) — ข้อมูลอ่อนไหวเด็ดขาดที่**ห้าม**ใส่เป็น
+Baggage ด้วยเหตุผลเดียวกับกับดักที่ 5 ท้ายบท (ข้อมูลลับที่หลุดไปกับ span attribute) เพียงแต่ Baggage
+**กระจายไปได้ไกลกว่านั้นอีก** เพราะมันติดไปกับทุก network call ที่ตามมาในสาย ไม่ใช่แค่ถูกเก็บไว้ที่ backend
+เดียว — บทนี้ไม่ได้ใช้ Baggage ในตัวอย่างหลัก (สถานการณ์ที่สาธิตในหัวข้อ 99.6 ใช้แค่ Span Context เพียงพอแล้ว)
+แต่ควรรู้จักไว้เพราะเป็นส่วนหนึ่งของ W3C standard เดียวกับ `traceparent` (มาตรฐานคู่กันชื่อ **W3C Baggage**)
+
 ### 99.3 สถาปัตยกรรมของ OTel: Instrumentation → Collector/Exporter → Backend
 
 ก่อนลงมือเขียนโค้ด ต้องเข้าใจภาพรวมของ pipeline ทั้งหมดก่อน เพราะมันมีส่วนที่ต้อง "รัน" มากกว่าโมเดล pull ของ
@@ -465,6 +499,29 @@ logic ของแอปไม่ต้องรู้เลยว่ามี�
 `opentelemetry_sdk` เวอร์ชันที่บทนี้ใช้ยังต้องเขียนโค้ดอ่านค่าด้วยตัวเอง (เช่น
 `std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")`) แล้วส่งต่อให้ builder เอง ไม่ได้ auto-detect ให้ทั้งหมดแบบ
 บาง SDK ภาษาอื่น — หัวข้อ 99.10 (capstone) จะแสดงตัวอย่างการอ่านค่าด้วยมือแบบนี้ให้เห็นจริง
+
+#### Resource Attributes เพิ่มเติม: ไม่ใช่แค่ `service.name`
+
+`Resource` ที่สร้างด้วย `Resource::builder()` รองรับ attribute มากกว่าแค่ `service.name` — OTel มี **semantic
+convention มาตรฐาน** สำหรับ resource attribute ที่พบบ่อย ซึ่งช่วยให้ backend อย่าง Jaeger กรอง/จัดกลุ่ม trace
+ได้ละเอียดขึ้นมากในระบบที่มีหลาย environment/หลาย version รันพร้อมกัน:
+
+```rust
+let resource = Resource::builder()
+    .with_service_name("library-api")
+    .with_attribute(opentelemetry::KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+    .with_attribute(opentelemetry::KeyValue::new("deployment.environment", "production"))
+    .build();
+```
+
+- **`service.version`** — ใช้ `env!("CARGO_PKG_VERSION")` ดึงเวอร์ชันจาก `Cargo.toml` ตรง ๆ ตอน compile
+  (แนวคิดเดียวกับที่ Part 59 อาจใช้ทำ `--version` ของ CLI) มีประโยชน์มากตอน debug ปัญหาที่**เพิ่งเกิดหลัง
+  deploy เวอร์ชันใหม่** — filter trace ด้วย `service.version` เก่ากับใหม่เทียบกันได้ทันทีว่าปัญหาเกิดเฉพาะ
+  เวอร์ชันไหน
+- **`deployment.environment`** — แยก trace ของ `staging` ออกจาก `production` ตั้งแต่ระดับ resource เพื่อไม่ให้
+  ปนกันใน Jaeger เดียวกัน (ถ้าใช้ Jaeger instance เดียวกันสำหรับทุก environment — ในระบบจริงหลายทีมนิยมแยก
+  Jaeger instance ตาม environment ไปเลยเพื่อความชัดเจน แต่ resource attribute นี้ช่วยได้ในกรณีที่ยังใช้ instance
+  ร่วมกัน)
 
 ### 99.5 รัน Jaeger จริงด้วย Docker แล้ว Export Span จริง
 
@@ -839,6 +896,51 @@ service-a เลย** — กลายเป็นคนละ trace กัน�
 พบระหว่างตรวจสอบเนื้อหาบทนี้ อธิบายละเอียดพร้อมวิธีแก้ในหัวข้อกับดักที่ 2 ท้ายบท — **สาเหตุที่โค้ดข้างบนเขียน
 ด้วยมือแบบไม่ใช้ `#[instrument]`และเรียก `set_parent` ก่อน `.instrument(span).await` ไม่ใช่เรื่องบังเอิญ**
 
+#### กรณีที่ต้องระวังเพิ่ม: Context หายไปเมื่อ `tokio::spawn` งานใหม่
+
+มีอีกสถานการณ์หนึ่งที่คล้ายกับปัญหาข้าม service ข้างบน แต่เกิด**ภายใน process เดียวกัน**: เมื่อคุณใช้
+`tokio::spawn` เพื่อทำงานพื้นหลัง (background task) — จำได้จาก **Part 60 หัวข้อ 60.7** ไหมว่า `tracing` ติดตาม
+"span ปัจจุบัน" ผ่าน **span stack ที่ผูกกับ task ปัจจุบัน** ไม่ใช่ผูกกับ thread — ปัญหาคือ **`tokio::spawn` สร้าง
+task ใหม่ที่แยกออกจาก span stack ของ task เดิมโดยสิ้นเชิง** (มันมีเหตุผล: task ใหม่อาจมีชีวิตอยู่นานกว่า task
+ที่ spawn มันด้วยซ้ำ ไม่สมเหตุสมผลที่จะผูก parent span ไว้ตายตัว):
+
+```rust
+#[tracing::instrument]
+async fn handle_request(request_id: u32) {
+    tracing::info!("รับ request แล้ว กำลัง spawn background job");
+
+    // อันตราย: task ใหม่นี้ "ไม่รู้จัก" span ของ handle_request เลย
+    // -- ถ้า log_job มี #[instrument] ของตัวเอง span ของมันจะกลายเป็น root span ใหม่
+    // ที่ไม่ผูกกับ trace ของ handle_request เลยแม้แต่นิดเดียว (เหมือนกับกับดักที่ 2 แต่เกิดในเครื่องเดียวกัน)
+    tokio::spawn(async move {
+        send_notification_async(request_id).await;
+    });
+}
+```
+
+**วิธีแก้**: ต้อง**ส่ง span ปัจจุบันเข้าไปใน task ใหม่ด้วยมือ** ผ่าน `tracing::Instrument::instrument` ก่อน
+`tokio::spawn` (แนวคิดเดียวกับที่หัวข้อ 99.6 ใช้กับ `service-b` — ผูก context ให้ future ก่อนมันถูก poll):
+
+```rust
+#[tracing::instrument]
+async fn handle_request(request_id: u32) {
+    tracing::info!("รับ request แล้ว กำลัง spawn background job");
+
+    // ส่ง span ปัจจุบัน (handle_request) ให้ future ใหม่ก่อน spawn -- ตอนนี้ span ของ
+    // send_notification_async จะเป็น CHILD_OF span ของ handle_request อย่างถูกต้อง
+    let current = tracing::Span::current();
+    tokio::spawn(
+        async move { send_notification_async(request_id).await }.instrument(current),
+    );
+}
+```
+
+หลักการนี้สำคัญมากสำหรับระบบที่มี background job/worker queue ภายใน process เดียว (เช่น "บันทึก log การ
+ตรวจสอบ" หรือ "ส่งอีเมลแบบ fire-and-forget" ที่ไม่ต้องการให้ handler รอ) — ถ้าลืมทำขั้นนี้ Jaeger จะแสดง trace
+ของ request หลักที่ "ดูสมบูรณ์" แต่ไม่มี span ของงานพื้นหลังที่เกิดขึ้นจริงเลย ทำให้เข้าใจผิดว่างานพื้นหลังนั้น
+ไม่ได้ถูก trace (สังเกตว่านี่คือปัญหาแบบเดียวกับกับดักที่ 2 ท้ายบท เพียงแต่เกิดจาก task boundary ภายใน process
+เดียว ไม่ใช่ network boundary ข้าม process)
+
 ### 99.7 Sampling: ควบคุมปริมาณ Trace ในระบบที่มี Traffic สูง
 
 ระบบ production ขนาดใหญ่ที่รับ traffic หลักพัน/หมื่น request ต่อวินาที **การเก็บ trace ทุก request** จะสร้าง
@@ -846,6 +948,23 @@ service-a เลย** — กลายเป็นคนละ trace กัน�
 backend ซึ่งมีค่าใช้จ่ายจริงทั้งด้าน bandwidth และพื้นที่เก็บข้อมูล (ยิ่งเก็บนานยิ่งแพง) และ (2) **overhead ต่อ
 ตัวแอปเอง** — แม้ batch exporter จะช่วยลด overhead ลงมากแล้ว การสร้าง/ส่ง span จำนวนมหาศาลก็ยังกิน CPU/memory
 มากกว่าไม่ทำเลย **Sampling** คือการตัดสินใจว่า **"trace ไหนบ้างที่จะถูกเก็บจริง"** โดยไม่เก็บทุก trace
+
+#### ตัวเลขคร่าว ๆ ให้เห็นภาพต้นทุนจริง
+
+ลองประมาณการแบบคร่าว ๆ (ตัวเลขสมมติเพื่อให้เห็นสัดส่วน ไม่ใช่ตัวเลขจากการวัดจริง): ระบบหนึ่งรับ 10,000
+request/วินาที แต่ละ request สร้าง trace ที่มีเฉลี่ย 5 span (ตามสถานการณ์ในหัวข้อ 99.4-99.6 ที่หนึ่ง request
+มักมีทั้ง root span + span ลูกของแต่ละ hop) ถ้า**เก็บทุก trace (100%)**:
+
+- 10,000 × 5 = **50,000 span/วินาที** → 4,320,000,000 (4.32 พันล้าน) span/วัน
+- ถ้า backend เก็บ span ละเฉลี่ย ~500 bytes (attribute + event รวมกัน) นี่คือ **~2 TB ข้อมูลใหม่ต่อวัน** ที่ต้อง
+  เก็บและมีค่าใช้จ่ายด้าน storage ต่อเนื่อง (ยังไม่รวม network bandwidth ระหว่างส่ง)
+
+ถ้าลด sampling rate เหลือ **5%** (`TraceIdRatioBased(0.05)`): ปริมาณข้อมูลลดลงเหลือ **~100 GB/วัน** — ลดลง 20
+เท่า โดยที่ยังมี trace ตัวอย่างเพียงพอสำหรับดู pattern โดยรวมของระบบ (latency percentile ปกติ, throughput
+ปกติ) แต่ **แลกมากับความเสี่ยงที่ trace ของ request ที่ error หายากจะไม่ถูกเก็บไว้เลย** (เพราะการตัดสินใจ
+sampling เกิดก่อนรู้ผลลัพธ์ ตามที่จะอธิบายต่อไป) — นี่คือ trade-off ที่แท้จริงเบื้องหลังตัวเลขที่ดูเหมือน
+"ลดต้นทุนฟรี ๆ" การเลือกอัตราที่เหมาะสมต้องชั่งน้ำหนักระหว่างต้นทุนที่ยอมรับได้กับความสามารถในการ debug
+ปัญหาที่เกิดไม่บ่อย
 
 #### Head-based Sampling: ตัดสินใจ ณ จุดเริ่ม Trace
 
@@ -1008,6 +1127,19 @@ Prometheus/Grafana เข้าใจในตัว — ทั้งสอง�
 **ไม่ว่าจะเริ่มจากมุมไหน (เห็น log ผิดปกติ, เห็นกราฟ metric ผิดปกติ, หรือเห็น trace ที่ error) ก็กระโดดไปดู
 อีกสองมุมที่เหลือได้เสมอ**
 
+#### "LGTM Stack": ตัวอย่าง Stack ที่รวมสามเสาหลักไว้ในหน้าจอเดียว
+
+ในทางปฏิบัติ ทีมจำนวนมากไม่ได้เปิดสามเครื่องมือแยกกันคนละแท็บ (Jaeger UI สำหรับ trace, Prometheus/Grafana
+สำหรับ metric, Kibana/Loki สำหรับ log) — พวกเขารวมทั้งหมดไว้ใน **Grafana** เป็นหน้าจอเดียว โดยมี data source
+แยกกันตามเสาหลัก: **L**oki (logs), **G**rafana (หน้าจอกลาง), **T**empo (traces — ตัวเลือกโอเพนซอร์สของ
+Grafana ที่เทียบเท่า Jaeger และเข้าใจ OTLP เหมือนกัน), **M**imir/Prometheus (metrics) — เรียกรวมกันว่า **"LGTM
+stack"** ถ้าตั้งค่า `trace_id` เป็น field ใน log ตามหัวข้อนี้ และ metric มี exemplar ที่ชี้ไปยัง trace ID
+เดียวกัน Grafana's **Explore** view จะให้คลิกจาก log line ไปยัง trace เต็ม หรือจากจุดข้อมูลบนกราฟ metric ไปยัง
+trace ตัวอย่างได้ในคลิกเดียว โดยไม่ต้อง copy trace ID ไปวางเองด้วยมือแบบที่บทนี้สาธิตผ่าน `curl` — บทนี้ไม่ได้
+ตั้งค่า Grafana จริง (Jaeger UI เพียงพอสำหรับจุดประสงค์การเรียนรู้) แต่หลักการ**เชื่อมกันด้วย `trace_id` เดียวกัน**
+ที่บทนี้พิสูจน์ไว้ด้วยข้อมูลจริงในหัวข้อ 99.8 คือรากฐานเดียวกันที่ทำให้ Explore view ทำงานได้จริงในระบบที่ใช้
+Grafana
+
 #### ตารางสรุปสามเสาหลัก
 
 | เสาหลัก | บทที่สอน | ตอบคำถามอะไร | เชื่อมกับอีกสองเสาหลักผ่าน |
@@ -1112,6 +1244,51 @@ impl IntoResponse for AppError {
 นี่คือรูปแบบเดียวกับหลักการที่ Part 66 ใช้ตลอดทั้งบท: **รวม cross-cutting concern ไว้ที่จุดเดียว** (ตอนนั้นคือ
 การแปลง error เป็น HTTP response ที่ถูกต้อง ตอนนี้คือการ mark span ว่า error) แทนที่จะกระจายไปเขียนซ้ำทุก
 handler — ยิ่งระบบมี handler มากเท่าไหร่ ยิ่งเห็นประโยชน์ของการรวมจุดนี้ชัดเจนมากเท่านั้น
+
+#### ข้อควรรู้เพิ่ม: Error Status ไม่ Propagate ขึ้นไปยัง Parent Span อัตโนมัติ
+
+จุดที่ทำให้สับสนได้ง่าย: การเรียก `set_status(Status::error(...))` **ตั้งค่าให้เฉพาะ span ปัจจุบันตัวเดียว
+เท่านั้น** — ถ้า `check_stock` (child span) error แต่ `process_order` (parent span) ไม่ได้เรียก `set_status`
+ของตัวเองด้วย **`process_order` จะยังมี status เป็น `Unset`/`Ok` ตามปกติ** แม้ลูกของมัน error ไปแล้วก็ตาม —
+นี่ไม่ใช่ bug แต่เป็นการตัดสินใจออกแบบของ OTel ที่ตั้งใจให้แต่ละ span รับผิดชอบสถานะของตัวเอง เพราะ parent
+span อาจ**recover จาก error ของ child ได้** (เช่น ลอง retry แล้วสำเร็จในครั้งที่สอง — parent span ควรเป็น
+`Ok` ถึงจะถูกต้อง แม้ child span แรกที่ error ยังถูกบันทึกไว้ว่า error) — ในทางปฏิบัติ ถ้าต้องการให้ error
+"เห็นได้ตั้งแต่ระดับบนสุด" (เช่น ที่ span ของ HTTP handler เอง) ต้อง**เรียก `set_status` ที่ทุกระดับที่เกี่ยวข้อง
+อย่างตั้งใจ** — ซึ่งเป็นเหตุผลที่หัวข้อก่อนหน้าแนะนำให้ทำที่จุดศูนย์กลางอย่าง `impl IntoResponse for AppError`
+เพราะนั่นคือจุดที่ **error ไหลผ่านแน่นอน** (ทุก handler คืน `Result<T, AppError>` ตาม Part 66) ต่างจากการหวังให้
+error propagate ขึ้นเองซึ่งไม่เกิดขึ้นจริงในโมเดลของ OTel
+
+#### บันทึก Exception เต็มรูปแบบด้วย Semantic Convention (`exception.*`)
+
+นอกจาก `otel.status_code`/`otel.status_description` แล้ว OTel ยังมี **semantic convention มาตรฐาน** สำหรับ
+บันทึกรายละเอียดของ exception/error เป็น **event** พิเศษชื่อ `exception` ที่มี attribute
+`exception.type`/`exception.message`/`exception.stacktrace` — Jaeger UI รู้จัก event ชนิดนี้เป็นพิเศษและแสดง
+มันเด่นกว่า event ธรรมดา ทำให้เห็นรายละเอียด error ได้ครบโดยไม่ต้องเดาจาก `otel.status_description` (ที่มัก
+มีแค่ข้อความสั้น ๆ) เพียงอย่างเดียว:
+
+```rust
+use opentelemetry::trace::Status;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+// ภายใน impl IntoResponse for AppError หรือจุดที่จับ error ได้เต็มรูปแบบ (รวม error chain ตาม Part 60 หัวข้อ 60.4b)
+if let AppError::Internal(source_error) = &self {
+    let span = tracing::Span::current();
+    span.set_status(Status::error(self.to_string()));
+    span.add_event(
+        "exception",
+        vec![
+            opentelemetry::KeyValue::new("exception.type", "AppError::Internal"),
+            opentelemetry::KeyValue::new("exception.message", source_error.to_string()),
+        ],
+    );
+}
+```
+
+การแยก `exception.message` (รายละเอียดเต็มสำหรับ developer ไล่ bug) ออกจาก `otel.status_description` (ข้อความ
+สั้น ๆ ที่ปลอดภัยจะแสดงในสถิติ/summary) สำคัญด้วยเหตุผลเดียวกับที่ Part 66 หัวข้อ 66.3 ย้ำไว้เรื่อง
+`AppError::Internal` — ข้อความที่ client เห็นไม่ควรมีรายละเอียดภายในระบบรั่วไหลออกไป แต่ข้อความที่เก็บไว้ใน
+trace สำหรับ developer เท่านั้น (เข้าถึงผ่าน Jaeger UI ที่ควบคุมสิทธิ์แยกจาก client ภายนอก) สามารถมีรายละเอียด
+เต็มได้อย่างปลอดภัยกว่า
 
 ### 99.10 Capstone: ผูก OpenTelemetry เข้ากับ Full-Stack Backend (Part 92-94)
 
@@ -1258,6 +1435,46 @@ Part 92 จริง** — ซึ่งได้พิสูจน์แล้�
 Jaeger จริงตามหัวข้อ 99.5 คู่กับแอป แล้วยิง traffic ผ่าน `curl`/frontend จริงของ Part 93 — ทุกจุดที่เหลือคือ
 สิ่งที่บทนี้พิสูจน์ไว้แล้วครบด้วยข้อมูลจริงในหัวข้อก่อนหน้า แบบฝึกหัดข้อ 4 ท้ายบทให้ลองทำขั้นตอนนี้ด้วยตัวเองกับ
 โค้ด capstone จริงของคุณ
+
+#### ภาพรวม `docker-compose.yml` ของสามเสาหลักครบชุด
+
+เพื่อให้เห็นภาพจบของทั้งโมดูล observability สามบทรวมกัน นี่คือ `docker-compose.yml` ที่รัน infrastructure
+ครบทั้งสามเสาหลักคู่กับ `library-api` (Prometheus/Grafana มาจาก Part 98, Jaeger จากบทนี้ — แอปเองมี logs ผ่าน
+`stdout` อยู่แล้วตาม Part 60 ซึ่ง Docker เก็บให้อัตโนมัติผ่าน `docker logs`):
+
+```yaml
+services:
+  library-api:
+    build: .
+    ports: ["3000:3000"]
+    environment:
+      OTLP_ENDPOINT: "http://jaeger:4317"
+      DATABASE_URL: "postgres://postgres:postgres@db/library"
+    depends_on: [jaeger, db]
+
+  jaeger:                              # เสาหลัก: Traces (บทนี้)
+    image: jaegertracing/all-in-one:1.62.0
+    ports: ["16686:16686"]
+
+  prometheus:                          # เสาหลัก: Metrics (Part 98)
+    image: prom/prometheus:v3.0.1
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
+    ports: ["9090:9090"]
+
+  grafana:                             # หน้าจอกลางดู metrics (+ เชื่อม Jaeger ผ่าน data source ได้)
+    image: grafana/grafana:11.4.0
+    ports: ["3001:3000"]
+    depends_on: [prometheus]
+
+  db:
+    image: postgres:17
+    environment: {POSTGRES_PASSWORD: postgres, POSTGRES_DB: library}
+```
+
+รันด้วย `docker compose up` ตัวเดียว ได้ทั้ง **backend ของแอป (logs ผ่าน `docker compose logs library-api`,
+metrics ผ่าน Prometheus/Grafana ที่ `:3001`, traces ผ่าน Jaeger UI ที่ `:16686`)** — สาม URL ที่แตกต่างกันแต่
+ทั้งหมดเชื่อมกันด้วย `trace_id` เดียวกัน (ตามที่หัวข้อ 99.8 พิสูจน์ไว้) นี่คือรูปธรรมที่สุดของคำว่า "ระบบที่มี
+observability ครบสามเสาหลัก" ที่เป้าหมายของบทนี้ตั้งใจพาไปให้ถึง
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
@@ -1506,6 +1723,48 @@ sampler หลักที่ครอบไว้ข้างในจะเป
 เองก็ต่อเมื่อเป็น root span ของ trace ใหม่จริง ๆ เท่านั้น — วางกฎนี้ไว้ใน shared configuration/library กลาง
 ของทีม (แบบเดียวกับที่ Part 81 หัวข้อ 81.4 แนะนำให้เก็บ `.proto` ไว้ที่เดียวเป็น single source of truth)
 เพื่อไม่ให้ทีมใดทีมหนึ่งลืมครอบ `ParentBased` โดยไม่ตั้งใจ
+
+### 7. `EnvFilter` เข้มเกินไป — Span ถูกกรองออกก่อนถึง OTel Layer เลย ไม่ใช่แค่ไม่ print ออก terminal
+
+กับดักนี้พบจริงระหว่างเตรียมตัวอย่าง sampling ของหัวข้อ 99.7 — ตอนแรกตั้ง `EnvFilter` ไว้ที่ระดับ `warn`
+(เพราะคิดว่า "ไม่อยากเห็น log INFO รก terminal ตอนยิง 50 request"):
+
+```rust
+tracing_subscriber::registry()
+    .with(EnvFilter::new("warn")) // ตั้งใจแค่ให้ terminal ไม่รก...
+    .with(otel_layer)
+    .init();
+```
+
+รันโปรแกรมยิง 50 request จริงพร้อม sampler ตั้งไว้ที่ `TraceIdRatioBased(0.2)` (คาดว่าจะเห็น ~10 trace ใน
+Jaeger) แล้ว query Jaeger จริง — **ผลลัพธ์คือ 0 trace เก็บได้เลย** ไม่ใช่ ~10 ตามที่คาดไว้:
+
+```text
+ส่ง 50 requests แล้ว (คาดว่า Jaeger จะเก็บได้ประมาณ 20% คือ ~10 traces)
+จำนวน trace ที่ Jaeger เก็บได้จริง: 0
+```
+
+**สาเหตุ**: `#[tracing::instrument]` สร้าง span ที่มี **level เป็น `INFO` โดยค่าเริ่มต้น** (ปรับได้ผ่าน
+`#[instrument(level = "debug")]` เป็นต้น) — `EnvFilter` **ทำงานที่ระดับ `tracing` เอง ก่อนที่ event/span จะไป
+ถึง layer ไหนเลย** (ทั้ง `fmt::layer()` และ `otel_layer` ถูก apply filter เดียวกันร่วมกัน เพราะ `EnvFilter` ถูก
+เพิ่มเป็น layer แรกสุดใน registry) — ตั้ง `EnvFilter::new("warn")` แปลว่า **span level `INFO` ถูกกรองออกตั้งแต่
+ต้นทาง ก่อนที่ `otel_layer` จะมีโอกาสเห็นมันเลยด้วยซ้ำ** ไม่ใช่แค่ "ไม่ print ออก terminal" แบบที่ตั้งใจไว้ตอน
+แรก — span ทั้งหมดของ `#[instrument]` (ที่เป็น INFO) จึงไม่ถูกสร้างขึ้นจริงเลย ไม่มีอะไรให้ sampler ตัดสินใจ
+หรือ export เลยแม้แต่ span เดียว
+
+**วิธีแก้**: เปลี่ยนเป็น `EnvFilter::new("info")` (หรือค่าที่ครอบคลุม level ของ span ที่ `#[instrument]`
+สร้างไว้) — หลังแก้แล้วรันซ้ำ 50 request เดิม ได้ผลลัพธ์จริงตรงกับที่คาดไว้:
+
+```text
+จำนวน trace ที่ Jaeger เก็บได้จริง: 8
+```
+
+(8 จาก 50 คือ 16% ใกล้เคียงกับอัตรา 20% ที่ตั้งไว้ — ตามที่หัวข้อ 99.7 อธิบายไว้) **บทเรียนสำคัญ**: ถ้าต้องการ
+ควบคุม verbosity ของ terminal output แยกจากการ export ไป OTel ให้ใช้ **`with_filter`** ผูก filter แยกให้แต่
+ละ layer เอง (`fmt::layer().with_filter(EnvFilter::new("warn"))` คู่กับ
+`otel_layer.with_filter(EnvFilter::new("info"))`) แทนการใส่ `EnvFilter` เดียวที่ระดับ `registry()` ซึ่งกรอง
+ทุก layer พร้อมกันแบบไม่เลือกหน้า — นี่คือรายละเอียดสำคัญของโมเดล layer ที่ Part 60 หัวข้อ 60.8 แนะนำไว้ว่า
+"layer ปรับแยกกันได้" แต่ต้องระบุ filter แยกให้ถูกจุดจริง ๆ ถึงจะได้ผลตามที่ตั้งใจ
 
 ## แบบฝึกหัด (Exercises)
 

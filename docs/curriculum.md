@@ -136,7 +136,7 @@
 | # | ชื่อบท | สถานะ |
 |---|---|---|
 | 96 | Docker และ Containerization สำหรับ Rust | ⏳ |
-| 97 | CI/CD Pipeline ด้วย GitHub Actions | ⏳ |
+| 97 | CI/CD Pipeline ด้วย GitHub Actions | ✅ |
 | 98 | Observability: Metrics ด้วย Prometheus | ✅ |
 | 99 | Observability: Distributed Tracing ด้วย OpenTelemetry | ✅ |
 | 100 | Security Best Practices ใน Rust | ⏳ |

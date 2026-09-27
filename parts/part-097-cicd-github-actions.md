@@ -22,6 +22,8 @@
   (`ghcr.io`) และเขียน release automation ที่สร้าง binary หลายแพลตฟอร์มพร้อมแนบเข้า GitHub Release อัตโนมัติ
 - ใช้ `cargo-audit` ตรวจสอบ dependency ของโปรเจกต์เทียบกับฐานข้อมูลช่องโหว่ความปลอดภัย (RustSec Advisory Database)
   และผนวกเข้าเป็นส่วนหนึ่งของ CI pipeline
+- ตั้งค่า Branch Protection Rules ให้ผลลัพธ์ของ CI "บังคับผ่านจริง" ก่อน merge ได้ และเข้าใจข้อจำกัดด้านความ
+  ปลอดภัยของ `secrets`/`GITHUB_TOKEN` เมื่อ workflow ถูก trigger จาก pull request ของ fork ภายนอก
 
 ## ความรู้ที่ต้องมีมาก่อน
 
@@ -42,6 +44,8 @@
   คุณอ่านบทนี้ ให้เข้าใจว่าเนื้อหาที่อ้างถึงคือ "Dockerfile แบบ multi-stage build ที่ produce binary ขนาดเล็ก" และ
   "target `x86_64-unknown-linux-musl` สำหรับ static binary ที่รันบน distroless/scratch image ได้" ซึ่งเป็นแนวคิด
   มาตรฐานที่จะอธิบายซ้ำสั้น ๆ ในบทนี้เท่าที่จำเป็น
+- **Part 17 (Packages, Crates, Workspaces)** — จำเป็นสำหรับความเข้าใจเรื่อง `Cargo.lock` ว่าทำไม cache key ของ
+  หัวข้อ 97.4 ถึงต้องผูกกับไฟล์นี้ และเรื่อง Semantic Versioning ที่ใช้ตั้งชื่อ tag release ในหัวข้อ 97.10
 
 ## หมายเหตุเรื่องการตรวจสอบเนื้อหา (สำคัญ — อ่านก่อนเริ่ม)
 
@@ -1578,6 +1582,30 @@ action ทางการของ GitHub เอง (`actions/*`) ที่ไ�
 สาม action ในกลุ่มนี้ที่กล่าวถึงในบทนี้ถูกใช้อย่างแพร่หลายในโปรเจกต์ Rust ระดับ production จำนวนมาก ณ เวลาที่
 เขียนบทนี้)
 
+### 97.17 GitHub-Hosted Runner vs Self-Hosted Runner: ผลกระทบต่อ Caching
+
+ทุก workflow ในบทนี้ใช้ `runs-on: ubuntu-latest` (หรือ `macos-latest`/`windows-latest`) ซึ่งคือ **GitHub-hosted
+runner** — เครื่องเสมือนที่ GitHub สร้างขึ้นใหม่ทั้งหมด (provision จาก image มาตรฐาน) ก่อนแต่ละ job เริ่มรัน แล้ว
+**ทำลายทิ้งทันทีที่ job จบ** คุณสมบัติ "เครื่องใหม่เอี่ยมทุกครั้ง" (ephemeral) นี้คือสาเหตุที่การ caching ทุกเรื่อง
+ในบทนี้ต้องทำผ่านฟีเจอร์ cache ของ GitHub Actions เอง (`actions/cache`/`Swatinem/rust-cache`) อย่างชัดเจน — ไม่มี
+ไฟล์อะไรจากการรันครั้งก่อนหลงเหลืออยู่บนเครื่องให้ใช้ต่อโดยธรรมชาติ
+
+ทีมที่มี workload มากพอ (รัน CI บ่อยมากจนต้นทุนของ GitHub-hosted runner สูงเกินไป ตามที่อธิบายไว้ในหัวข้อ 97.14
+หรือต้องการ hardware เฉพาะทาง เช่น GPU สำหรับ machine learning) อาจเลือกใช้ **self-hosted runner** แทน — คือ
+เครื่องจริง (หรือ container) ที่ทีมดูแลเอง แล้วติดตั้ง GitHub Actions runner agent ให้มาคอยรับงานจาก repository
+ระบุด้วย `runs-on: self-hosted` (หรือ label ที่ทีมกำหนดเอง เช่น `runs-on: [self-hosted, linux, gpu]`)
+
+**ผลกระทบสำคัญต่อการออกแบบ caching:** self-hosted runner **ไม่ใช่ ephemeral โดย default** — ถ้าทีมตั้งให้เป็น
+เครื่องที่รันต่อเนื่อง (ไม่ใช่ container ที่สร้างใหม่ทุกครั้ง) โฟลเดอร์ `~/.cargo` และ `target/` จาก job ก่อนหน้า
+จะยังอยู่บนดิสก์จริงเมื่อ job ถัดไปมารัน — ทำให้ในทางทฤษฎีไม่จำเป็นต้องพึ่ง `actions/cache`/`Swatinem/rust-cache`
+เลยก็ได้ (เพราะ `target/` ที่ compile ไว้แล้วยังอยู่ตรงนั้น) แต่ก็มีข้อเสียแลกมา: **build ที่ต่างกันของหลาย
+branch/PR อาจ "เปื้อน" กันเอง** ถ้าไม่ระมัดระวัง (เช่น PR สอง branch compile ทับ `target/` เดียวกันพร้อมกันถ้า
+รันสอง job บนเครื่องเดียวกันในเวลาเดียวกัน) ทำให้ทีมที่ใช้ self-hosted runner ยังต้องออกแบบเรื่อง isolation ระหว่าง
+job อย่างรอบคอบ (เช่น ให้แต่ละ job รันใน container แยกที่ mount volume คนละตัว) — ซึ่งอยู่นอกเหนือขอบเขตเบื้องต้น
+ของบทนี้ แต่ควรรู้จักไว้เป็นแนวคิดขยายผลสำหรับทีมที่เติบโตจนต้นทุน GitHub-hosted runner สูงเกินจุดคุ้มทุน สำหรับ
+โปรเจกต์ระดับที่บทนี้ครอบคลุม (`library_api` จาก Part 92-94) GitHub-hosted runner ร่วมกับ `Swatinem/rust-cache`
+ตามที่อธิบายไว้ทั้งบทนี้เพียงพอและเหมาะสมที่สุดแล้ว
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### 1. ลืมว่า `-D warnings` เปลี่ยน clippy warning ให้เป็น hard error ที่ทำให้ job ทั้งหมดล้มเหลว
@@ -1730,6 +1758,13 @@ shell default ของ runner ที่เปลี่ยนไปตาม OS*
    กำหนด โฟกัสที่ความถูกต้องของเงื่อนไข `if:` ของแต่ละ job ให้ตรงกับ event ที่ต้องการเป๊ะ ๆ (ลองไล่ trace ว่าถ้า
    เกิด pull request job ไหนควรรัน/ไม่ควรรัน และถ้าเกิด push tag job ไหนควรรัน/ไม่ควรรัน)
 
+**แนวทางตรวจคำตอบด้วยตัวเอง (สำหรับทุกข้อ):** ก่อนเชื่อว่า workflow ที่เขียนถูกต้อง ให้ตรวจ syntax ด้วย YAML
+parser เสมอตามที่อธิบายไว้ในกับดักที่ 5 (เช่น `python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))"
+.github/workflows/<ไฟล์ของคุณ>.yml`) แล้วไล่อ่านทวนทุกคำสั่ง `run:` ด้วยการรันจริงบนเครื่องตัวเองก่อน (เช่น
+`cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`) เพื่อยืนยันว่าคำสั่งเหล่านั้นทำงาน
+ถูกต้องในสภาพแวดล้อมจริงก่อนที่จะเชื่อว่า workflow ทั้งไฟล์จะทำงานถูกต้องบน GitHub Actions — หลักการเดียวกับที่
+บทนี้ใช้ตรวจสอบเนื้อหาของตัวเองตามที่อธิบายไว้ในหมายเหตุต้นบท
+
 ## สรุป
 
 บทนี้พาเราสร้าง CI/CD pipeline สำหรับโปรเจกต์ Rust ตั้งแต่ workflow ที่เรียบง่ายที่สุด (แค่ `cargo build` ตอน
@@ -1750,6 +1785,12 @@ Docker layer caching ที่ Part 96 สอนไว้ เพียงแค�
 merge เข้า `main` สำเร็จแล้ว (ไม่ใช่จาก PR ที่ยังไม่ merge), และ `release-*` ควรรันเฉพาะตอน push tag เวอร์ชันใหม่
 เท่านั้น — การควบคุมด้วย `if:`, `needs:`, และการแยก trigger (`branches:` vs `tags:`) ให้ตรงกับบทบาทของแต่ละ job
 คือหัวใจของการออกแบบ CD ที่ปลอดภัยและคาดเดาผลลัพธ์ได้
+
+สุดท้าย อย่าลืมว่า workflow ที่เขียนไว้สวยงามแค่ไหนก็ไม่มีความหมายถ้าไม่ถูกตั้งเป็น **required status check** ใน
+Branch Protection Rules ของ repository (หัวข้อ 97.15) — ไฟล์ YAML กำหนด "check ทำงานอย่างไร" แต่การตัดสินใจว่า
+"check ไหนต้องผ่านก่อน merge ได้" เป็นการตั้งค่าคนละชั้นที่ต้องทำคู่กันเสมอ ทีมที่เขียน CI pipeline ครบถ้วนตาม
+บทนี้แล้วแต่ลืมขั้นตอนนี้ จะยังคงเห็นโค้ดที่ไม่ผ่าน CI ถูก merge เข้า `main` ได้อยู่ดี ซึ่งขัดกับเจตนารมณ์ทั้งหมด
+ที่อธิบายไว้ตั้งแต่หัวข้อ 97.1
 
 Part ถัดไป (**Part 98: Observability: Metrics ด้วย Prometheus**) จะพาเราไปดูว่าเมื่อ `library_api` ถูก deploy
 ขึ้น production จริงแล้ว (ผ่าน pipeline ที่เราสร้างในบทนี้) เราจะรู้ได้อย่างไรว่าระบบทำงานถูกต้องและมี performance

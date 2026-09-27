@@ -630,6 +630,22 @@ pub async fn track_http_metrics(req: Request<axum::body::Body>, next: Next) -> R
 }
 ```
 
+**ข้อสังเกตที่ต้องเข้าใจให้แม่นเกี่ยวกับ `next.run(req).await`**: บรรทัดนี้คือจุดที่ควบคุมการไหลของทั้ง
+request/response — ทุกอย่างที่เขียนไว้**ก่อน**บรรทัดนี้ (`start`, `path`, `method`) รันตอน request ไหล**เข้า**
+และทุกอย่างที่เขียนไว้**หลัง**บรรทัดนี้ (`status`, `elapsed`, การเรียก `counter!`/`histogram!`) รันตอน response
+ไหล**กลับออกมา** — ตรงกับโมเดล "onion" ที่ Part 65 หัวข้อ 65.3 อธิบายไว้ (request ไหลเข้าทีละชั้น, response
+ไหลกลับออกทีละชั้นย้อนกลับ) เพียงแต่คราวนี้ชั้นเดียวที่เราเขียนทำทั้งสองฝั่งในฟังก์ชันเดียวกัน — สิ่งที่ต้อง
+ระวัง: **ถ้า handler ข้างในเกิด panic** (ไม่ใช่ `Result::Err` ที่ Part 66 สอนให้แปลงเป็น response ปกติ แต่คือ
+panic จริง ๆ เช่น `unwrap()` บน `None`) `next.run(req).await` จะ**ไม่ return กลับมาให้ตรงนี้เลย** — panic จะ
+พุ่งทะลุออกไปจนกว่า Tokio task ที่ดูแล connection นั้นจะจับได้ (Axum มี catch-panic behavior มาตรฐานอยู่แล้วที่
+คืน `500 Internal Server Error` ให้ client แต่ทำนอก middleware chain นี้) — ผลคือ **request ที่ panic จะไม่ถูก
+นับเข้า `http_requests_total`/`http_request_duration_seconds` เลย** เพราะบรรทัด `metrics::counter!(...)` อยู่
+หลัง `next.run(req).await` ที่ไม่มีทาง reach ถึงได้ ถ้าต้องการนับ panic ด้วย (ซึ่งมักอยากรู้จริง ๆ ในทางปฏิบัติ
+เพราะ panic คือสัญญาณของ bug ที่ร้ายแรงกว่า error ปกติ) ต้องจับด้วยกลไกอื่นเพิ่ม เช่น
+`std::panic::catch_unwind` ล้อมรอบ `next.run(req).await` หรือ (แนวทางที่ง่ายกว่าและนิยมกว่าในทางปฏิบัติ) เพิ่ม
+custom panic hook ที่ระดับโปรแกรมทั้งตัวที่เพิ่ม counter เฉพาะสำหรับ panic โดยเฉพาะ ไม่ผสมกับ metric ของ HTTP
+request ปกติ
+
 ประกอบเข้ากับ router (โดเมนห้องสมุดง่าย ๆ ที่จะขยายเป็น business metric ในหัวข้อถัดไป):
 
 ```rust
@@ -785,6 +801,23 @@ library_books_available 4
 สังเกตว่า **Counter ไม่ลดแม้จะมีการคืนหนังสือเกิดขึ้น** (`library_books_borrowed_total` ไม่ลดกลับเป็น 2 ตอน
 คืน) เพราะ "จำนวนครั้งที่เคยยืมสำเร็จสะสม" เป็นข้อเท็จจริงในอดีตที่ไม่เปลี่ยนแปลง ตรงตามคำนิยามของ Counter ใน
 หัวข้อ 98.2
+
+**ความปลอดภัยของการอัปเดต metric พร้อมกันจากหลาย request (เชื่อมกับ Part 49-50 เรื่อง `Mutex`)**: สังเกตว่า
+โค้ดในหัวข้อนี้เรียก `metrics::gauge!(...).set(total_available(&catalog))` ขณะที่ยังถือ
+`catalog.lock().unwrap()` ไว้อยู่ (ตัวแปร `catalog` ยังไม่ถูก drop จนกว่าจะออกจาก scope ของฟังก์ชัน) —
+คำถามที่ควรผ่านหัวคือ "แล้วถ้ามีสอง request เข้ามา borrow พร้อมกันจริง ๆ (สอง OS thread แข่งกันจริง ตามที่
+Part 49 อธิบายไว้เรื่อง Tokio ใช้ multi-thread runtime เป็นค่าเริ่มต้น) metric จะถูกต้องไหม" — คำตอบคือ
+**ถูกต้อง 100%** เพราะ `Mutex` (Part 50) การันตีว่ามีแค่ thread เดียวเข้าไปทำงานในช่วงที่ถือ lock ได้ ณ ขณะหนึ่ง
+— การเรียก `total_available(&catalog)` กับการเรียก `metrics::gauge!(...).set(...)` จึงเกิดขึ้น**ในช่วงเวลาที่
+ปลอดภัยจาก race condition เดียวกัน**กับการอัปเดต `book.available_copies` เอง (ทั้งสามบรรทัดอยู่ภายใต้ lock
+เดียวกัน) — ตรงข้ามกับการเขียนที่ผิดที่อาจเผลอปล่อย lock ไปก่อนแล้วค่อยคำนวณ gauge ทีหลัง (เช่น ย้าย
+`metrics::gauge!(...)` ไปไว้หลังบรรทัด `drop(catalog)` หรือหลัง `}` ที่ปิด scope ของ lock) ซึ่งจะเปิดช่องให้
+request อื่นมาแก้ `catalog` ระหว่างที่คำนวณค่า gauge อยู่ ทำให้ค่าที่ set ไปอาจไม่ตรงกับสถานะจริง ณ ขณะที่ set
+เสร็จ (แม้จะ "ผิดแค่ชั่วครู่" ก็ตาม) — หลักการทั่วไปที่ควรจำ: **metric ที่สะท้อนสถานะของข้อมูลที่มี concurrent
+access ต้องอัปเดตภายใต้ lock/transaction เดียวกันกับข้อมูลนั้นเสมอ** ไม่ใช่คำนวณแยกทีหลังนอก critical section
+— สำหรับ handler จริงของ Part 92 ที่ใช้ SQLx หลักการเดียวกันนี้แปลว่า metric ต้อง increment/set **หลัง
+`tx.commit().await?` สำเร็จ** เท่านั้น (ตามที่ย้ำไว้แล้วในโค้ดตัวอย่างข้างบน) เพราะ `tx.commit()` คือจุดที่
+transaction ของ Postgres รับประกันความถูกต้องของข้อมูลแบบเดียวกับที่ `Mutex` รับประกันในตัวอย่าง in-memory นี้
 
 ### 98.7 Labels/Dimensions และกับดัก High-Cardinality
 
@@ -1747,7 +1780,18 @@ request ด้วย `.route_layer()` (พิสูจน์ความแต�
 เข้า handler ยืม/คืนหนังสือของ Part 92 ตรง ๆ และที่สำคัญที่สุด — เข้าใจกับดัก **high-cardinality label** อย่าง
 ลึกซึ้งพร้อมพิสูจน์ตัวเลขจริง (40 series จากการ label ผิด เทียบกับ 1 series จากการใช้ route template) ปิดท้าย
 ด้วยการรัน Prometheus server จริงผ่าน Docker (ต่อยอด Part 96) scrape แอปจริง และเขียน PromQL (`rate()`,
-`histogram_quantile()`) ยิง query จริงได้ผลลัพธ์จริงกลับมา
+`histogram_quantile()`) ยิง query จริงได้ผลลัพธ์จริงกลับมา สุดท้ายได้เขียน integration test ยืนยันพฤติกรรมของ
+metrics middleware เองด้วย `tower::ServiceExt::oneshot()` (ต่อยอด Part 95) เพื่อให้แน่ใจว่า observability
+infrastructure ไม่พังเงียบ ๆ ตอนมีคนแก้โค้ดในอนาคต
+
+**checklist สั้น ๆ ที่ควรถามตัวเองก่อนเพิ่ม metric ใหม่ในงานจริง** (สรุปจากทุกหัวข้อของบทนี้): (1) นี่ควรเป็น
+Counter, Gauge, หรือ Histogram? (หัวข้อ 98.2) (2) ชื่อ metric ตรงตามธรรมเนียม `snake_case` + หน่วย base unit
++ `_total` สำหรับ Counter ไหม? (หัวข้อ 98.4) (3) ติดตั้ง recorder แล้วหรือยัง — ทดสอบด้วยการยิง `curl
+/metrics` จริงเสมอหลัง deploy? (หัวข้อ 98.4, กับดักข้อ 1) (4) label ทุกตัวมีค่าที่เป็นไปได้จำกัดและรู้ล่วงหน้า
+ไหม หรือกำลังใช้ raw path/id/username ที่ไม่มีเพดานอยู่? (หัวข้อ 98.7, กับดักข้อ 3) (5) ถ้าเป็น latency
+histogram — ตั้ง bucket ให้เหมาะกับช่วงเวลาจริงของระบบแล้วหรือยัง ไม่ใช่ปล่อยให้กลายเป็น Summary โดยไม่ตั้งใจ?
+(หัวข้อ 98.9, กับดักข้อ 4) — ห้าคำถามนี้ครอบคลุมกับดักที่พบบ่อยที่สุดในทางปฏิบัติเกือบทั้งหมดของการทำ metrics
+ด้วย Prometheus
 
 Part ถัดไป (Part 99) จะพาไปดูเสาที่สามที่เหลือ — **distributed tracing ด้วย OpenTelemetry** — ที่ตอบคำถาม
 "request หนึ่งตัวเดินทางผ่านระบบยังไง" ซึ่งเป็นคำถามที่ metrics ในบทนี้ตอบไม่ได้เลย (metrics บอกได้แค่ "p95

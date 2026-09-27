@@ -1584,6 +1584,33 @@ pub fn BookingIsland(
 
 ข้อสรุปที่ให้ได้ ณ จุดนี้ (ยังไม่ใช่ข้อสรุปสุดท้าย เพราะยังไม่ได้เห็น Dioxus): ถ้าโปรเจกต์ของคุณต้องการ **full-stack story ที่แน่นและ SSR/server function เป็นหัวใจของแอป** (เช่นแอปที่ต้อง query ฐานข้อมูลจากหลายหน้าตลอดเวลา และอยากลดงาน "เขียน API แยกจาก UI") Leptos ให้ประโยชน์ที่จับต้องได้จริงตามที่พิสูจน์ในหัวข้อ 89.6-89.8 แต่ต้องแลกกับ mental model ที่ต่างจาก React/Yew มากกว่า และ API ที่ยังเปลี่ยนได้เร็วกว่า ถ้าโปรเจกต์เป็น SPA ล้วน ๆ ที่ไม่ต้องพึ่ง SSR/server function เลย ความต่างระหว่างสองตัวจะแคบลงมาก และ Yew ที่เสถียรกว่าอาจเป็นตัวเลือกที่ปลอดภัยกว่าในเชิงความเสี่ยงระยะยาว — Part 90 จะนำ Dioxus เข้ามาเป็นตัวเลือกที่สาม (framework ที่พยายามผสมข้อดีของทั้งสองแนวทาง พร้อมเรื่อง cross-platform ที่ Yew/Leptos ไม่ได้โฟกัส) ก่อนที่บทเปรียบเทียบสุดท้ายจะสรุปทั้งสามตัวเข้าด้วยกัน
 
+#### สรุป API ที่เจอในบทนี้ (Quick Reference)
+
+ก่อนไปหัวข้อกับดักและแบบฝึกหัด สรุป API หลักที่บทนี้ใช้ไว้ในตารางเดียว เพื่อกลับมาเปิดดูได้เร็วตอนเขียนโค้ดจริง:
+
+| API | มาจากไหน | ใช้ทำอะไร | หัวข้อ |
+|---|---|---|---|
+| `signal(v)` | `leptos::prelude` | สร้าง `(ReadSignal, WriteSignal)` คู่หนึ่ง | 89.3 |
+| `.get()` / `.set()` / `.update()` | trait ของ `ReadSignal`/`WriteSignal` | อ่าน / เขียนทั้งค่า / แก้ไข in-place | 89.3 |
+| `RwSignal::new(v)` | `leptos::prelude` | signal ที่รวม read+write ไว้ handle เดียว | 89.3 |
+| `.get_untracked()` | trait `GetUntracked` | อ่านค่าโดยไม่ subscribe | 89.3 |
+| `batch(\|\| { ... })` | `leptos::prelude` | รวมหลาย signal update ให้ trigger effect ครั้งเดียว | 89.3 |
+| `Memo::new(f)` | `leptos::prelude` | ค่าที่ cache ไว้ recompute เฉพาะตอน dependency เปลี่ยน | 89.4 |
+| `Effect::new(f)` | `leptos::prelude` | รัน side effect ตอน dependency เปลี่ยน (ไม่คืนค่าที่มีความหมาย) | 89.4 |
+| `#[component]` | `leptos_macro` (re-export) | ประกาศฟังก์ชันเป็น Leptos component | 89.5 |
+| `#[prop(optional/default/into)]` | `leptos_macro` | ปรับพฤติกรรมของ prop แต่ละตัว | 89.5 |
+| `provide_context` / `use_context` | `leptos::prelude` | แชร์ค่าข้าม component tree โดยไม่ต้องผ่าน props | 89.5, 89.6, 89.8 |
+| `#[server(...)]` | `leptos::prelude`/`leptos_macro` | ประกาศ server function — compile ต่างกันตาม feature | 89.6 |
+| `ServerFnError` | `leptos::prelude` | error type กลางสำหรับ server function | 89.6 |
+| `Action::new(f)` | `leptos::prelude` | trigger async call (มักเป็น server function) จาก event | 89.6, 89.8 |
+| `Resource::new` / `LocalResource::new` | `leptos::prelude` | fetch ข้อมูลตอน component mount | 89.6 |
+| `<Suspense fallback=...>` | `leptos::prelude` | แสดง fallback ระหว่าง resource ข้างในยังโหลดไม่เสร็จ | 89.6 |
+| `mount_to_body` | `leptos::mount` | mount แอปแบบ CSR (สร้าง DOM ใหม่ทั้งหมด) | 89.2 |
+| `hydrate_body` | `leptos::mount` | mount แอปแบบ hydrate (จับคู่กับ DOM เดิมจาก SSR) | 89.7 |
+| `generate_route_list` / `LeptosRoutes` | `leptos_axum` | สแกน route จาก view tree แล้วผูกเข้า Axum `Router` | 89.8 |
+| `<AutoReload>` / `<HydrationScripts>` | `leptos::hydration` | ฝัง script hot-reload/hydration ลงใน HTML shell | 89.7, 89.8 |
+| `Router` / `Routes` / `Route` / `path!` | `leptos_router` | client-side routing หลายหน้าใน SPA | 89.8 |
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. เขียน `{count.get() * 2}` ตรง ๆ ใน `view!` โดยไม่ห่อด้วย closure — ค่าไม่อัปเดตเลย**
@@ -1603,12 +1630,11 @@ view! { <p>{move || count.get() * 2}</p> }
 **2. ใช้ `create_signal`/`create_memo` แล้วเจอ warning จำนวนมากตอน build**
 
 ```
-warning: use of deprecated function `leptos::reactive::signal::create_signal`:
-This function is being renamed to `signal()` to conform to Rust idioms.
-  --> src/main.rs:5:27
-   |
- 5 |     let (count, set_count) = create_signal(0);
-   |                              ^^^^^^^^^^^^^
+warning: use of deprecated function `leptos::prelude::create_signal`: This function is being renamed to `signal()` to conform to Rust idioms.
+ --> src/lib.rs:4:31
+  |
+4 |     let (count, _set_count) = create_signal(0);
+  |                               ^^^^^^^^^^^^^
 ```
 
 โค้ดยัง compile และรันได้ปกติ (deprecation ไม่ใช่ error) แต่ตัวอย่าง/บทความเก่าจำนวนมากบนอินเทอร์เน็ตยังใช้ `create_signal`/`create_memo`/`create_rw_signal` อยู่ ทำให้สับสนว่า "อันไหนคือของปัจจุบัน" วิธีแก้คือเช็คซอร์สโค้ดจริงของ crate ที่ resolve ในเครื่องตัวเอง (`~/.cargo/registry/src/.../reactive_graph-*/src/signal.rs`) เสมอเมื่อไม่แน่ใจ แทนที่จะเชื่อบทความเก่า — และใช้ `signal()`, `Memo::new()`, `RwSignal::new()` เป็น API หลักตามที่บทนี้สอน

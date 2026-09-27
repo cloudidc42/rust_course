@@ -120,11 +120,11 @@
 
 | # | ชื่อบท | สถานะ |
 |---|---|---|
-| 86 | WebAssembly เบื้องต้นด้วย Rust | ⏳ |
-| 87 | wasm-bindgen และ JavaScript Interop | ⏳ |
-| 88 | Yew Framework: Frontend ด้วย Rust | ⏳ |
-| 89 | Leptos Framework: Full-stack Rust | ⏳ |
-| 90 | Dioxus Framework เบื้องต้น | ⏳ |
+| 86 | WebAssembly เบื้องต้นด้วย Rust | ✅ |
+| 87 | wasm-bindgen และ JavaScript Interop | ✅ |
+| 88 | Yew Framework: Frontend ด้วย Rust | ✅ |
+| 89 | Leptos Framework: Full-stack Rust | ✅ |
+| 90 | Dioxus Framework เบื้องต้น | ✅ |
 | 91 | Server-Side Rendering (SSR) ด้วย Rust | ⏳ |
 | 92 | Full-Stack Project (1/3): ออกแบบและสร้าง Backend | ⏳ |
 | 93 | Full-Stack Project (2/3): สร้าง Frontend | ⏳ |

@@ -822,6 +822,44 @@ ServerError|ที่นั่งเต็มแล้ว
 
 ผลลัพธ์นี้ยืนยันสองเรื่อง: (1) `return Err(ServerFnError::new("ที่นั่งเต็มแล้ว"))` แปลงเป็น HTTP 500 พร้อม body ที่มี prefix `ServerError|` ตามด้วยข้อความ error ของเรา — นี่คือ format ที่ `leptos_axum` ใช้ตอน serialize `ServerFnError` กลับไปให้ client (ฝั่ง client ที่เรียกผ่าน `.await` จริง จะได้ `Err(ServerFnError::ServerError("ที่นั่งเต็มแล้ว".to_string()))` กลับมาโดยตรง ไม่ต้อง parse string เอง เพราะโค้ด client-side ที่ macro generate ให้จัดการ deserialize ให้แล้ว) และ (2) transaction ทำงานถูกต้อง — ไม่มีการ `UPDATE` เกิดขึ้นเมื่อเงื่อนไข `booked_seats >= total_seats` เป็นจริง เพราะ `return Err(...)` เกิดขึ้น**ก่อน**เรียก `UPDATE` และ transaction ที่ไม่เคย `commit()` จะ rollback อัตโนมัติตอน `tx` ถูก drop (หลักการเดียวกับที่ Part 70 อธิบายเรื่อง RAII ของ `Transaction`)
 
+#### ดึงข้อมูลตอน component โหลด: `Resource`/`LocalResource` + `<Suspense>`
+
+`Action` (ที่จะเห็นในหัวข้อถัดไป) เหมาะกับการ "trigger" การเรียก server function จาก event เช่นคลิกปุ่ม — แต่สำหรับ query ที่ต้องโหลดทันทีที่ component ปรากฏ (เช่นโหลดรายการหนังสือทั้งหมดตอนเปิดหน้า) รูปแบบมาตรฐานคือ **`Resource`** จับคู่กับ **`<Suspense>`** `Resource::new(source, fetcher)` รับสอง closure: `source` (signal ที่ถ้าเปลี่ยนค่าจะ trigger การ fetch ใหม่ — ใส่ `|| ()` ถ้าต้องการ fetch แค่ครั้งเดียวตอน mount) และ `fetcher` (closure async ที่ทำการดึงข้อมูลจริง มักเป็นการเรียก server function ตรง ๆ)
+
+ทดสอบด้วยตัวอย่างจริง (ใช้ `LocalResource::new` แทน `Resource::new` เพราะ future ที่ทดสอบไม่ satisfy `Send` bound — รายละเอียดเรื่องนี้อยู่ในกับดักท้ายบท ในแอปจริงที่ future มาจาก server function ผ่าน HTTP client ที่เป็น `Send` ได้ตามปกติ มักใช้ `Resource::new` ตรง ๆ ได้เลยไม่ต้องพึ่ง `LocalResource`):
+
+```rust
+use leptos::prelude::*;
+
+#[component]
+fn BookCountDisplay() -> impl IntoView {
+    // ในแอปจริง fetcher นี้จะเป็น get_book_count() (server function) ตรง ๆ
+    let book_count = LocalResource::new(fetch_book_count);
+
+    view! {
+        // <Suspense> คือ "ตัวจับ" resource ที่ยังโหลดไม่เสร็จทุกตัวที่อยู่ข้างใน —
+        // ระหว่างที่ยังไม่เสร็จ (ไม่ว่าจะมี resource กี่ตัวก็ตาม) มันแสดง fallback แทน
+        <Suspense fallback=move || view! { <p id="loading">"กำลังโหลด..."</p> }>
+            <p id="result">"จำนวนหนังสือ: " {move || book_count.get()}</p>
+        </Suspense>
+    }
+}
+```
+
+build และรันจริงในเบราว์เซอร์ (จำลอง network delay 300ms ด้วย `gloo_timers::future::TimeoutFuture` แทนการต่อ server function จริง เพื่อให้เห็นสถานะ "กำลังโหลด" ได้ชัดในการทดสอบ) — ดักจับ DOM ทั้งช่วงก่อนและหลัง resource resolve เสร็จ ผลลัพธ์จริงที่ได้:
+
+```
+immediately after load:
+<p id="loading">กำลังโหลด...</p>
+
+after 600ms:
+<p id="result">จำนวนหนังสือ: 42</p>
+```
+
+พิสูจน์ตรงตามที่ตั้งใจ: ทันทีที่ component mount (ก่อนที่ `fetch_book_count()` จะ resolve) `<Suspense>` แสดง `fallback` (ข้อความ "กำลังโหลด...") ให้เห็นทันที แทนที่จะปล่อยให้หน้าจอค้างเปล่า ๆ จนกว่าข้อมูลมาถึง — พอ resource resolve เสร็จ (หลัง 300ms ในตัวอย่างนี้) `<Suspense>` สลับไปแสดง children จริงเองโดยอัตโนมัติ (ค่า `42` ที่ `book_count.get()` คืนมา) โดยที่คุณไม่ต้องเขียน `if`/`match` เช็คสถานะ loading เองเลยแม้แต่จุดเดียว — `<Suspense>` จัดการ "มี resource ตัวไหนในลูกของมันที่ยังไม่เสร็จหรือไม่" ให้อัตโนมัติ (แม้จะมีหลาย `Resource` ซ้อนกันหลายตัวอยู่ข้างในก็ตาม มันจะรอให้ครบทุกตัวก่อนเลิกแสดง fallback)
+
+รูปแบบนี้คือคำตอบให้กับ hint ของแบบฝึกหัดข้อ 4 ท้ายบท (`Resource::new(|| (), |_| get_all_books())`) — ในแอปจริงที่ต่อกับ server function จริง (ซึ่ง future ของมันเป็น `Send` ได้ตามปกติเพราะไม่ได้พึ่ง JS API ที่ผูกกับ thread เดียวแบบ `gloo_timers`) จะใช้ `Resource::new` ตรง ๆ แทน `LocalResource::new` ได้เลย
+
 #### เรียกจาก component จริง
 
 ในโค้ด component ฝั่ง client คุณเรียก server function เหมือนฟังก์ชัน async ธรรมดา ไม่ต้องเขียนโค้ด fetch เอง — ตัวอย่างการผูกกับปุ่มจองตั๋ว โดยใช้ `Action` (ตัวช่วยของ Leptos สำหรับผูก async operation ที่ trigger จาก event เข้ากับ reactive state):
@@ -1306,6 +1344,22 @@ note: there are multiple different versions of crate `leptos_config` in the depe
 ```
 
 สาเหตุคือ `leptos = "0.7"` ดึง `leptos_config` เวอร์ชัน `0.7.8` เข้ามา ในขณะที่ `leptos_axum = "0.8.10"` ต้องการ `leptos_config` เวอร์ชัน `0.8.x` — Cargo ยอมให้ทั้งสองเวอร์ชันอยู่ใน dependency graph เดียวกันได้ (เพราะเป็น crate คนละ semver major) แต่ `LeptosOptions` ของทั้งสองเวอร์ชันเป็น**type คนละตัวกัน**ในมุมมองของ type system แม้จะหน้าตาเหมือนกันทุกอย่างก็ตาม — วิธีแก้คือตรวจสอบให้ `leptos`, `leptos_axum`, `leptos_router`, `leptos_meta` ทุกตัวในโปรเจกต์เดียวกันใช้เวอร์ชัน**สายเดียวกันเสมอ** (เช่นทั้งหมด `"0.8"`) วิธีที่ปลอดภัยที่สุดคือปล่อยให้ `cargo add` เลือกเวอร์ชันล่าสุดให้ทุกตัวพร้อมกันในครั้งเดียว แทนการ pin เวอร์ชันแต่ละตัวด้วยมือแยกกัน
+
+**6. `Resource::new(...)` ไม่ compile เพราะ future ไม่ใช่ `Send` — โดยเฉพาะตอนทดสอบด้วย library ที่ผูกกับ JS**
+
+```
+error: future cannot be sent between threads safely
+   |
+12 |     let book_count = Resource::new(|| (), |_| fetch_book_count());
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ future returned by `fetch_book_count` is not `Send`
+   |
+note: future is not `Send` as it awaits another future which is not `Send`
+   |
+ 6 |     gloo_timers::future::TimeoutFuture::new(300).await;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ await occurs here on type `TimeoutFuture`, which is not `Send`
+```
+
+(error นี้คือของจริงที่เจอตอนทดสอบตัวอย่าง `Resource`/`Suspense` ในหัวข้อ 89.6 ก่อนแก้ไข) `Resource::new` กำหนด bound ว่า future ที่ fetcher คืนมาต้อง `Send` (เพราะออกแบบมาให้ทำงานได้ทั้งฝั่ง server ที่เป็น multi-thread runtime อย่าง Tokio ด้วย) แต่หลาย JS API ที่ผูกผ่าน `wasm-bindgen` (เช่น `gloo_timers::future::TimeoutFuture` ที่ผูกกับ browser's `setTimeout`) ไม่ใช่ `Send` เพราะ WASM ในเบราว์เซอร์เป็น single-threaded และ JS value ที่ห่อมาไม่มีการันตีเรื่อง thread safety แบบ Rust ต้องการ — วิธีแก้คือใช้ **`LocalResource::new(...)`** แทน (bound เดียวกันแต่ไม่ต้องการ `Send`) เหมาะสำหรับ resource ที่ fetcher เรียก JS API ตรง ๆ ฝั่ง client ส่วน resource ที่ fetcher เป็นการเรียก server function ผ่าน HTTP (ซึ่งเป็น `Send` ได้ตามปกติ) ยังใช้ `Resource::new` ตรง ๆ ได้ไม่มีปัญหา
 
 ## แบบฝึกหัด (Exercises)
 

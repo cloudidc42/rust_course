@@ -211,7 +211,20 @@ async fn create_pool(database_url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
 
 `.connect(database_url).await` ทำสองอย่างพร้อมกัน: (1) เปิด connection จริงจำนวน `min_connections` ตัวทันที (เพื่อให้ request แรก ๆ ไม่ต้องรอเปิด connection ใหม่) และ (2) คืนค่า `PgPool` — struct ที่**ไม่ใช่ connection ตัวเดียว** แต่เป็น**ตัวจัดการ pool ของ connection หลายตัว** ทุกครั้งที่คุณเรียก `.fetch_one()`/`.execute()` ผ่าน `&pool` ตรง ๆ (ไม่ผ่าน transaction) SQLx จะ**หยิบ connection ที่ว่างตัวหนึ่งจาก pool มาใช้ชั่วคราว แล้วคืนกลับเข้า pool ทันทีที่ query เสร็จ** — connection ตัวเดิมถูกใช้ซ้ำได้เรื่อย ๆ ข้าม request ที่ต่างกัน ไม่ต้องเปิด/ปิดใหม่
 
-**เชื่อมกับ Part 48 เรื่อง Tokio task concurrency**: Axum handler แต่ละตัวรันเป็น async task แยกกัน (อาจ concurrent กันหลายพันตัวพร้อมกันถ้า traffic สูง) — `max_connections` คือ**ขีดจำกัดจริง**ว่ากี่ task จะสามารถ "คุยกับฐานข้อมูลพร้อมกันได้จริง" ในเวลาเดียวกัน task ที่เกินจำนวนนี้จะ**รอ**อยู่ในคิว (หัวข้อ 70.9 จะพิสูจน์พฤติกรรมนี้ด้วยโค้ดจริง) — เลข `max_connections` ที่เหมาะสมขึ้นกับหลายปัจจัย (จำนวน CPU core ของเครื่อง database, `max_connections` ของ PostgreSQL เอง, จำนวน instance ของแอปที่รันพร้อมกัน) ไม่มีตัวเลขตายตัวที่ใช้ได้ทุกสถานการณ์ แต่หลักการทั่วไปคือ**ไม่ควรตั้งสูงเกินจำเป็น** เพราะ connection ที่เปิดทิ้งไว้เฉย ๆ (idle) ก็ยังกินหน่วยความจำฝั่ง PostgreSQL อยู่ดี
+**เชื่อมกับ Part 48 เรื่อง Tokio task concurrency**: Axum handler แต่ละตัวรันเป็น async task แยกกัน (อาจ concurrent กันหลายพันตัวพร้อมกันถ้า traffic สูง) — `max_connections` คือ**ขีดจำกัดจริง**ว่ากี่ task จะสามารถ "คุยกับฐานข้อมูลพร้อมกันได้จริง" ในเวลาเดียวกัน task ที่เกินจำนวนนี้จะ**รอ**อยู่ในคิว (หัวข้อ 70.11 จะพิสูจน์พฤติกรรมนี้ด้วยโค้ดจริง) — เลข `max_connections` ที่เหมาะสมขึ้นกับหลายปัจจัย (จำนวน CPU core ของเครื่อง database, `max_connections` ของ PostgreSQL เอง, จำนวน instance ของแอปที่รันพร้อมกัน) ไม่มีตัวเลขตายตัวที่ใช้ได้ทุกสถานการณ์ แต่หลักการทั่วไปคือ**ไม่ควรตั้งสูงเกินจำเป็น** เพราะ connection ที่เปิดทิ้งไว้เฉย ๆ (idle) ก็ยังกินหน่วยความจำฝั่ง PostgreSQL อยู่ดี
+
+#### ตารางอ้างอิง: option สำคัญของ `PgPoolOptions`
+
+`PgPoolOptions` มี builder method อีกหลายตัวนอกจากสี่ตัวที่ใช้ในตัวอย่างข้างบน — ตารางนี้สรุป option ที่ควรรู้จักสำหรับใช้งานจริง (ค่า default อ้างอิงจากเวอร์ชัน `sqlx` ที่ใช้ในบทนี้ — ควรอ่าน docs ของเวอร์ชันที่ใช้จริงอีกครั้งเสมอเพราะค่า default อาจเปลี่ยนได้ระหว่างเวอร์ชัน):
+
+| Method | ความหมาย | ข้อสังเกตเชิงปฏิบัติ |
+|---|---|---|
+| `.max_connections(n)` | จำนวน connection สูงสุดที่ pool เปิดพร้อมกันได้ | ค่านี้สำคัญที่สุด — ผูกตรงกับ throughput สูงสุดของระบบด้าน database |
+| `.min_connections(n)` | จำนวน connection ขั้นต่ำที่พยายามคงไว้เสมอ (แม้ไม่มี traffic) | ค่า default คือ 0 (ไม่เปิดล่วงหน้าเลย เปิดตามความต้องการจริง) — ตั้งเป็นค่าน้อย ๆ (1-2) ช่วยลด latency ของ request แรก ๆ หลัง idle นาน ๆ |
+| `.acquire_timeout(d)` | รอ connection ว่างนานสุดกี่วินาทีก่อนคืน `PoolTimedOut` | ควรตั้งให้สั้นกว่า timeout ของ client ที่เรียกเข้ามา (ไม่มีประโยชน์ที่จะรอนานกว่าที่ client จะรอไหว) |
+| `.idle_timeout(d)` | ปิด connection ที่ไม่ได้ใช้นานเกินนี้ทิ้ง (ลดจำนวน connection ที่เปิดทิ้งไว้เฉย ๆ ตอน traffic ต่ำ) | ค่า default ประมาณ 10 นาที — เหมาะสำหรับแอปที่ traffic ขึ้นลงเป็นช่วง ๆ |
+| `.max_lifetime(d)` | ปิด (แล้วเปิดใหม่) connection ที่มีอายุนานเกินนี้ ไม่ว่าจะ idle หรือไม่ | ป้องกันปัญหา connection ที่เปิดค้างนานเกินจนอาจมีปัญหาสะสม (เช่น memory leak ฝั่ง driver บางตัว หรือ load balancer ฝั่งเครือข่ายตัดการเชื่อมต่อที่ค้างนานเกินไปเงียบ ๆ) |
+| `.test_before_acquire(bool)` | ตรวจสอบว่า connection ที่จะให้ยืมยัง "มีชีวิต" อยู่จริงก่อนส่งให้ใช้ (ส่ง ping สั้น ๆ) | ค่า default คือ `true` — ปลอดภัยกว่าเล็กน้อยแต่มี overhead เพิ่มขึ้นนิดหน่อยต่อการ acquire แต่ละครั้ง ปิดได้ถ้ามั่นใจว่า network ระหว่างแอปกับฐานข้อมูลนิ่งมาก |
 
 ### 70.4 `sqlx::query!` vs `sqlx::query`/`sqlx::query_as`: สองระดับของการตรวจสอบ
 
@@ -600,6 +613,273 @@ safe query (bind) ได้ 0 แถว (ถูกต้อง - ไม่มี
 
 **หลักการที่ต้องจำ**: **ห้ามเอา input จากผู้ใช้ไป `format!`/concatenate เข้า SQL string โดยตรงเด็ดขาด** ใช้ `$1, $2, ...` กับ `.bind()` (หรือส่งเป็น argument ให้ `query!`/`query_as!` ตรง ๆ ตามที่ทำมาตลอดบทนี้) เสมอ — ถ้าจำเป็นต้องสร้าง SQL แบบ dynamic จริง ๆ (เช่น จำนวนเงื่อนไข `WHERE` ไม่แน่นอน) ให้ใช้ `sqlx::QueryBuilder` (สร้าง SQL อย่างปลอดภัยแบบ dynamic โดยยัง bind parameter ถูกต้องอยู่ — จะกล่าวถึงใน Part 71) ไม่ใช่ต่อ string เอง
 
+#### ข้อมูลแบบยืดหยุ่นด้วย `JSONB` และ `serde_json::Value`
+
+บางครั้งข้อมูลที่ต้องเก็บไม่มี schema ตายตัวชัดเจน (เช่น metadata ของหนังสือที่อาจมี field ต่างกันไปตามประเภท — บางเล่มมี `series`, บางเล่มมี `edition`, บางเล่มไม่มีอะไรเพิ่มเลย) การเพิ่มคอลัมน์แยกทีละ field ทุกครั้งที่มี attribute ใหม่ไม่คุ้มค่า — PostgreSQL มี type **`JSONB`** (JSON แบบ binary ที่ index/query ได้เร็วกว่า `JSON` แบบ text ธรรมดา) ที่เหมาะกับสถานการณ์นี้พอดี และ SQLx (ผ่าน feature `json` ที่เปิดมาให้อัตโนมัติเมื่อเปิด `postgres` — สังเกตได้จากผลลัพธ์ `cargo add` ในหัวข้อ 70.2 ที่มี `+json` อยู่ในรายการ) แปลงระหว่าง `JSONB` กับ `serde_json::Value` ให้โดยตรง โดยไม่ต้อง parse/stringify มือเลย
+
+สมมติเพิ่ม migration ใหม่ (ตามแนวทางหัวข้อ 70.5):
+
+```sql
+-- migrations/<timestamp>_add_metadata_column.up.sql
+ALTER TABLE books ADD COLUMN metadata JSONB;
+```
+
+```rust
+use serde_json::json;
+
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
+struct BookWithMeta {
+    id: i64,
+    title: String,
+    metadata: Option<serde_json::Value>, // JSONB เป็น nullable -> Option<Value> ตามกฎหัวข้อ 70.8
+}
+
+async fn insert_with_metadata(pool: &sqlx::PgPool) -> Result<BookWithMeta, sqlx::Error> {
+    let meta = json!({ "tags": ["rust", "programming"], "rating": 4.5 });
+
+    sqlx::query_as!(
+        BookWithMeta,
+        r#"INSERT INTO books (isbn, title, author, total_copies, available_copies, metadata)
+           VALUES ($1, $2, $3, 1, 1, $4)
+           RETURNING id, title, metadata"#,
+        "978-jsonb-1",
+        "JSONB Demo Book",
+        "Tester",
+        meta
+    )
+    .fetch_one(pool)
+    .await
+}
+```
+
+ผู้เขียนรันจริงได้ผลลัพธ์:
+
+```
+BookWithMeta { id: 1, title: "JSONB Demo Book", metadata: Some(Object {"rating": Number(4.5), "tags": Array [String("rust"), String("programming")]}) }
+```
+
+ดึงกลับมาอ่านค่าเฉพาะ field ข้างในผ่าน API ปกติของ `serde_json::Value` (ตาม Part 57 หัวข้อเรื่อง `Value` แบบ dynamic) ได้ตรง ๆ:
+
+```rust
+if let Some(m) = &fetched.metadata {
+    println!("rating field = {:?}", m.get("rating")); // Some(Number(4.5))
+}
+```
+
+**ข้อควรพิจารณา**: `JSONB` สะดวกมากสำหรับข้อมูลที่ shape ไม่แน่นอนจริง ๆ แต่**ไม่ใช่ทางลัดแทนการออกแบบ schema ที่ดี** — field ที่รู้อยู่แล้วว่าทุกแถวต้องมี ควรเป็นคอลัมน์แยกตามปกติ (`title`, `author`, ...) เพราะได้ทั้ง type-check ที่ compile time (ตามที่บทนี้เน้นย้ำมาตลอด), `CHECK`/`UNIQUE`/`FOREIGN KEY` constraint ที่ระดับฐานข้อมูล, และ query/index ที่มีประสิทธิภาพกว่า `JSONB` ควรสงวนไว้สำหรับข้อมูลที่**จริง ๆ แล้วไม่มีโครงสร้างคงที่**เท่านั้น
+
+**ทางเลือกที่ type-safe กว่า `serde_json::Value`**: การใช้ `Option<serde_json::Value>` แบบข้างบนได้ flexibility เต็มที่ แต่เสีย type-safety ไปเลย (ต้องเรียก `.get("rating")` แล้วเดา type เอง — ไม่มีอะไรการันตีว่า field นั้นมีอยู่จริงหรือเป็น type ที่คาดไว้) ถ้ารู้ shape ของ JSON ที่จะเก็บล่วงหน้าอยู่แล้ว (แค่ไม่อยากแยกเป็นคอลัมน์ต่างหาก) SQLx มี wrapper type **`sqlx::types::Json<T>`** ที่ให้ผูก JSONB column กับ struct ที่ derive `Serialize`/`Deserialize` ธรรมดาได้ตรง ๆ (ได้ type-safety กลับมาเต็มรูปแบบ):
+
+```rust
+use sqlx::types::Json;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct BookExtra {
+    rating: f64,
+    tags: Vec<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct BookTypedMeta {
+    id: i64,
+    title: String,
+    metadata: Option<Json<BookExtra>>,
+}
+
+async fn insert_typed_metadata(pool: &sqlx::PgPool) -> Result<BookTypedMeta, sqlx::Error> {
+    let extra = BookExtra { rating: 4.8, tags: vec!["typed".into(), "json".into()] };
+
+    sqlx::query_as!(
+        BookTypedMeta,
+        r#"INSERT INTO books (isbn, title, author, total_copies, available_copies, metadata)
+           VALUES ($1, $2, $3, 1, 1, $4)
+           RETURNING id, title, metadata as "metadata: Json<BookExtra>""#,
+        "978-typedjson-1",
+        "Typed JSON Book",
+        "Tester",
+        Json(extra) as _
+    )
+    .fetch_one(pool)
+    .await
+}
+```
+
+ผู้เขียนรันจริงได้ผลลัพธ์:
+
+```
+BookTypedMeta { id: 8, title: "Typed JSON Book", metadata: Some(Json(BookExtra { rating: 4.8, tags: ["typed", "json"] })) }
+rating (typed, no .get() needed) = 4.8
+```
+
+**อธิบายจุดที่ไม่คุ้นตา**: `metadata as "metadata: Json<BookExtra>"` เป็น syntax พิเศษของ `query_as!`/`query!` สำหรับ**บอก type ที่ต้องการ override** ให้กับ column ที่ macro เดา type จาก schema ไม่ตรงกับที่ต้องการ (ในที่นี้ PostgreSQL รู้ว่า `metadata` เป็น `JSONB` เฉย ๆ แต่เราต้องการบอกว่า "แปลงเป็น `Json<BookExtra>` ที่ระดับ Rust ให้ด้วย" — ไม่ใช่ `serde_json::Value` เฉย ๆ) ส่วน `Json(extra) as _` ฝั่ง input ก็บอก compiler แบบเดียวกันว่าค่าที่ bind เข้าไปควรถูกมองเป็น type อะไร (`as _` ให้ compiler infer ชนิดที่ SQLx ต้องการเอง) — ผลลัพธ์คือได้ `BookExtra` กลับมาเป็น struct ที่ type-check เต็มรูปแบบ อ่าน `.rating` ได้ตรง ๆ ไม่ต้องเดา type จาก `serde_json::Value` แบบก่อนหน้า
+
+#### Pagination ด้วย `LIMIT`/`OFFSET`
+
+API ที่ list ข้อมูลในระบบจริงแทบไม่มีทางคืนข้อมูลทั้งหมดในครั้งเดียว (ตารางอาจมีหลักแสน/ล้านแถว) — ต้องแบ่งหน้า (pagination) SQL มาตรฐานสำหรับสิ่งนี้คือ `LIMIT`/`OFFSET`:
+
+```rust
+async fn list_books_paginated(
+    pool: &sqlx::PgPool,
+    page_size: i64,
+    page_number: i64, // เริ่มจาก 0
+) -> Result<Vec<Book>, sqlx::Error> {
+    let offset = page_size * page_number;
+    sqlx::query_as!(
+        Book,
+        r#"SELECT id, isbn, title, author, total_copies, available_copies, published_year, created_at
+           FROM books ORDER BY id LIMIT $1 OFFSET $2"#,
+        page_size,
+        offset
+    )
+    .fetch_all(pool)
+    .await
+}
+```
+
+ผู้เขียนทดสอบจริงด้วยข้อมูล 5 แถว ขอ `LIMIT 2` สองหน้าติดกัน:
+
+```
+page1: ["Page Book 0", "Page Book 1"]
+page2: ["Page Book 2", "Page Book 3"]
+```
+
+ผลลัพธ์ตรงตามที่คาด (หน้า 1 ได้แถวที่ 0-1, หน้า 2 ได้แถวที่ 2-3 — ไม่ทับซ้อนกัน) **ข้อสังเกตสำคัญเรื่อง `ORDER BY`**: `LIMIT`/`OFFSET` **ไม่มีความหมายที่แน่นอนถ้าไม่มี `ORDER BY`** ประกบคู่กันเสมอ — PostgreSQL ไม่การันตีลำดับแถวที่คืนมาถ้าไม่ระบุ `ORDER BY` ชัดเจน (อาจได้ลำดับต่างกันในแต่ละครั้งที่ query แม้ข้อมูลไม่เปลี่ยนเลย ถ้า query planner เลือกวิธีอ่านข้อมูลต่างไป) ทำให้หน้าที่ 1 กับหน้าที่ 2 อาจมีแถวซ้ำกันหรือขาดหายได้ถ้าลืม `ORDER BY` — กับดักนี้พบบ่อยมากในโค้ด pagination ที่เขียนแบบรีบ ๆ
+
+(สำหรับตารางขนาดใหญ่มาก ๆ ที่ `OFFSET` เริ่มช้าลง เพราะ PostgreSQL ต้องอ่านข้ามแถวที่ถูก skip ทุกแถวก่อนถึงหน้าที่ต้องการ มีเทคนิคที่ดีกว่าเรียกว่า **keyset/cursor-based pagination** — ใช้ `WHERE id > $last_seen_id LIMIT $n` แทน `OFFSET` ตรง ๆ ซึ่งมีประสิทธิภาพคงที่ไม่ว่าจะอยู่หน้าไหน — เนื้อหานี้เกินขอบเขตบทนี้ แต่ควรรู้จักไว้เมื่อต้องทำ pagination กับตารางที่ข้อมูลมาก ๆ ในงานจริง)
+
+#### `JOIN` ข้ามตาราง: หนังสือที่กำลังถูกยืมอยู่
+
+ตาราง `borrow_records` ที่สร้างไว้ตั้งแต่หัวข้อ 70.5 ยังไม่ถูกใช้ query แบบ `JOIN` เลยจนถึงตอนนี้ — มาลองเขียน query จริงที่ต้องใช้ทั้งสองตารางพร้อมกัน: "รายชื่อหนังสือที่กำลังถูกยืมอยู่ (ยังไม่คืน) พร้อมชื่อผู้ยืม"
+
+```rust
+#[derive(Debug, sqlx::FromRow)]
+struct ActiveBorrow {
+    book_title: String,
+    borrower_name: String,
+    borrowed_at: DateTime<Utc>,
+}
+
+async fn list_active_borrows(pool: &sqlx::PgPool) -> Result<Vec<ActiveBorrow>, sqlx::Error> {
+    sqlx::query_as!(
+        ActiveBorrow,
+        r#"SELECT b.title as book_title, r.borrower_name, r.borrowed_at
+           FROM borrow_records r
+           JOIN books b ON b.id = r.book_id
+           WHERE r.returned_at IS NULL"#
+    )
+    .fetch_all(pool)
+    .await
+}
+```
+
+ผู้เขียนรันจริง (หลัง insert หนังสือหนึ่งเล่มและสร้าง borrow record ที่ยังไม่คืน) ได้ผลลัพธ์:
+
+```
+ActiveBorrow { book_title: "Join Demo Book", borrower_name: "Bob", borrowed_at: 2026-09-27T00:24:26.022774Z }
+```
+
+**ข้อสังเกตสำคัญสองจุด**: (1) `as book_title` ใน SQL คือ **column alias** ที่จำเป็นเพราะทั้งสองตารางมีคอลัมน์ชื่อ `title`ไม่ตรงกัน (จริง ๆ แค่ตาราง `books` มี `title` แต่การเขียน alias ชัดเจนแบบนี้ทำให้ struct `ActiveBorrow` map field `book_title` เข้ากับ column ที่ตั้งชื่อใหม่ได้ตรง ๆ — `query_as!` จับคู่ field กับ**ชื่อ column ในผลลัพธ์ query** ไม่ใช่ชื่อ column ในตารางต้นฉบับ) (2) SQLx ยัง type-check query ที่มี `JOIN` ได้ปกติทุกประการเหมือน query ธรรมดา (เชื่อมกับหัวข้อ 70.1 ที่อธิบายว่า SQLx ต่อฐานข้อมูลจริงตอน compile เพื่อ type-check — PostgreSQL รู้ type ของผลลัพธ์ `JOIN` ได้แม่นยำเหมือน query ปกติทุกกรณี ไม่มีข้อยกเว้นสำหรับ query ที่ซับซ้อนขึ้น)
+
+#### Batch Insert ด้วย `UNNEST`
+
+การ insert หลายแถวพร้อมกัน (เช่น import ข้อมูลจำนวนมากจากไฟล์) ถ้าเขียน loop เรียก `INSERT` ทีละแถวผ่าน `&pool` ตรง ๆ จะเสีย round-trip ไปฐานข้อมูล**หนึ่งครั้งต่อแถว** (ช้ามากถ้ามีเป็นพัน/หมื่นแถว) — PostgreSQL มีเทคนิค **`UNNEST`** ที่แปลง array หลายตัวให้กลายเป็นชุดของแถวได้ในคำสั่งเดียว ทำให้ insert ได้หลายแถวพร้อมกันโดยส่ง SQL แค่ครั้งเดียว:
+
+```rust
+async fn batch_insert_books(
+    pool: &sqlx::PgPool,
+    isbns: &[String],
+    titles: &[String],
+    authors: &[String],
+) -> Result<Vec<i64>, sqlx::Error> {
+    let copies = vec![1_i32; isbns.len()];
+
+    let rows = sqlx::query!(
+        r#"INSERT INTO books (isbn, title, author, total_copies, available_copies)
+           SELECT * FROM UNNEST($1::text[], $2::text[], $3::text[], $4::int[], $4::int[])
+           RETURNING id"#,
+        isbns,
+        titles,
+        authors,
+        &copies,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.iter().map(|r| r.id).collect())
+}
+```
+
+ผู้เขียนรันจริงด้วย 3 แถวพร้อมกัน ได้ผลลัพธ์:
+
+```
+batch inserted 3 rows, ids=[9, 10, 11]
+```
+
+**อธิบายกลไก**: `UNNEST($1::text[], $2::text[], $3::text[], $4::int[], $4::int[])` รับ array หลายตัว (ที่ต้องมีความยาวเท่ากันทุกตัว) แล้ว "คลี่" มันออกมาเป็นชุดของแถวพร้อมกัน (แถวที่ 1 คือ element ที่ 0 ของทุก array, แถวที่ 2 คือ element ที่ 1 ของทุก array เรียงกันไป) — `SELECT * FROM UNNEST(...)` จึงได้ผลลัพธ์เป็นตารางชั่วคราวที่มีหลายแถวพร้อมกัน แล้ว `INSERT INTO ... SELECT * FROM ...` ก็ insert ทุกแถวนั้นในคำสั่งเดียว การ bind array เข้ากับ SQLx ทำได้ตรง ๆ เพราะ SQLx implement การแปลง `&[String]`/`Vec<T>` เป็น PostgreSQL array type ให้อยู่แล้ว (ต้องระบุ type array อย่างชัดเจนด้วย `::text[]`/`::int[]` เพราะ PostgreSQL ต้องรู้ type ของ `UNNEST` ก่อนจะ query-plan ได้ — ถ้าไม่ระบุ `sqlx::query!` จะ compile ไม่ผ่านเพราะเดา type ของ column ที่ได้จาก `UNNEST` ไม่ได้)
+
+**หลักการเลือกใช้**: สำหรับ insert จำนวนน้อย (สิบ/ร้อยแถว) loop เรียก `INSERT` ทีละแถวผ่าน transaction เดียว (ตามหัวข้อ 70.9) ก็เพียงพอและอ่านโค้ดง่ายกว่า — `UNNEST` คุ้มค่าเมื่อต้อง insert **จำนวนมากจริง ๆ** (หลักพัน/หมื่นแถวขึ้นไป) ที่ overhead ของ round-trip ต่อแถวกลายเป็นคอขวดจริง
+
+#### UUID เป็น Primary Key: ทางเลือกสำหรับตารางใหม่
+
+ตาราง `books`/`borrow_records` ในบทนี้เลือกใช้ `BIGSERIAL` (ตัวเลข auto-increment) เป็น primary key ตามที่อธิบายไว้ในหัวข้อ 70.5 — แต่ในระบบจริงบางแบบ (เฉพาะอย่างยิ่งระบบ distributed ที่มีหลายฐานข้อมูล/หลาย service สร้าง record พร้อมกันโดยไม่พึ่ง sequence กลางร่วมกัน) การใช้ **UUID** เป็น primary key มีข้อดีที่ `BIGSERIAL` ให้ไม่ได้: สร้างค่า id ที่ไม่ซ้ำกันได้จากฝั่งไหนก็ได้ (แม้แต่ฝั่ง client) โดยไม่ต้องรอฐานข้อมูลจัดสรร sequence ให้ก่อน
+
+จากหัวข้อ 70.2 คุณเปิด feature `uuid` ของ `sqlx` ไว้แล้ว (`cargo add sqlx --features ...,uuid`) — การผูก column type `UUID` ของ PostgreSQL เข้ากับ `uuid::Uuid` ของ Rust ทำได้ตรง ๆ ไม่ต้องแปลงผ่าน string เอง:
+
+```sql
+CREATE TABLE reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- PostgreSQL 13+ สร้าง UUID ให้อัตโนมัติ
+    book_id BIGINT NOT NULL REFERENCES books(id),
+    comment TEXT NOT NULL
+);
+```
+
+```rust
+use uuid::Uuid;
+
+#[derive(Debug, sqlx::FromRow)]
+struct Review {
+    id: Uuid,
+    book_id: i64,
+    comment: String,
+}
+
+async fn add_review(pool: &sqlx::PgPool, book_id: i64, comment: &str) -> Result<Review, sqlx::Error> {
+    // ไม่ระบุ id เลย -- ให้ฐานข้อมูล gen_random_uuid() สร้างให้ (เหมือน BIGSERIAL auto-increment)
+    sqlx::query_as!(
+        Review,
+        "INSERT INTO reviews (book_id, comment) VALUES ($1, $2) RETURNING id, book_id, comment",
+        book_id,
+        comment
+    )
+    .fetch_one(pool)
+    .await
+}
+
+async fn add_review_with_client_id(pool: &sqlx::PgPool, book_id: i64, comment: &str) -> Result<Review, sqlx::Error> {
+    let client_generated_id = Uuid::new_v4(); // สร้าง UUID ฝั่ง Rust เองก่อน insert
+    sqlx::query_as!(
+        Review,
+        "INSERT INTO reviews (id, book_id, comment) VALUES ($1, $2, $3) RETURNING id, book_id, comment",
+        client_generated_id,
+        book_id,
+        comment
+    )
+    .fetch_one(pool)
+    .await
+}
+```
+
+ผู้เขียนรันจริงทั้งสองฟังก์ชัน ได้ผลลัพธ์:
+
+```
+Review { id: 6ed62f08-abb3-4600-959a-60944ef501a1, book_id: 13, comment: "หนังสือดีมาก" }
+Review { id: 4097ac12-663a-4f13-b754-21e94221dc23, book_id: 13, comment: "สร้าง UUID จากฝั่ง Rust" }
+```
+
+และยืนยันด้วย `assert_eq!(review2.id, client_generated_id)` ผ่านจริง — พิสูจน์ว่า UUID ที่สร้างจากฝั่ง Rust ด้วย `Uuid::new_v4()` (เรียก Part 11/random generation ที่อาจเคยเห็นผ่าน ๆ มา) ถูก insert ตรงเข้า column `UUID` ได้ปกติโดยไม่ต้องแปลงเป็น string ก่อนเลย ทั้งสองแนวทาง (ให้ฐานข้อมูลสร้าง vs สร้างฝั่ง client) ใช้งานได้จริงตามความเหมาะสมของสถานการณ์
+
+**เทียบข้อดี/ข้อเสียกับ `BIGSERIAL`**: UUID ไม่รั่วข้อมูลเชิงจำนวน (id แบบ `1, 2, 3, ...` ทำให้เดาได้ว่าระบบมีข้อมูลกี่รายการ หรือเดา id ของ record อื่นได้ง่าย ๆ — เป็นความเสี่ยงด้าน security เล็กน้อยที่ UUID ไม่มี) และสร้างได้แบบ distributed แต่แลกมาด้วย**ขนาดที่ใหญ่กว่า** (16 byte ต่อค่า เทียบกับ 8 byte ของ `BIGINT`) และ**index ที่ประสิทธิภาพต่ำกว่าเล็กน้อย**ในบางกรณี (UUID v4 แบบสุ่มล้วนทำให้ B-tree index กระจายตัวแบบสุ่ม ต่างจาก `BIGSERIAL` ที่เรียงลำดับต่อเนื่องซึ่ง index ทำงานได้มีประสิทธิภาพกว่า) — เลือกใช้ตามความต้องการจริงของระบบ ไม่มีคำตอบที่ถูกเสมอไปทุกกรณี
+
 ### 70.7 Error Handling: แปลง `sqlx::Error` เป็น HTTP Response
 
 จาก Part 66 คุณมี pattern `AppError` ที่ implement `IntoResponse` ให้ Axum แปลง error เป็น HTTP response ที่เหมาะสมได้เอง — หัวข้อนี้จะเชื่อม `sqlx::Error` เข้ากับ pattern เดียวกัน (ถ้ายังไม่ได้อ่าน Part 66 ให้เข้าใจแนวคิดคร่าว ๆ ว่า `AppError` คือ enum ที่รวม error ทุกแหล่งของแอปไว้ที่เดียว แล้ว implement `IntoResponse` แปลงแต่ละ variant เป็น status code/JSON body ที่ต่างกัน)
@@ -726,6 +1006,40 @@ content-length: 88
 
 การ insert ISBN ที่ซ้ำได้ตอบ `409 Conflict` กลับมาจริง (ไม่ใช่ `500 Internal Server Error` ที่ไม่มีความหมายอะไรกับ client) — client ที่เรียก API นี้สามารถแยกแยะได้ว่า "ข้อมูลซ้ำ ควรแก้ input" (409) กับ "ระบบมีปัญหา ลองใหม่ทีหลัง" (500) ได้อย่างถูกต้อง
 
+#### Connection Errors: Password ผิด, Host หาไม่พบ, Database ไม่มีอยู่จริง
+
+นอกจาก constraint violation (ที่เกิด**หลัง**ต่อฐานข้อมูลสำเร็จแล้ว) ยังมี error อีกกลุ่มที่เกิด**ตอนพยายามต่อฐานข้อมูล**เอง (ตอนเรียก `PgPoolOptions::connect()`) — ผู้เขียนทดสอบจริงสามสถานการณ์ที่พบบ่อยที่สุดในโลกจริง (พิมพ์ connection string ผิด, ตั้งค่า environment variable ผิดสภาพแวดล้อม, ฐานข้อมูลยังไม่ถูกสร้าง):
+
+```rust
+// สถานการณ์ 1: password ผิด
+let bad_pw = PgPoolOptions::new()
+    .connect("postgres://postgres:wrongpassword@127.0.0.1:5432/rust_course_scratch")
+    .await;
+
+// สถานการณ์ 2: host/port ไม่มีอะไรฟังอยู่จริง (ต่อ port ที่ไม่มี PostgreSQL รันอยู่)
+let bad_host = PgPoolOptions::new()
+    .acquire_timeout(std::time::Duration::from_secs(2))
+    .connect("postgres://postgres:postgres@127.0.0.1:59999/rust_course_scratch")
+    .await;
+
+// สถานการณ์ 3: ชื่อฐานข้อมูลไม่มีอยู่จริง (server ต่อได้ แต่ไม่มี database นี้)
+let bad_db = PgPoolOptions::new()
+    .connect("postgres://postgres:postgres@127.0.0.1:5432/no_such_database_xyz")
+    .await;
+```
+
+ผลลัพธ์จริงของทั้งสามกรณี:
+
+```
+wrong password error: error returned from database: password authentication failed for user "postgres" at line 331
+unreachable host error: pool timed out while waiting for an open connection
+no such database error: error returned from database: database "no_such_database_xyz" does not exist at line 1021
+```
+
+**ข้อสังเกตที่น่าสนใจ**: สถานการณ์ที่ 1 และ 3 ได้ error เป็น `sqlx::Error::Database` (PostgreSQL server ตอบกลับมาจริง ๆ ว่า authentication fail หรือ database ไม่มีอยู่ — ได้ error message ที่ชัดเจนเกือบจะทันที) แต่สถานการณ์ที่ 2 (host/port ที่ไม่มีอะไรฟังอยู่) กลับได้ error เป็น **`PoolTimedOut`** (ข้อความ `pool timed out while waiting for an open connection`) ไม่ใช่ error แบบ "connection refused" ที่อาจคาดไว้ทันที — เหตุผลคือ `PgPoolOptions::connect()` เองก็ยังทำงานผ่านกลไก pool (พยายามเปิด `min_connections` ตัวแรกผ่าน internal acquire ที่มี `acquire_timeout` กำกับอยู่) ถ้า TCP connection ไปยัง host/port นั้นไม่มีอะไรตอบสนองเลย (ไม่ reject ทันที ไม่ accept เลย) SQLx จะรอจนครบ `acquire_timeout` ก่อนแล้วสรุปว่า "รอไม่ไหวแล้ว" แทนที่จะเป็น error เชิง network โดยตรง — สิ่งนี้เตือนให้ระวังว่า **ข้อความ error ที่เห็นไม่ได้บอกสาเหตุที่แท้จริงเสมอไป** (ตัวอย่างนี้เห็น `PoolTimedOut` แต่สาเหตุจริงคือ host ต่อไม่ได้ ไม่ใช่ pool เต็มแบบหัวข้อ 70.11) ตอน debug ควรเช็คทั้งสองความเป็นไปได้เสมอเมื่อเจอ error นี้
+
+**หลักปฏิบัติสำหรับ error กลุ่มนี้ในแอปจริง**: error ตอน `connect()` ควรทำให้โปรแกรมไม่ผ่าน startup เลย (`.expect("เชื่อมต่อฐานข้อมูลไม่สำเร็จ")` ตามที่หัวข้อ 70.10 ทำ — ไม่มีประโยชน์ที่จะรัน HTTP server ต่อถ้าต่อฐานข้อมูลไม่ได้เลยตั้งแต่ต้น) แต่ error ที่เกิด**ระหว่าง**โปรแกรมรันอยู่แล้ว (เช่น network hiccup ชั่วคราวระหว่าง connection กับฐานข้อมูลหลุดกลางทาง) ไม่ควรทำให้ทั้งแอป crash — ควรแปลงเป็น `500`/`503` สำหรับ request นั้น ๆ ผ่าน `AppError::Internal` (ตามที่ `impl From<sqlx::Error>` ในหัวข้อนี้ทำไว้ให้แล้ว — variant อื่นที่ไม่ได้ระบุเฉพาะจะตกไปที่ `AppError::Internal` โดย fallback) แล้วให้ระบบข้างนอก (load balancer, client ที่ retry) จัดการต่อ — connection pool จะพยายามเปิด connection ใหม่ให้เองสำหรับ request ถัดไปโดยไม่ต้อง restart โปรแกรมทั้งตัว
+
 ### 70.8 NULL Handling: `Option<T>` กับ Nullable Column
 
 จาก Part 11 คุณรู้จัก `Option<T>` ในฐานะวิธีที่ Rust แทน "อาจไม่มีค่า" อย่างปลอดภัยที่ compile time (ไม่มี null pointer ที่ crash ตอน runtime แบบภาษาอื่น) — PostgreSQL มีแนวคิดคู่กันคือ **nullable column** (คอลัมน์ที่ไม่มี `NOT NULL` constraint แปลว่าอนุญาตให้เป็น `NULL` ได้) SQLx เชื่อมสองแนวคิดนี้เข้าด้วยกันตรง ๆ: **คอลัมน์ที่ nullable ต้อง map เป็น `Option<T>` ในฝั่ง Rust เท่านั้น**
@@ -826,6 +1140,31 @@ async fn borrow_book(
 **อธิบายจุดสำคัญ**: `pool.begin()` คืน `Transaction<'_, Postgres>` ที่ "ยืม" connection ตัวหนึ่งจาก pool มาใช้ตลอดช่วงชีวิตของ transaction (connection ตัวนั้นจะไม่ถูกคืนกลับ pool จนกว่า transaction จะ commit/rollback เสร็จ หรือถูก drop) — ทุก query ที่ต้องอยู่ "ใน" transaction เดียวกันต้องเรียกผ่าน `&mut *tx` (ไม่ใช่ `&pool` ตรง ๆ) เพราะถ้าเรียกผ่าน `&pool` SQLx จะไปหยิบ connection **ตัวอื่น**จาก pool มาใช้ (คนละ transaction กันโดยสิ้นเชิง — คำสั่งนั้นจะ commit ทันทีตาม auto-commit mode ปกติของ PostgreSQL ไม่ได้อยู่ใน transaction ที่ตั้งใจไว้เลย) นี่คือกับดักเชิง type ที่พบบ่อยมาก (ดูหัวข้อกับดักท้ายบท)
 
 `tx.commit().await?` เป็นจุดเดียวที่ทำให้ทุกคำสั่งใน transaction "มีผลจริง" พร้อมกัน — ถ้าโปรแกรม crash หรือ `tx` ถูก drop (เช่น มี `?` return early ก่อนถึง `.commit()`) **โดยไม่เรียก commit** SQLx จะ**rollback อัตโนมัติ**ให้ (ผ่าน `Drop` implementation ของ `Transaction` — ส่งคำสั่ง `ROLLBACK` ให้ฐานข้อมูลก่อนที่ connection จะถูกคืนกลับ pool) — นี่คือ safety net ที่สำคัญมาก: **การไม่เรียก `.commit()` ปลอดภัยกว่าการลืมเรียก `.rollback()`** เพราะพฤติกรรม default คือ rollback อยู่แล้ว
+
+#### ทำไม `.execute(&pool)` และ `.execute(&mut *tx)` เขียนแบบเดียวกันได้ (เชื่อมกับ Part 19/21 เรื่อง Trait)
+
+สังเกตว่าตลอดบทนี้ `.fetch_one()`/`.execute()` ถูกเรียกได้ทั้งกับ `&pool` (หัวข้อ 70.6-70.8) และกับ `&mut *tx` (หัวข้อนี้) โดยไม่ต้องเขียนโค้ดคนละแบบ หรือใช้ method คนละชื่อกันเลย — นี่ไม่ใช่ความบังเอิญ แต่มาจาก trait กลางของ SQLx ชื่อ **`Executor`** ที่นิยาม method อย่าง `.fetch_one()`/`.fetch_all()`/`.execute()` ไว้เพียงครั้งเดียว แล้ว implement ให้กับหลาย type ที่ "สามารถรันคำสั่ง SQL ได้" ทั้งหมด: `&PgPool`, `&mut PgConnection`, และ `&mut Transaction<'_, Postgres>` (สามชนิดนี้ implement `Executor` เหมือนกันหมด แม้ภายในทำงานต่างกัน — `&PgPool` ไปหยิบ connection จาก pool มาใช้ชั่วคราว ส่วน `&mut Transaction` ใช้ connection ที่ transaction ยึดไว้อยู่แล้ว)
+
+นี่คือการประยุกต์ตรงของหลักการที่ Part 19/21 สอนไว้เรื่อง trait: "เขียนโค้ดครั้งเดียว ทำงานได้กับ concrete type ที่สนอง trait bound ได้หลายแบบ" — ฟังก์ชันของแอปคุณเองก็ใช้หลักการเดียวกันนี้ได้ ถ้าอยากเขียนฟังก์ชัน query ที่**เรียกได้ทั้งผ่าน `&pool` ตรง ๆ และผ่าน `&mut *tx`** (โดยไม่ต้องเขียนสองเวอร์ชัน) ให้รับ parameter เป็น `impl sqlx::PgExecutor<'_>` แทนการ fix type เป็น `&PgPool` ตรง ๆ:
+
+```rust
+// ฟังก์ชันนี้เรียกได้ทั้ง find_book(&pool, ...) และ find_book(&mut *tx, ...)
+async fn find_book<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    isbn: &str,
+) -> Result<Book, sqlx::Error> {
+    sqlx::query_as!(
+        Book,
+        r#"SELECT id, isbn, title, author, total_copies, available_copies, published_year, created_at
+           FROM books WHERE isbn = $1"#,
+        isbn
+    )
+    .fetch_one(executor)
+    .await
+}
+```
+
+(`PgExecutor` คือ type alias ที่ SQLx เตรียมไว้ให้เฉพาะ PostgreSQL ของ `Executor` ตัวเต็ม — สะดวกกว่าเขียน trait bound แบบ generic ข้าม database ที่ซับซ้อนกว่า) ความสามารถนี้มีประโยชน์มากตอนต้องเขียนฟังก์ชันย่อยที่**บางครั้ง**ต้องอยู่ใน transaction และ**บางครั้ง**เรียกแบบเดี่ยว ๆ โดยไม่ต้อง copy โค้ด query ซ้ำสองที่
 
 #### พิสูจน์ rollback ด้วยโค้ดจริง
 
@@ -1260,7 +1599,49 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 **ข้อสังเกตเรื่อง `DATABASE_URL` สำหรับ `#[sqlx::test]`**: macro นี้ต้องมี `DATABASE_URL` ชี้ไปยังฐานข้อมูล PostgreSQL ที่ **user ที่ล็อกอินมีสิทธิ์สร้าง/ลบฐานข้อมูลได้** (เพราะมันต้อง `CREATE DATABASE`/`DROP DATABASE` ฐานข้อมูลชั่วคราวเอง) — ในสภาพแวดล้อม CI มักตั้งค่าให้ user ทดสอบมีสิทธิ์นี้เฉพาะ (ไม่ใช่ user เดียวกับที่แอป production ใช้จริง ที่ควรมีสิทธิ์จำกัดกว่ามาก ตามหลักการ least privilege)
 
-**ทางเลือกอื่นที่ควรรู้จัก** (ไม่ได้ทดสอบเจาะลึกในบทนี้ แต่เป็นแนวทางจริงที่ใช้กันในทีมขนาดใหญ่): pattern "transaction-rollback-per-test" — เปิด transaction ตอนเริ่ม test แล้ว rollback เสมอตอนจบ (ไม่ว่า test จะ pass/fail) ทำให้ทุก test เห็นฐานข้อมูลที่ "สะอาด" เหมือนกันโดยไม่ต้องสร้าง/ลบฐานข้อมูลจริงทุกครั้ง (เร็วกว่า `#[sqlx::test]` สำหรับ test suite ขนาดใหญ่มาก ๆ) แต่ต้องเขียน setup/teardown เองมากกว่า — `#[sqlx::test]` เหมาะเป็นจุดเริ่มต้นเพราะ setup น้อยที่สุดและ isolation แน่นอนที่สุด
+**ทางเลือกอื่นที่ควรรู้จัก**: pattern "transaction-rollback-per-test" — เปิด transaction ตอนเริ่ม test แล้ว rollback เสมอตอนจบ (ไม่ว่า test จะ pass/fail) ทำให้ทุก test เห็นฐานข้อมูลที่ "สะอาด" เหมือนกันโดยไม่ต้องสร้าง/ลบฐานข้อมูลจริงทุกครั้ง (เร็วกว่า `#[sqlx::test]` สำหรับ test suite ขนาดใหญ่มาก ๆ เพราะไม่ต้อง `CREATE DATABASE`/`DROP DATABASE` ทุกครั้ง) แต่ต้องเขียน setup/teardown เองมากกว่า ผู้เขียนทดสอบจริง pattern นี้ด้วย (ใช้ `PgPool` ธรรมดาตัวเดียวที่แชร์ข้าม test แทนการให้ `#[sqlx::test]` สร้างฐานข้อมูลใหม่ให้):
+
+```rust
+#[tokio::test]
+async fn transaction_rollback_per_test_pattern() {
+    let pool = shared_test_pool().await; // PgPool ธรรมดาที่เชื่อมฐานข้อมูล test ตัวเดียวกันทุก test
+    let mut tx = pool.begin().await.unwrap();
+
+    sqlx::query!(
+        "INSERT INTO books (isbn, title, author, total_copies, available_copies) VALUES ($1,$2,$3,1,1)",
+        "978-rollback-test-1", "Rollback Test Book", "Tester"
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    // ภายใน transaction เดียวกัน มองเห็นข้อมูลของตัวเองได้ปกติ (query ผ่าน &mut *tx)
+    let count = sqlx::query!("SELECT COUNT(*) as c FROM books WHERE isbn = $1", "978-rollback-test-1")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(count.c, Some(1));
+
+    // จบ test ด้วยการ rollback เสมอ — ไม่ commit ไม่ว่า assert ข้างบนจะผ่านหรือไม่ก็ตาม
+    tx.rollback().await.unwrap();
+
+    // ตรวจสอบผ่าน pool ปกติ (นอก tx) ว่าไม่มีข้อมูลหลงเหลือให้ test อื่นเห็นจริง ๆ
+    let count_after = sqlx::query!("SELECT COUNT(*) as c FROM books WHERE isbn = $1", "978-rollback-test-1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count_after.c, Some(0));
+}
+```
+
+ผลลัพธ์จริง:
+
+```
+running 1 test
+test transaction_rollback_per_test_pattern ... ok
+```
+
+ทั้งสอง `assert_eq!` ผ่านจริง — พิสูจน์สองอย่างพร้อมกัน: (1) ภายใน transaction เดียวกัน มองเห็นข้อมูลที่ insert ไปแล้วได้ตามปกติ (`count.c == Some(1)`) และ (2) หลัง rollback ข้อมูลนั้นไม่หลงเหลืออยู่จริงเมื่อ query ผ่าน `&pool` ปกติ (`count_after.c == Some(0)`) — ข้อจำกัดที่ต้องระวังของ pattern นี้คือ**ทุก query ในเนื้อ test ต้องเรียกผ่าน `&mut *tx` ให้ครบ** (กับดักเดียวกับหัวข้อกับดักข้อ 2 ของบทนี้) ถ้ามีจุดใดเผลอเรียกผ่าน `&pool` ตรง ๆ คำสั่งนั้นจะ commit ทันทีและไม่ถูก rollback ไปด้วย — และถ้า test นี้เรียก handler/ฟังก์ชันของแอปจริงที่รับ `&PgPool` เป็น parameter (ไม่ใช่ `&mut Transaction`) จะต้องปรับ signature ของฟังก์ชันนั้นให้รับ generic ที่ครอบคลุมทั้งสองกรณีได้ (ผ่าน trait bound เช่น `impl sqlx::PgExecutor<'_>`) ซึ่งเป็นการเปลี่ยนโครงสร้างโค้ดที่มากกว่า `#[sqlx::test]` ต้องการ — นี่คือเหตุผลที่ `#[sqlx::test]` ยังเหมาะเป็นจุดเริ่มต้นที่ดีที่สุดสำหรับ integration test ระดับ handler เต็มรูปแบบ ในขณะที่ pattern นี้เหมาะกับ unit test ของ query function เดี่ยว ๆ ที่ต้องการความเร็วสูงและมีจำนวนมาก
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
@@ -1429,9 +1810,10 @@ error[E0599]: the method `fetch_one` exists for struct `QueryAs<'_, _, BookNoDer
 - **Transaction (`pool.begin()`) การันตี atomicity จริง** — พิสูจน์ด้วยการวัดค่าก่อน/หลัง rollback ว่าคำสั่งที่สำเร็จไปแล้วก่อนหน้าถูกยกเลิกไปด้วยจริงเมื่อคำสั่งถัดมา fail
 - **`PgPool` ใน `AppState` ไม่ต้องห่อ `Arc` ซ้ำ** — มันคือ `Arc<PoolInner<DB>>` อยู่แล้วในตัว (ยืนยันจาก source code จริง) `.clone()` ถูกเท่ากับ `Arc::clone` เสมอ
 - **Nullable column ต้อง map เป็น `Option<T>`** เสมอ — `query!`/`query_as!` บังคับสิ่งนี้ให้ที่ compile time อัตโนมัติ
-- **`#[sqlx::test]`** ให้ database แยกกันจริงต่อ test function หนึ่งตัว (สร้าง/ลบอัตโนมัติ) แก้ปัญหา test ที่รันพร้อมกันแล้วชนข้อมูลกัน
+- **`#[sqlx::test]`** ให้ database แยกกันจริงต่อ test function หนึ่งตัว (สร้าง/ลบอัตโนมัติ) แก้ปัญหา test ที่รันพร้อมกันแล้วชนข้อมูลกัน — และ pattern "transaction-rollback-per-test" เป็นทางเลือกที่เร็วกว่าสำหรับ test suite ขนาดใหญ่ (พิสูจน์ด้วยโค้ดจริงทั้งสองแบบ)
+- **เทคนิค query ที่เกินขอบเขต CRUD พื้นฐาน** ก็ทำได้ตรงไปตรงมาด้วย SQL ธรรมดา: `JOIN` ข้ามตาราง (`books`/`borrow_records`), `LIMIT`/`OFFSET` สำหรับ pagination (พร้อมข้อเตือนเรื่อง `ORDER BY`), batch insert ด้วย `UNNEST` (ลด round-trip เมื่อต้อง insert จำนวนมาก), คอลัมน์ `JSONB` สำหรับข้อมูลที่ shape ไม่แน่นอน (ผ่าน `serde_json::Value` หรือ `sqlx::types::Json<T>` ที่ type-safe กว่า), และ `UUID` เป็นทางเลือกของ primary key แทน `BIGSERIAL`
 
-Part ถัดไป (Part 71) จะลงรายละเอียดเรื่อง query ขั้นสูงกว่านี้ — `QueryBuilder` สำหรับ SQL แบบ dynamic ที่ปลอดภัย, การจัดการ migration ในทีมที่ทำงานพร้อมกันหลายคน, connection pooling ขั้นสูงกว่าที่บทนี้ครอบคลุม (เช่น read replica, health check), และเทคนิค query ที่ซับซ้อนกว่า CRUD พื้นฐาน (join หลายตาราง, pagination, full-text search) — ทั้งหมดต่อยอดจากพื้นฐานที่บทนี้วางไว้โดยตรง
+Part ถัดไป (Part 71) จะลงรายละเอียดเรื่อง query ขั้นสูงกว่านี้ — `QueryBuilder` สำหรับ SQL แบบ dynamic ที่ปลอดภัย (สำหรับ filter ที่จำนวนเงื่อนไขไม่แน่นอนตาม input ผู้ใช้ ตามที่หัวข้อ 70.6 ทิ้งท้ายไว้), การจัดการ migration ในทีมที่ทำงานพร้อมกันหลายคนแบบละเอียดกว่านี้, connection pooling ขั้นสูงกว่าที่บทนี้ครอบคลุม (เช่น read replica routing, prepared statement caching), keyset/cursor-based pagination สำหรับตารางขนาดใหญ่ (ต่อจากที่หัวข้อ 70.6 แนะนำไว้), และ full-text search ของ PostgreSQL — ทั้งหมดต่อยอดจากพื้นฐาน query/transaction/pool ที่บทนี้วางไว้โดยตรง
 
 ---
 

@@ -107,6 +107,16 @@ notification.booking_created	1
 
 สังเกตว่า `rabbitmqctl list_queues` (คำสั่งดู queue ของ RabbitMQ) รายงานว่ามี **1 message** ค้างอยู่ใน queue `notification.booking_created` ทั้งที่ยังไม่มี consumer ใดต่ออยู่เลย — พอ `notification-service` start ขึ้นมา มันก็รับ message เก่านั้นได้ทันทีโดยไม่มีอะไรสูญหาย นี่คือสิ่งที่ synchronous gRPC call ทำไม่ได้เลย (ถ้า `booking-service` เรียก gRPC ไปยัง `notification-service` ตอนที่มันยังไม่ start request นั้นจะ fail ทันที ไม่มีทางรอได้)
 
+#### สรุปเทียบสองแนวทางแบบตาราง
+
+| มิติ | Synchronous call (gRPC, Part 80 / REST, Part 61-66) | Asynchronous messaging (บทนี้) |
+|---|---|---|
+| ใครต้องออนไลน์ตอนสื่อสาร | ทั้งสองฝั่งต้องออนไลน์พร้อมกัน | แค่ broker ต้องออนไลน์ — consumer มาทีหลังได้ |
+| ผู้ส่งรู้จักผู้รับไหม | รู้จักตรง ๆ (ต้องมี client type, endpoint address) | ไม่รู้จักเลย (publish ไปที่ exchange/topic กลาง) |
+| จำนวนผู้รับ | คงที่ ต้องแก้โค้ดผู้ส่งถ้าจะเพิ่ม | เพิ่ม/ลดได้อิสระ ไม่กระทบโค้ดผู้ส่ง |
+| ผลลัพธ์กลับมาทันทีไหม | ได้ (request-response) | ไม่ได้ (fire-and-forget ที่มีการันตีการส่งถึง) |
+| เหมาะกับ | ต้องรู้ผลก่อนไปทำงานต่อ (เช่น เช็คสต๊อกก่อนยืนยันคำสั่งซื้อ) | งานที่ "เกิดแล้ว ใครสนใจไปทำต่อเอง" (เช่น แจ้งเตือน, sync ข้อมูล, analytics) |
+
 > **หมายเหตุสำคัญที่ต้องชัดเจนตั้งแต่ต้นบท**: message queue **ไม่ได้มาแทน gRPC หรือ REST** ในทุกสถานการณ์ Part 80 บอกไว้แล้วว่า gRPC เหมาะกับกรณีที่ต้อง**รอผลลัพธ์กลับมาใช้ทันที** (เช่น "เช็คสต๊อกก่อนยืนยันคำสั่งซื้อ" — ต้องรู้ผลก่อนตอบลูกค้า) ส่วน message queue เหมาะกับงานที่เป็น **"เกิดเหตุการณ์นี้แล้ว ใครสนใจก็ไปทำอะไรต่อเอง"** (fire-and-forget แบบมีการันตีการส่งถึง) ทั้งสองแนวทางมักอยู่ในระบบเดียวกันได้ — `booking-service` อาจเรียก gRPC ไปที่ `payment-service` แบบ synchronous เพื่อตัดเงิน (ต้องรู้ผลก่อนยืนยัน booking) แล้วค่อย publish event แบบ asynchronous ไปที่ `notification-service` (ไม่ต้องรอผล)
 
 ### 82.2 AMQP Fundamentals: Exchange, Queue, Binding, Routing Key
@@ -310,7 +320,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 [producer] publish confirmed: NotRequested
 ```
 
-`NotRequested` หมายถึงเรายังไม่ได้เปิดโหมด **publisher confirms** อย่างเป็นทางการด้วย `channel.confirm_select(...)` — ค่าที่ได้กลับมาตอนนี้บอกแค่ว่า broker รับ frame ของ publish ไปแล้ว (ผ่าน TCP ไปถึง broker) แต่ไม่ได้ยืนยันระดับ "เขียนลง disk แล้วแน่ ๆ" หากต้องการการันตีระดับนั้นจริง (สำคัญมากสำหรับข้อมูลการเงิน) ต้องเรียก `channel.confirm_select(ConfirmSelectOptions::default())` ก่อน publish ครั้งแรก แล้วค่าที่ได้กลับมาจะเป็น `Ack`/`Nack` จริงจาก broker — บทนี้ไม่ได้เปิดโหมดนี้เพื่อให้ตัวอย่างโค้ดเรียบง่าย แต่ระบบ production ที่ข้อมูลสำคัญมากควรพิจารณาเปิดไว้เสมอ
+`NotRequested` หมายถึงเรายังไม่ได้เปิดโหมด **publisher confirms** อย่างเป็นทางการด้วย `channel.confirm_select(...)` — ค่าที่ได้กลับมาตอนนี้บอกแค่ว่า broker รับ frame ของ publish ไปแล้ว (ผ่าน TCP ไปถึง broker) แต่ไม่ได้ยืนยันระดับ "เขียนลง disk แล้วแน่ ๆ" หากต้องการการันตีระดับนั้นจริง (สำคัญมากสำหรับข้อมูลการเงิน) ต้องเรียก `channel.confirm_select(ConfirmSelectOptions::default())` ก่อน publish ครั้งแรก แล้วค่าที่ได้กลับมาจะเป็น `Ack`/`Nack` จริงจาก broker — ทดสอบจริงด้วยการเพิ่มบรรทัดนี้ก่อน `basic_publish`:
+
+```rust
+// เปิดโหมด publisher confirms อย่างเป็นทางการ -- ต้องเรียกก่อน publish ครั้งแรกของ channel นี้
+channel.confirm_select(ConfirmSelectOptions::default()).await?;
+```
+
+ผลลัพธ์จริงที่ได้กลับมาเปลี่ยนจาก `NotRequested` เป็นค่า confirm ที่มีความหมายจริง:
+
+```
+publish confirm (พร้อม confirm_select): Ack(None)
+```
+
+`Ack(None)` แปลว่า broker ยืนยันรับ message นี้เข้าสู่ระบบเรียบร้อยจริง ๆ (`None` ในที่นี้คือไม่มี field เพิ่มเติมแนบมา) ถ้า broker ปฏิเสธ message ด้วยเหตุผลใดก็ตาม (เช่น queue เต็มตาม policy บางแบบ) ค่าที่ได้จะเป็น `Nack` แทน — บทนี้ไม่ได้เปิดโหมดนี้เป็นค่า default ในทุกตัวอย่างเพื่อให้โค้ดหลักอ่านง่าย แต่ระบบ production ที่ข้อมูลสำคัญมาก (เช่น เหตุการณ์ทางการเงิน) ควรพิจารณาเปิด `confirm_select` ไว้เสมอ แล้วเช็คค่า `Ack`/`Nack` ที่ได้กลับมาจริง ๆ ก่อนถือว่า publish สำเร็จ
 
 ### 82.4 lapin Consumer: กระบวนการแยก อ่านและ Consume จริง
 
@@ -641,6 +664,31 @@ x-death: [{
 }]
 ```
 
+#### Trigger อื่นของ dead-lettering: Message TTL หมดอายุ
+
+`nack(requeue: false)` ไม่ใช่ trigger เดียวที่ทำให้ message ถูก dead-letter — RabbitMQ ยัง dead-letter message อัตโนมัติเมื่อ **message TTL (`x-message-ttl`) หมดอายุ** ก่อนมีใคร consume มันเลย หรือเมื่อ queue เกินความยาวสูงสุดที่ตั้งไว้ (`x-max-length`) นี่มีประโยชน์มากสำหรับ event ที่ "ถ้าไม่ทันเวลาก็ไม่มีประโยชน์แล้ว" (เช่น การแจ้งเตือน real-time ที่ถ้าผ่านไปเกิน 1 นาทีก็ไม่มีความหมายอีกต่อไป)
+
+ทดสอบจริง: ตั้ง queue ที่มี `x-message-ttl = 1000` (1000ms) พร้อม `x-dead-letter-exchange` ชี้ไปที่ DLX แยก แล้ว publish message เข้าไปโดย**ไม่มี consumer ใดมารับเลย**:
+
+```rust
+let mut args = FieldTable::default();
+args.insert("x-message-ttl".into(), AMQPValue::LongInt(1000));
+args.insert("x-dead-letter-exchange".into(), AMQPValue::LongString("ttl.dlx".into()));
+channel.queue_declare("ttl_main_queue", QueueDeclareOptions::default(), args).await?;
+
+channel.basic_publish("", "ttl_main_queue", BasicPublishOptions::default(), b"expires-in-1s", BasicProperties::default())
+    .await?.await?;
+```
+
+ผลลัพธ์จริงจากการรัน (รอ 1.5 วินาทีแล้วเช็ค DLQ โดยไม่มี consumer ใดต่อกับ `ttl_main_queue` เลยตลอดการทดสอบ):
+
+```
+[setup] publish message ที่มี TTL 1 วินาที เข้า ttl_main_queue แล้ว -- ไม่มี consumer มารับเลย
+[ttl-checker] message หมดอายุแล้วมาโผล่ที่ DLQ จริง! payload="expires-in-1s"
+```
+
+พิสูจน์ว่า RabbitMQ เอง (ไม่ใช่ consumer) เป็นคนตรวจจับว่า message หมดอายุแล้วเอง — ไม่จำเป็นต้องมีใครมา `nack` เลยด้วยซ้ำ นี่คือความต่างสำคัญจาก scenario ในหัวข้อก่อนหน้า (ที่ consumer เป็นคนสั่ง `nack(requeue: false)` เอง) — trigger dead-lettering มีได้หลายทาง (fail จาก consumer, TTL หมดอายุ, queue เกิน max length) แต่ปลายทางเดียวกันคือ DLQ ที่ตั้งไว้
+
 field `count` ใน `x-death` มีประโยชน์มากในระบบจริง: ในทางปฏิบัติมักไม่ dead-letter ตั้งแต่ครั้งแรกที่ fail แต่จะให้ consumer **นับจำนวนครั้งที่ fail เอง** ผ่าน custom header (เช่น `x-retry-count`) เพิ่มค่าทีละ 1 ทุกครั้งที่ `nack(requeue: true)` แล้วเช็คว่าถ้าเกิน N ครั้ง (เช่น 3) ค่อย `nack(requeue: false)` เพื่อส่งเข้า DLQ จริง ๆ — นี่คือ pattern "retry ก่อนค่อย dead-letter" ที่ระบบ production ส่วนใหญ่ใช้ (แบบฝึกหัดข้อ 4 ท้ายบทให้ implement pattern นี้เต็มรูปแบบ)
 
 ### 82.7 Kafka Fundamentals: Topics, Partitions, Consumer Groups, และ Log-Based Retention
@@ -875,7 +923,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 [consumer] จบ, ได้รับทั้งหมด 3 message(s)
 ```
 
-สังเกตว่า `enable.auto.commit = true` — เราให้ `rdkafka` commit offset ให้อัตโนมัติเป็นระยะ (ไม่ใช่ manual ack แบบ RabbitMQ) วิธีนี้เรียบง่ายแต่มีความเสี่ยงคล้ายกับ auto-ack ของ RabbitMQ: ถ้า consumer crash ระหว่างประมวลผล record แต่หลังจาก offset ถูก auto-commit ไปแล้ว record นั้นจะถือว่า "อ่านแล้ว" ทั้งที่ยังประมวลผลไม่เสร็จ — งาน production ที่ต้องการความแม่นยำสูงมักตั้ง `enable.auto.commit = false` แล้วเรียก `consumer.commit_message(...)` เอง**หลังประมวลผลสำเร็จแล้วเท่านั้น** (แนวคิดเดียวกับ manual ack ของ RabbitMQ ในหัวข้อ 82.5 เป๊ะ ๆ)
+สังเกตว่า `enable.auto.commit = true` — เราให้ `rdkafka` commit offset ให้อัตโนมัติเป็นระยะ (ไม่ใช่ manual ack แบบ RabbitMQ) วิธีนี้เรียบง่ายแต่มีความเสี่ยงคล้ายกับ auto-ack ของ RabbitMQ: ถ้า consumer crash ระหว่างประมวลผล record แต่หลังจาก offset ถูก auto-commit ไปแล้ว record นั้นจะถือว่า "อ่านแล้ว" ทั้งที่ยังประมวลผลไม่เสร็จ — งาน production ที่ต้องการความแม่นยำสูงมักตั้ง `enable.auto.commit = false` แล้วเรียก `consumer.commit_message(...)` เอง**หลังประมวลผลสำเร็จแล้วเท่านั้น** (แนวคิดเดียวกับ manual ack ของ RabbitMQ ในหัวข้อ 82.5 เป๊ะ ๆ):
+
+```rust
+let consumer: StreamConsumer = ClientConfig::new()
+    .set("bootstrap.servers", "127.0.0.1:9092")
+    .set("group.id", "notification-group")
+    .set("auto.offset.reset", "earliest")
+    .set("enable.auto.commit", "false") // ปิด auto-commit -- เราจะ commit เองหลังประมวลผลสำเร็จ
+    .create()?;
+
+while let Ok(msg) = consumer.recv().await {
+    // ... ประมวลผล msg (เช่น "would send confirmation email") ...
+    // commit offset ของ message นี้ "หลังจาก" ประมวลผลสำเร็จแล้วเท่านั้น
+    consumer.commit_message(&msg, rdkafka::consumer::CommitMode::Async)?;
+}
+```
+
+หลักการ mapping ระหว่างสองระบบตรงกันแบบเป๊ะ ๆ: **`commit_message` ของ Kafka เทียบเท่ากับ `delivery.ack(...)` ของ RabbitMQ** — ทั้งคู่คือการบอก broker ว่า "ประมวลผลชิ้นนี้เสร็จแล้ว จะไม่ขอกลับมาอ่านใหม่อีก (ในเงื่อนไขปกติ)" ต่างกันแค่รายละเอียดว่า RabbitMQ ทำทีละ message ส่วน Kafka commit เป็น "ตำแหน่ง offset" ที่มักครอบคลุมหลาย record รวดเดียว (commit offset ที่ N หมายถึง "อ่านและประมวลผลสำเร็จถึงตำแหน่ง N-1 แล้วทั้งหมด")
+
+#### Idempotent Producer: ป้องกัน Duplicate ที่เกิดจากฝั่ง Producer เอง (ไม่ใช่ Consumer)
+
+หัวข้อ 82.5 พูดถึง idempotency ฝั่ง consumer (ป้องกันประมวลผลซ้ำเมื่อได้รับ message ซ้ำ) แต่ Kafka ยังมีกลไกป้องกัน duplicate ที่เกิด**ฝั่ง producer เอง**ด้วย: ถ้า producer ส่ง record ไปแล้วไม่ได้รับ ack กลับมา (เช่น network กระตุก) แล้ว retry ส่งซ้ำ มีความเป็นไปได้ที่ broker จะได้รับ record นั้น**สองครั้ง**ทั้งที่ครั้งแรกจริง ๆ ก็สำเร็จแล้ว เพียงแต่ ack หายไปกลางทาง เปิด **idempotent producer** ด้วยการตั้งค่าเดียว:
+
+```rust
+let producer: FutureProducer = ClientConfig::new()
+    .set("bootstrap.servers", "127.0.0.1:9092")
+    .set("enable.idempotence", "true") // broker จะ dedupe record ที่ producer ส่งซ้ำจาก retry เดียวกันให้อัตโนมัติ
+    .set("acks", "all")                // รอ ack จากทุก replica ก่อนถือว่าสำเร็จ (ความปลอดภัยสูงสุด)
+    .create()?;
+```
+
+`enable.idempotence = true` ทำให้ producer แนบ sequence number ภายในไปกับทุก record ทำให้ broker รู้ว่า record ไหนคือการ retry ของ record เดิม (ไม่ใช่ record ใหม่) แล้ว dedupe ให้อัตโนมัติที่ฝั่ง broker เอง — นี่แก้ duplicate ที่เกิด "ระหว่างทางจาก producer ไป broker" เท่านั้น **ไม่ได้แก้ duplicate ที่เกิดจากฝั่ง consumer เห็น record ซ้ำจากการ redeliver/rebalance** (ซึ่งยังต้องพึ่ง idempotent consumer ตามหัวข้อ 82.5 อยู่ดี) ทั้งสองกลไกทำงานคนละชั้นและมักต้องใช้ร่วมกันในระบบที่ต้องการความแม่นยำสูงสุด
 
 ### 82.10 Consumer Group Rebalancing
 
@@ -953,6 +1032,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 นี่คือพฤติกรรมจริงของ **eager rebalancing** (ค่า default แบบเก่าของ `rdkafka`/`librdkafka`): ตอน rebalance เกิดขึ้น **partition assignment ทั้งหมดถูกเพิกถอนจากทุก instance ก่อน แล้วค่อย assign ใหม่ทั้งหมด** (ไม่ใช่แค่ partition ที่ต้องย้าย) ซึ่งเป็นเหตุผลที่เห็น assignment เป็น `[]` (ว่าง) ชั่วครู่ในช่วงเริ่มต้นของ A ก่อนได้รับ assignment จริง — Kafka รุ่นใหม่มี **cooperative-sticky rebalancing** ที่ฉลาดกว่า (ย้ายเฉพาะ partition ที่จำเป็นต้องย้ายจริง ๆ ลด downtime ของ partition ที่ไม่ต้องย้าย) ซึ่งตั้งได้ผ่าน `partition.assignment.strategy = cooperative-sticky` — บทนี้สาธิตด้วยค่า default เพื่อให้เห็นพฤติกรรม rebalance ชัดที่สุด ส่วนรายละเอียดเชิงลึกของ rebalancing protocol (generation, JoinGroup/SyncGroup RPC) เกินขอบเขตของบทนี้ที่เน้นระดับ awareness ว่า "มันเกิดขึ้นได้ และเกิดขึ้นยังไงในภาพกว้าง"
 
 **ข้อสรุปเชิงปฏิบัติจากการสาธิตนี้**: การ scale consumer ขึ้น (เพิ่ม instance) จะช่วยเพิ่ม throughput ได้จริง **จนถึงจำนวน partition สูงสุด** — เพิ่ม instance เกินจำนวน partition จะไม่ได้อะไรเพิ่ม (instance ส่วนเกินไม่ได้รับ partition ใดเลย ไม่มีงานทำ) การวางแผนจำนวน partition ของ topic ล่วงหน้าจึงสำคัญมาก (เปลี่ยนจำนวน partition ทีหลังทำได้แต่ **ไม่แนะนำ** เพราะกระทบ partition key hashing เดิมที่มีอยู่)
+
+#### เทียบศัพท์ RabbitMQ กับ Kafka แบบตรงตัว
+
+เพราะทั้งสองระบบใช้คำที่ฟังดูคล้ายกันแต่ความหมายไม่ตรงกันเป๊ะ ตารางนี้ช่วยกันสับสนตอนอ่านเอกสารของทั้งสองฝั่งสลับกัน:
+
+| แนวคิด | RabbitMQ | Kafka | หมายเหตุความต่าง |
+|---|---|---|---|
+| "ที่อยู่" ที่ producer ส่งไป | Exchange | Topic | Kafka **ไม่มี** แนวคิด exchange/routing — producer ส่งตรงไปที่ topic เสมอ |
+| ที่เก็บ message จริง | Queue | Partition (ภายใน topic) | Queue ของ RabbitMQ ลบ message ตอน ack, partition ของ Kafka retain ตามเวลา |
+| ตัวกำหนดปลายทาง | Routing key + Binding | ไม่มี (topic name คือปลายทางเดียว) | การ "กรอง" ฝั่ง Kafka consumer ต้องทำเองในโค้ด ไม่มี broker ช่วย route |
+| ตัวกำหนดว่าไปกลุ่มไหน | (ไม่มีแนวคิดตรงนี้ ทุก queue คือ "กลุ่ม" ของตัวเอง) | Partition key | key ของ Kafka กำหนด "อยู่ partition ไหน" ไม่ใช่ "อยู่ topic ไหน" |
+| การยืนยันรับ | `ack`/`nack`/`reject` ต่อ message | Commit offset (มักครอบคลุมหลาย record) | Kafka commit เป็น "ตำแหน่ง" ไม่ใช่ต่อ record แต่ละตัว |
+| หน่วยที่ scale งานคู่กัน | Consumer instance ต่อ queue (จำนวนไม่จำกัดตายตัว) | Consumer instance ต่อ consumer group (จำกัดที่จำนวน partition) | นี่คือเหตุผลที่ต้องวางแผนจำนวน partition ล่วงหน้าให้ดีตามหัวข้อ 82.10 |
+
+#### Monitoring และเครื่องมือตรวจสอบสถานะ
+
+ทั้งสองระบบมีเครื่องมือ built-in สำหรับตรวจสอบสถานะที่ควรรู้จักไว้ (ใช้จริงตลอดบทนี้เพื่อตรวจสอบผลลัพธ์):
+
+- **RabbitMQ Management UI**: เปิดใช้งานได้ผ่าน plugin `rabbitmq_management` (มาพร้อม image `rabbitmq:3-management-alpine` ที่ใช้ตรวจสอบทั้งบทนี้อยู่แล้ว) เข้าดูผ่านเว็บที่ port `15672` เห็น queue ทั้งหมด, จำนวน message ที่ค้าง, อัตราการ publish/consume แบบ real-time — หรือใช้ผ่าน command line ด้วย `rabbitmqctl list_queues name messages` (ใช้จริงหลายครั้งในบทนี้เพื่อตรวจสอบว่า message ค้างอยู่ใน queue กี่ตัว)
+- **Kafka CLI tools**: `kafka-topics.sh --describe` (ดู partition/replica ของ topic), `kafka-consumer-groups.sh --describe --group <name>` (ดู offset/lag ตามที่สาธิตไว้ในหัวข้อ 82.7), `kafka-configs.sh --describe` (ดู config ปัจจุบันของ topic) — ทั้งหมดมาพร้อม Kafka distribution อยู่แล้ว ไม่ต้องติดตั้งเพิ่ม
+
+ระบบ production จริงมักเสริมด้วย Prometheus exporter (ทั้ง RabbitMQ และ Kafka มี metrics endpoint ให้ scrape ได้) เพื่อ alert อัตโนมัติเมื่อ queue ยาวเกินเกณฑ์หรือ consumer lag สูงเกินเกณฑ์ — รายละเอียดการตั้ง monitoring แบบเต็มรูปแบบเกินขอบเขตของบทนี้ แต่รู้จักคำสั่งพื้นฐานข้างบนก็เพียงพอสำหรับ debug สถานการณ์ทั่วไประหว่างพัฒนา
 
 ### 82.11 เลือกอะไรดี: RabbitMQ vs Kafka vs PostgreSQL LISTEN/NOTIFY
 
@@ -1248,6 +1349,28 @@ log จริงของ `notification-service` (terminal 1) — สังเ�
 [notification-service] would send confirmation email to 'malee@example.com' -> งาน 'Jazz Night' จำนวน 1 ที่นั่ง (booking_id=e677a55d-6eaf-421a-be2c-d6c07309f584)
 ```
 
+#### ถ้าเลือก Kafka แทน RabbitMQ หน้าตาโค้ดจะเป็นอย่างไร
+
+หัวข้อ 82.11 บอกไว้ว่า capstone นี้เลือก RabbitMQ เพราะ scenario เป็น task queue ตรงไปตรงมา — ถ้าจะสลับไปใช้ Kafka แทน (เช่น ถ้าในอนาคตต้องการเก็บ history ของ `booking.created` ไว้ replay ให้ analytics ทีมใหม่) ส่วนที่เปลี่ยนมีแค่จุดเชื่อมกับ broker เท่านั้น โครง handler ของ Axum และ struct `BookingCreated` **เหมือนเดิมทุกประการ** — ฝั่ง publish ในตัว handler จะเปลี่ยนจาก
+
+```rust
+state.amqp_channel.basic_publish(
+    "booking.events", "booking.created", BasicPublishOptions::default(),
+    &payload, BasicProperties::default(),
+).await
+```
+
+เป็น (ใช้ `event_id` เป็น partition key ตามแนวคิดหัวข้อ 82.8 — เพื่อให้ event ทั้งหมดของ booking เดียวกัน ถ้ามีหลาย event ในอนาคต เช่น `booking.created`/`booking.cancelled` เรียงลำดับกันถูกต้องเสมอ):
+
+```rust
+state.kafka_producer.send(
+    FutureRecord::to("booking.created").payload(&payload).key(&event.booking_id.to_string()),
+    Duration::from_secs(5),
+).await
+```
+
+ส่วน `notification_consumer.rs` จะเปลี่ยนจาก `channel.basic_consume(...)` + `consumer.next().await` เป็น `StreamConsumer` กับ `.set("group.id", "notification-group")` + `consumer.recv().await` ตามโครงที่แสดงไว้เต็มรูปแบบแล้วในหัวข้อ 82.9 — ตรรกะการ deserialize JSON กลับเป็น `BookingCreated` และการพิมพ์ "would send confirmation email" เหมือนเดิมทุกบรรทัด เพราะส่วนนั้นไม่เกี่ยวกับว่า broker เป็นตัวไหนเลย นี่คือข้อดีของการแยก **business logic** ออกจาก **transport code** อย่างชัดเจนตามแนวทางการทดสอบในหัวข้อ 82.13 — สลับ broker ได้โดยกระทบแค่ชั้น transport ไม่กระทบ logic การตัดสินใจใด ๆ เลย
+
 นี่คือคำตอบเต็มรูปแบบของสิ่งที่ Part 81 foreshadow ไว้: `booking-service` ทำหน้าที่ของตัวเองจบ (สร้าง booking, ตอบ HTTP response กลับลูกค้าทันที) โดยไม่ต้องรอ ไม่ต้องรู้จัก `notification-service` เลยแม้แต่นิดเดียว — และอย่างที่พิสูจน์ไว้แล้วในหัวข้อ 82.1 ระบบยังทำงานถูกต้องแม้ `notification-service` จะยังไม่ online ตอนที่ publish event ก็ตาม การเพิ่ม `analytics-service` หรือ `inventory-sync-service` เข้ามาสมัครรับ event เดียวกันในอนาคตทำได้ทันทีโดย**ไม่ต้องแก้โค้ด `booking-service` แม้แต่บรรทัดเดียว** — เพียงแค่เขียน consumer ตัวใหม่ที่ bind queue ของตัวเองเข้ากับ exchange `booking.events` ด้วย routing key ที่สนใจ ตรงตามโมเดล AMQP ที่อธิบายไว้ในหัวข้อ 82.2
 
 ### 82.13 การทดสอบโค้ดที่ผูกกับ Message Queue (ต่อยอด Part 32-33)
@@ -1339,6 +1462,67 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 จุดสำคัญที่ทำให้ integration test แบบนี้เชื่อถือได้และไม่กวนกันข้ามเทส: **สร้างชื่อ queue ที่ unique ต่อเทส** (`Uuid::new_v4()` ต่อท้ายชื่อ) และตั้ง **`auto_delete: true`** ให้ RabbitMQ เก็บกวาดทิ้งเองหลัง connection ปิด — เทียบเท่ากับแนวคิด "แต่ละ test ใช้ transaction แยกที่ rollback" ที่ Part 71 สอนไว้สำหรับ PostgreSQL เพียงแต่ RabbitMQ ไม่มี transaction rollback แบบนั้น จึงใช้ "queue แยกต่อเทส + auto-delete" แทนเพื่อให้ได้ผลลัพธ์เชิง isolation ที่เทียบเคียงกัน ในระบบ CI จริงมักรัน RabbitMQ/Kafka เป็น service container คู่กับ job ทดสอบ (คล้ายที่ Part 71 แนะนำสำหรับ PostgreSQL) เพื่อให้ integration test เหล่านี้รันได้ทุกครั้งที่ CI ทำงาน
 
+### 82.14 Cheat Sheet: โครงโค้ด lapin เทียบกับ rdkafka แบบเคียงข้างกัน
+
+หลังจากผ่านทั้งบทมาแล้ว หัวข้อนี้สรุปโครงโค้ดที่ใช้บ่อยที่สุดของทั้งสอง crate ไว้เทียบกันในที่เดียว สำหรับเปิดดูอ้างอิงเร็ว ๆ ตอนเขียนโค้ดจริง (ไม่ใช่เนื้อหาใหม่ แต่รวบรวมโครงจากหัวข้อ 82.3-82.9 ให้เห็นภาพเทียบกันชัดเจน):
+
+**เชื่อมต่อและเปิด channel/producer:**
+
+```rust
+// lapin (RabbitMQ)
+let conn = Connection::connect(addr, ConnectionProperties::default()).await?;
+let channel = conn.create_channel().await?;
+
+// rdkafka (Kafka) -- ไม่มีแนวคิด "channel" แยก, ClientConfig สร้าง producer/consumer ได้เลย
+let producer: FutureProducer = ClientConfig::new()
+    .set("bootstrap.servers", "127.0.0.1:9092")
+    .create()?;
+```
+
+**Publish/Produce หนึ่ง message:**
+
+```rust
+// lapin: publish ไปที่ EXCHANGE + routing key เสมอ
+channel.basic_publish(
+    "my-exchange", "my.routing.key", BasicPublishOptions::default(),
+    &payload, BasicProperties::default(),
+).await?.await?;
+
+// rdkafka: ส่งไปที่ TOPIC ตรง ๆ พร้อม partition key ทางเลือก
+producer.send(
+    FutureRecord::to("my-topic").payload(&payload).key(&partition_key),
+    Duration::from_secs(5),
+).await?;
+```
+
+**Consume/Receive แบบวน loop พร้อม manual ack/commit:**
+
+```rust
+// lapin: Stream ของ Delivery แต่ละตัว ack/nack เอง
+let mut consumer = channel.basic_consume("my-queue", "tag", BasicConsumeOptions::default(), FieldTable::default()).await?;
+while let Some(delivery) = consumer.next().await {
+    let delivery = delivery?;
+    // ... ประมวลผล delivery.data ...
+    delivery.ack(BasicAckOptions::default()).await?;
+}
+
+// rdkafka: StreamConsumer.recv() คืนทีละ record, commit offset เอง
+loop {
+    let msg = consumer.recv().await?;
+    // ... ประมวลผล msg.payload() ...
+    consumer.commit_message(&msg, CommitMode::Async)?;
+}
+```
+
+**ตั้งค่าที่ "ต้องรู้ว่ามีอยู่" ก่อนใช้งานจริง:**
+
+| ต้องการ | lapin (RabbitMQ) | rdkafka (Kafka) |
+|---|---|---|
+| จำกัดจำนวนงานพร้อมกันต่อ consumer | `channel.basic_qos(n, ...)` (หัวข้อ 82.4) | ไม่มีแนวคิดตรงนี้ (จำกัดด้วยจำนวน partition ที่ assign ให้แทน) |
+| ยืนยัน publish สำเร็จแน่นอน | `channel.confirm_select(...)` แล้วเช็ค `Ack`/`Nack` (หัวข้อ 82.3) | `.set("acks", "all")` + `.set("enable.idempotence", "true")` (หัวข้อ 82.9) |
+| อ่านย้อนหลังทั้งหมดตอนเริ่มใหม่ | (ไม่ต้องตั้ง — message ที่ยังไม่ ack ก็รออยู่ใน queue แล้ว) | `.set("auto.offset.reset", "earliest")` (หัวข้อ 82.9, สำคัญมาก ดูกับดักข้อ 3) |
+| ป้องกันงานตกค้างตลอดไปเมื่อ fail ซ้ำ | ตั้ง `x-dead-letter-exchange` ตอน `queue_declare` (หัวข้อ 82.6) | ไม่มีในตัว — ต้อง implement เองด้วย topic แยกสำหรับ "dead" record |
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. publish ไปที่ exchange ที่ไม่มี queue ใด bind ไว้เลย — message หายไปเงียบ ๆ ไม่มี error**
@@ -1400,13 +1584,59 @@ producer.send(record, Duration::from_secs(5)).await
 
 ## แบบฝึกหัด (Exercises)
 
-1. **(ง่าย)** แก้ `consumer.rs` ของหัวข้อ 82.4 ให้ไม่หยุดหลังรับ 1 message (เอา logic ที่ทำให้ loop จบออก) แล้วแก้ `producer.rs` ให้ publish `BookingCreated` 5 event ติดกัน (เปลี่ยน `event_name`/`seats` ให้ต่างกันในแต่ละตัว) รันแล้วสังเกตว่า consumer รับครบทั้ง 5 ข้อความตามลำดับที่ publish หรือไม่ — Hint: RabbitMQ queue รักษาลำดับ FIFO ภายใน queue เดียวเสมอ (ไม่เหมือน Kafka ที่ลำดับการันตีแค่ภายใน partition)
+1. **(ง่าย)** แก้ `consumer.rs` ของหัวข้อ 82.4 ให้ไม่หยุดหลังรับ 1 message (เอา logic ที่ทำให้ loop จบออก) แล้วแก้ `producer.rs` ให้ publish `BookingCreated` 5 event ติดกัน (เปลี่ยน `event_name`/`seats` ให้ต่างกันในแต่ละตัว) รันแล้วสังเกตว่า consumer รับครบทั้ง 5 ข้อความตามลำดับที่ publish หรือไม่
 
-2. **(กลาง)** เพิ่ม consumer ตัวที่สองชื่อ `analytics-service` ที่ bind queue ของตัวเอง (`analytics.all_booking_events`) เข้ากับ exchange `booking.events` เดียวกัน แต่ใช้ routing key pattern แบบ topic คือ `booking.#` (รับทุก event ที่ขึ้นต้นด้วย `booking.`) แทนที่จะ bind ตรง ๆ ด้วย `booking.created` เท่านั้น แล้วทดสอบ publish ทั้ง `booking.created` และ `booking.cancelled` (routing key ต่างกัน) ยืนยันว่า `analytics-service` ได้รับทั้งสองแบบ ในขณะที่ `notification-service` (ที่ bind แค่ `booking.created`) ได้รับแค่แบบแรก — Hint: ต้องเปลี่ยน exchange declare เป็น `ExchangeKind::Topic` (ถ้ายังไม่ใช่) และใช้ `#` ใน binding pattern ตามที่อธิบายในหัวข้อ 82.2
+   *Hint*: RabbitMQ queue รักษาลำดับ FIFO ภายใน queue เดียวเสมอ (ไม่เหมือน Kafka ที่ลำดับการันตีแค่ภายใน partition) โครง loop `for i in 0..5 { ... publish ... }` ในฝั่ง producer และเอาเงื่อนไข `if processed >= 1 { break; }` ออกจากฝั่ง consumer ก็เพียงพอแล้ว ผลลัพธ์ที่ควรได้คือ log 5 บรรทัดเรียงตามลำดับ `seats`/`event_name` ที่ publish ไปเป๊ะ ๆ
 
-3. **(กลาง-ยาก)** implement idempotent consumer แบบเต็มรูปแบบตามแนวคิดหัวข้อ 82.5: เก็บ `event_id` ที่ประมวลผลไปแล้วไว้ใน `HashSet<Uuid>` (หรือถ้าอยากต่อยอด SQLx จาก Part 70-71 ให้เก็บในตาราง PostgreSQL `processed_events(event_id UUID PRIMARY KEY, processed_at TIMESTAMPTZ)` แทน เพื่อให้รอดจากการ restart ของ consumer เอง) แล้วจำลอง "at-least-once delivery" ด้วยการส่ง `event_id` เดียวกันเข้า queue สองครั้งซ้อน (publish ซ้ำตรง ๆ) พิสูจน์ว่า consumer ประมวลผล (พิมพ์ "ส่งอีเมล") แค่ครั้งเดียว ไม่ใช่สองครั้ง — Hint: จุดเช็ค `HashSet`/query ตาราง ต้องอยู่**ก่อน**การกระทำที่มีผลข้างเคียงจริงเสมอ (ก่อน `println!("ส่งอีเมล...")` ไม่ใช่หลัง)
+2. **(กลาง)** เพิ่ม consumer ตัวที่สองชื่อ `analytics-service` ที่ bind queue ของตัวเอง (`analytics.all_booking_events`) เข้ากับ exchange `booking.events` เดียวกัน แต่ใช้ routing key pattern แบบ topic คือ `booking.#` (รับทุก event ที่ขึ้นต้นด้วย `booking.`) แทนที่จะ bind ตรง ๆ ด้วย `booking.created` เท่านั้น แล้วทดสอบ publish ทั้ง `booking.created` และ `booking.cancelled` (routing key ต่างกัน) ยืนยันว่า `analytics-service` ได้รับทั้งสองแบบ ในขณะที่ `notification-service` (ที่ bind แค่ `booking.created`) ได้รับแค่แบบแรก
 
-4. **(ยาก/ประยุกต์ใช้งานจริง)** ต่อยอดหัวข้อ 82.6 ให้เป็น retry-then-dead-letter pattern แบบสมบูรณ์: แทนที่จะ `nack(requeue: false)` ทันทีที่ parse ล้มเหลว ให้ consumer อ่าน custom header `x-retry-count` จาก `delivery.properties.headers()` ก่อน (ถ้าไม่มีให้ถือว่าเป็น 0) ถ้ายังน้อยกว่า 3 ให้ `basic_publish` message เดิมกลับเข้า queue เดิมอีกครั้งพร้อมเพิ่ม `x-retry-count` ขึ้นหนึ่ง แล้ว `ack` message เดิมทิ้ง (เทคนิค "manual requeue with counter" เพราะ `nack(requeue: true)` ธรรมดาไม่ให้เราแก้ header ระหว่างทาง) แต่ถ้าครบ 3 ครั้งแล้วให้ `nack(requeue: false)` เพื่อให้ dead-letter ไปที่ DLQ ที่ตั้งไว้ในหัวข้อ 82.6 จริง ๆ — Hint: ต้องสร้าง `FieldTable` ใหม่ทุกครั้งที่ republish (คัดลอก header เดิมมาแล้วแก้แค่ `x-retry-count`) เพราะ `BasicProperties`/headers เป็น immutable ต่อ message เดิมที่รับมา แก้ในตัวเดิมไม่ได้
+   *Hint*: ต้องเปลี่ยน exchange declare เป็น `ExchangeKind::Topic` (ถ้ายังไม่ใช่) และใช้ `#` ใน binding pattern ตามที่อธิบายในหัวข้อ 82.2 โครง binding ของ `analytics-service`:
+   ```rust
+   channel.queue_bind(
+       "analytics.all_booking_events", "booking.events", "booking.#",
+       QueueBindOptions::default(), FieldTable::default(),
+   ).await?;
+   ```
+   ลองสั่ง publish ด้วย routing key `"booking.cancelled"` (ไม่มี queue ของ `notification-service` bind ตรงกับ key นี้เลย) แล้วยืนยันว่ามีแค่ `analytics-service` เท่านั้นที่ได้รับ log
+
+3. **(กลาง-ยาก)** implement idempotent consumer แบบเต็มรูปแบบตามแนวคิดหัวข้อ 82.5: เก็บ `event_id` ที่ประมวลผลไปแล้วไว้ใน `HashSet<Uuid>` (หรือถ้าอยากต่อยอด SQLx จาก Part 70-71 ให้เก็บในตาราง PostgreSQL `processed_events(event_id UUID PRIMARY KEY, processed_at TIMESTAMPTZ)` แทน เพื่อให้รอดจากการ restart ของ consumer เอง) แล้วจำลอง "at-least-once delivery" ด้วยการส่ง `event_id` เดียวกันเข้า queue สองครั้งซ้อน (publish ซ้ำตรง ๆ) พิสูจน์ว่า consumer ประมวลผล (พิมพ์ "ส่งอีเมล") แค่ครั้งเดียว ไม่ใช่สองครั้ง
+
+   *Hint*: จุดเช็ค `HashSet`/query ตาราง ต้องอยู่**ก่อน**การกระทำที่มีผลข้างเคียงจริงเสมอ (ก่อน `println!("ส่งอีเมล...")` ไม่ใช่หลัง) โครงคร่าว ๆ:
+   ```rust
+   fn handle(&self, event: &BookingCreated) {
+       let mut seen = self.processed_event_ids.lock().unwrap();
+       if seen.contains(&event.event_id) {
+           println!("event_id={} เคยประมวลผลไปแล้ว ข้าม", event.event_id);
+           return; // <-- ต้องเช็คและ return ก่อนถึงบรรทัดที่ "ส่งอีเมล" จริง
+       }
+       println!("ส่งอีเมลยืนยันให้ {}", event.customer_email);
+       seen.insert(event.event_id);
+   }
+   ```
+   ทดสอบด้วยการ publish `BookingCreated` ที่มี `event_id` เดียวกันสองครั้ง (เจตนา — จำลอง redelivery) แล้วนับว่า log "ส่งอีเมลยืนยัน" ปรากฏกี่ครั้ง (ควรได้ 1 ครั้งเท่านั้น)
+
+4. **(ยาก/ประยุกต์ใช้งานจริง)** ต่อยอดหัวข้อ 82.6 ให้เป็น retry-then-dead-letter pattern แบบสมบูรณ์: แทนที่จะ `nack(requeue: false)` ทันทีที่ parse ล้มเหลว ให้ consumer อ่าน custom header `x-retry-count` จาก `delivery.properties.headers()` ก่อน (ถ้าไม่มีให้ถือว่าเป็น 0) ถ้ายังน้อยกว่า 3 ให้ `basic_publish` message เดิมกลับเข้า queue เดิมอีกครั้งพร้อมเพิ่ม `x-retry-count` ขึ้นหนึ่ง แล้ว `ack` message เดิมทิ้ง (เทคนิค "manual requeue with counter" เพราะ `nack(requeue: true)` ธรรมดาไม่ให้เราแก้ header ระหว่างทาง) แต่ถ้าครบ 3 ครั้งแล้วให้ `nack(requeue: false)` เพื่อให้ dead-letter ไปที่ DLQ ที่ตั้งไว้ในหัวข้อ 82.6 จริง ๆ
+
+   *Hint*: ต้องสร้าง `FieldTable` ใหม่ทุกครั้งที่ republish (คัดลอก header เดิมมาแล้วแก้แค่ `x-retry-count`) เพราะ `BasicProperties`/headers เป็น immutable ต่อ message เดิมที่รับมา แก้ในตัวเดิมไม่ได้ โครงตรรกะ:
+   ```rust
+   let retry_count: i64 = delivery.properties.headers()
+       .as_ref()
+       .and_then(|h| h.inner().get("x-retry-count"))
+       .and_then(|v| v.as_long_long_int())
+       .unwrap_or(0);
+
+   if retry_count < 3 {
+       let mut new_headers = FieldTable::default();
+       new_headers.insert("x-retry-count".into(), AMQPValue::LongLongInt(retry_count + 1));
+       let props = BasicProperties::default().with_headers(new_headers);
+       channel.basic_publish("", queue_name, BasicPublishOptions::default(), &delivery.data, props)
+           .await?.await?;
+       delivery.ack(BasicAckOptions::default()).await?; // ack ตัวเดิม เพราะเรา republish เองแล้ว
+   } else {
+       delivery.nack(BasicNackOptions { requeue: false, ..Default::default() }).await?; // ครบ 3 ครั้ง -> DLQ จริง
+   }
+   ```
+   ทดสอบด้วย poison message เดิมจากหัวข้อ 82.6 แล้วยืนยันว่า retry ครบ 3 รอบก่อนจะไปโผล่ที่ DLQ จริง ๆ (ไม่ใช่ไปตั้งแต่ครั้งแรก)
 
 ## สรุป
 

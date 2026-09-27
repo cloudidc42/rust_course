@@ -151,6 +151,33 @@ async fn create_booking_handler(email_provider_is_down: bool) -> Result<&'static
 
 พูดง่าย ๆ คือ **message queue คือการสื่อสารระหว่างระบบ** ส่วน **background job คือการเลื่อนงานออกจาก request path ภายในระบบเดียว** ทั้งสองแนวคิดสามารถใช้ Redis เป็น backend ได้เหมือนกัน (และถ้าระบบคุณมี Redis สำหรับ message queue อยู่แล้วจาก Part 82 หรือใช้เป็น cache จาก Part 83 ก็สามารถใช้ instance เดียวกันทำ job queue ได้เลยโดยไม่ต้องตั้ง infrastructure ใหม่) แต่การออกแบบ (จำนวนผู้บริโภค, ความเข้มงวดของ schema, ใครเป็นเจ้าของ) ต่างกันโดยพื้นฐาน บทนี้จะโฟกัสที่กรณีง่ายกว่า: **ผู้ผลิตและผู้บริโภคของ job คือแอปเดียวกัน** เช่นเดียวกับ concept ของ "at-least-once delivery" และ "dead-letter queue" ที่ Part 82 สอนไว้ในบริบทข้ามระบบ — บทนี้จะนำแนวคิดเดียวกันมาใช้กับ job ภายในแอปเดียว ซึ่งเรียบง่ายกว่ามากเพราะไม่ต้องกังวลเรื่อง schema evolution ข้ามทีมหรือ consumer group หลายฝ่าย
 
+ความต่างนี้เห็นได้ชัดเจนที่สุดตรงจุดที่ว่า **"ใครสนใจผลลัพธ์"** ลองเทียบโค้ดสองแบบสำหรับ event เดียวกันคือ "booking ถูกยืนยันแล้ว":
+
+```rust
+// แบบ Message Queue (Part 82): publish event กลาง ๆ ที่ไม่รู้ว่าใครจะ subscribe บ้าง
+// อาจมี consumer หลายตัวจากหลายทีม/หลายภาษา ที่ subscribe เพิ่มเติมได้ในอนาคตโดยไม่ต้องแก้ผู้ publish
+async fn on_booking_confirmed_publish_event(booking_id: &str) {
+    let event = serde_json::json!({
+        "event_type": "booking.confirmed",
+        "booking_id": booking_id,
+        "occurred_at": chrono::Utc::now().to_rfc3339(),
+    });
+    // publish เข้า topic/exchange กลาง -- ผู้ publish ไม่รู้และไม่ควรรู้ว่ามีใคร subscribe อยู่บ้าง
+    // publish_to_message_broker("booking.confirmed", &event).await;
+    println!("publish event booking.confirmed สำหรับ {booking_id} (ไม่รู้ว่าใครจะ consume บ้าง)");
+}
+
+// แบบ Background Job (บทนี้): enqueue งานที่รู้ผู้รับตายตัวอยู่แล้วในโค้ดเดียวกัน
+// ไม่มี "ผู้ subscribe รายอื่น" เข้ามาแทรกได้ เพราะเป็นแค่การเลื่อนงานออกจาก request path
+// (SendBookingConfirmationEmail จะนิยามแบบเต็มในหัวข้อ 84.6 -- ตอนนี้แค่โฟกัสที่แนวคิด)
+async fn on_booking_confirmed_enqueue_job(booking_id: &str, _email: &str) {
+    // enqueue เข้าคิวที่รู้อยู่แล้วว่า worker ตัวไหนในแอปเดียวกันจะมาประมวลผล
+    println!("enqueue SendBookingConfirmationEmail สำหรับ {booking_id} (รู้ผู้ประมวลผลตายตัว)");
+}
+```
+
+ฟังก์ชันแรกไม่รู้และไม่ควรรู้ว่ามีใคร subscribe อยู่บ้าง (นั่นคือจุดแข็งของ pub/sub — เพิ่มผู้บริโภครายใหม่ได้โดยไม่ต้องแก้ผู้ publish) ส่วนฟังก์ชันที่สองรู้อยู่แล้วชัดเจนว่า job นี้จะถูกประมวลผลโดย worker ของแอปเดียวกันเท่านั้น ไม่มี "ผู้บริโภครายที่สาม" ที่จะโผล่มาแบบไม่คาดคิด — นี่คือความแตกต่างเชิงการออกแบบที่สำคัญกว่าความแตกต่างทางเทคนิค (ทั้งสองแบบ compile ผ่านและ serialize เป็น JSON เหมือนกันได้หมด) และเป็นตัวชี้วัดที่ดีที่สุดว่าควรเลือกแนวทางไหน: ถ้าต้องถามว่า "อนาคตจะมีใครอีกไหมที่ต้องรู้เรื่องนี้" แล้วคำตอบคือ "อาจจะมี" ให้เอียงไปทาง message queue แต่ถ้าคำตอบคือ "ไม่มีทาง มีแค่เราที่ต้องทำงานนี้ต่อ" background job แบบบทนี้ก็เพียงพอและเรียบง่ายกว่ามาก
+
 ### 84.3 วิธีที่ง่ายที่สุด: `tokio::spawn` แบบ Fire-and-Forget
 
 วิธีแรกที่นึกถึงได้ทันทีคือใช้ `tokio::spawn` ที่เรียนมาตั้งแต่ Part 48 — spawn task ส่งอีเมลไว้ แล้วตอบ response กลับไปโดยไม่รอ:
@@ -725,6 +752,48 @@ async fn main() {
 
 ข้อมูลนี้เพียงพอสำหรับทีม support หรือ engineer ที่ตรวจสอบทีหลัง: รู้ว่า booking ไหนได้รับผลกระทบ (`BK-9003`), error สุดท้ายคืออะไร, พยายามไปกี่ครั้ง, และล้มเหลวเมื่อไหร่ — สามารถเขียน admin endpoint หรือ CLI tool ที่อ่านจาก `FAILED_KEY` แล้วให้เลือก "ลอง enqueue ใหม่" (`LPUSH` กลับเข้า `QUEUE_KEY` พร้อม reset `attempts` เป็น 0) หรือ "ปิด case ทิ้ง" (`LREM` ออกจาก dead-letter list) ได้ตามความเหมาะสม จุดสำคัญคือ **job ที่ล้มเหลวถาวรไม่หายไปเงียบ ๆ เหมือนตอนใช้ `tokio::spawn`** แต่ถูกเก็บไว้ให้ตรวจสอบได้เสมอ
 
+ตัวอย่าง CLI tool ง่าย ๆ ที่ทีม support เรียกใช้เพื่อดูรายการ dead-letter ทั้งหมดโดยไม่ต้องเปิด `redis-cli` เอง (ส่วนการ requeue กลับเข้าคิวปล่อยไว้เป็นแบบฝึกหัดข้อ 4 ท้ายบท):
+
+```rust
+use redis::AsyncCommands;
+
+// เครื่องมือ admin เล็ก ๆ (จะรันเป็น CLI แยก หรือทำเป็น admin HTTP endpoint ก็ได้) สำหรับ
+// ทีม support ไล่ดู job ที่ตกไปอยู่ใน dead-letter list โดยไม่ต้องเปิด redis-cli เอง
+#[tokio::main]
+async fn main() {
+    let mut conn = get_conn().await;
+    let entries: Vec<String> = conn.lrange(FAILED_KEY, 0, -1).await.expect("LRANGE failed");
+
+    if entries.is_empty() {
+        println!("dead-letter list ว่างเปล่า -- ไม่มี job ที่ต้องตรวจสอบ");
+        return;
+    }
+
+    println!("พบ {} job ใน dead-letter list ที่ต้องตรวจสอบด้วยมือ:\n", entries.len());
+    for (i, raw) in entries.iter().enumerate() {
+        let parsed: serde_json::Value = serde_json::from_str(raw).expect("invalid dead-letter entry");
+        println!(
+            "[{}] booking_id={} final_error={} attempts_made={} failed_at={}",
+            i + 1,
+            parsed["job"]["payload"]["booking_id"],
+            parsed["final_error"],
+            parsed["attempts_made"],
+            parsed["failed_at"],
+        );
+    }
+}
+```
+
+รันจริงหลังจากมี job ตกเข้า dead-letter list จากตัวอย่างก่อนหน้า:
+
+```
+พบ 1 job ใน dead-letter list ที่ต้องตรวจสอบด้วยมือ:
+
+[1] booking_id="BK-9003" final_error="email provider timeout: connection reset after 30s" attempts_made=3 failed_at="02:28:04.272"
+```
+
+เครื่องมือแบบนี้เรียบง่ายมาก (อ่าน `LRANGE` แล้ว parse JSON ออกมาพิมพ์) แต่มีค่ามหาศาลในทางปฏิบัติ เพราะเปลี่ยน "ข้อมูลดิบใน Redis ที่มีแต่ engineer เข้าถึงได้" ให้กลายเป็นสิ่งที่ทีม support ใช้ตรวจสอบเองได้ทันทีโดยไม่ต้องรอ engineer ว่าง
+
 ### 84.11 Job Idempotency: ป้องกันผลข้างเคียงจากการประมวลผลซ้ำ
 
 Queue ที่เราสร้างด้วย `BRPOP` มีคุณสมบัติ **at-least-once delivery** เหมือนกับ message queue ใน Part 82 — หมายความว่า **job อาจถูกประมวลผลมากกว่าหนึ่งครั้งได้** ตัวอย่างสถานการณ์จริง: worker `BRPOP` ดึง job ออกมาจากคิวสำเร็จ (job หายจากคิวแล้ว ณ จุดนี้) แล้วเริ่มเรียก email provider จนส่งอีเมลสำเร็จ แต่**ก่อน**ที่ worker จะบันทึกผลหรือทำ cleanup ใด ๆ ต่อ — worker process ดันแครช (OOM, container ถูก kill, network partition) ถ้าเรามีระบบ monitoring ที่คอย re-enqueue job ที่ "ดูเหมือนไม่มีคนทำต่อ" (เช่น pattern "reliable queue" ที่ย้าย job ไปไว้ใน "processing list" ชั่วคราวระหว่างทำงาน แล้วถ้า worker ไม่ ack ภายในเวลาที่กำหนดก็ย้ายกลับเข้า queue หลัก) job ตัวเดิมก็จะถูกส่งไปให้ worker ตัวใหม่ประมวลผล**ซ้ำ**
@@ -1229,6 +1298,22 @@ async fn main() {
 มีรายละเอียดที่น่าสังเกตหนึ่งจุด: บรรทัด `[handler] enqueue job ... สำเร็จ` ที่ `39.201` ปรากฏขึ้น **หลัง** บรรทัด `[worker] ดึงงาน ... มาประมวลผล` ที่ `39.200` ทั้งที่ตามลำดับเหตุผลแล้ว การ `LPUSH` (จบใน `run_handler`) ต้องเกิดก่อนการ `BRPOP` จะดึงงานออกมาได้เสมอ — สิ่งที่เกิดขึ้นคือคำสั่ง `LPUSH` ใน Redis เสร็จสมบูรณ์ไปแล้วจริง (นั่นคือเหตุผลที่ worker ดึงงานออกมาได้) แต่ `println!` บรรทัดที่รายงานผลใน `run_handler` ถูกพิมพ์ทีหลัง เพราะ scheduler ของ tokio สลับไปรัน task ของ worker ก่อนที่ `run_handler` จะได้กลับมาทำงานบรรทัดถัดไปจาก `.await` — นี่คือบทเรียนสำคัญเชิงระบบ (ไม่ใช่แค่เชิง syntax): **ลำดับของ log ที่พิมพ์ออกมาไม่ได้สะท้อนลำดับเหตุการณ์จริงของระบบเสมอไปในโปรแกรม concurrent/distributed** ถ้าต้องการลำดับเหตุการณ์ที่แม่นยำ ต้องอ้างอิงจาก timestamp หรือ sequence number ที่บันทึกไว้ ณ จุดเกิดเหตุจริง ไม่ใช่จุดที่ log ถูกพิมพ์ ซึ่งเป็นเหตุผลที่ทุกตัวอย่างในบทนี้ใช้ `ts()` แนบไปกับทุกบรรทัดเสมอ
 
 นอกจากนี้ยังเห็นว่า cron cleanup job (`[cron] cleanup job: ...`) รันแทรกอยู่ระหว่างที่ worker กำลังทำงานอยู่ (ที่ `41.390` และ `45.401`) แสดงให้เห็นว่าทั้งสาม component — handler, worker, scheduler — ทำงานเป็นอิสระจากกันอย่างแท้จริงภายใน runtime เดียว: handler enqueue เสร็จแล้วก็จบไป (ในระบบจริงคือ HTTP response ถูกส่งกลับไปแล้ว), worker วนลูปรอ-ประมวลผล-รอ-... ไปเรื่อย ๆ จนกว่าจะไม่มีงานเข้ามาภายใน timeout ที่กำหนด, และ scheduler ก็ยิงงานตามตารางเวลาของตัวเองโดยไม่สนใจว่า handler หรือ worker กำลังทำอะไรอยู่ — นี่คือภาพรวมของระบบ background job ที่ทำงานได้จริงในเชิง production แม้จะย่อส่วนลงมาให้รันในโปรแกรมเดียวเพื่อการสาธิตก็ตาม
+
+### 84.17 Checklist สังเคราะห์: ก่อนเอา Background Job System ขึ้น Production
+
+ก่อนเอาระบบที่สร้างในบทนี้ไปใช้งานจริง ควรตรวจสอบทุกข้อต่อไปนี้ — แต่ละข้อโยงกลับไปหัวข้อที่อธิบายไว้แล้ว ใช้เป็น checklist ทวนก่อน deploy:
+
+- [ ] **งานที่จะ defer ไปเป็น background job ไม่ใช่ส่วนที่ผู้ใช้ต้องรอผลลัพธ์ทันที** (หัวข้อ 84.1) — ถ้าผู้ใช้ต้องเห็นผลลัพธ์ของงานนั้นในหน้าเดียวกันทันที (เช่น ยอดเงินในบัตรถูกตัดสำเร็จหรือไม่) งานนั้นไม่ควรเป็น background job
+- [ ] **ไม่มีจุดใดที่ error ของ background job ทำให้ transaction หลักที่สำเร็จแล้วถูกรายงานเป็น error** (หัวข้อ 84.1) — ตรวจสอบว่า `?` ของงานเบื้องหลังไม่ได้ผสานเข้ากับ error path ของ request หลัก
+- [ ] **Redis instance ที่ใช้เป็น queue เปิด persistence จริง** (`appendonly yes`, หัวข้อ 84.8) และแยกจาก instance ที่ใช้เป็น cache
+- [ ] **ทุก job มี `max_attempts` และ backoff ที่มี cap ค่าสูงสุด** (หัวข้อ 84.9) ไม่ปล่อยให้ retry ไม่มีที่สิ้นสุดหรือรอนานเกินสมควร
+- [ ] **มี dead-letter list หรือกลไกเทียบเท่าสำหรับ job ที่ล้มเหลวถาวร** (หัวข้อ 84.10) พร้อมทางเข้าตรวจสอบด้วยมือ (admin endpoint/CLI)
+- [ ] **ผลข้างเคียงที่สำคัญ (ส่งอีเมล, เก็บเงิน, ฯลฯ) มีการเช็ค idempotency ก่อนทำทุกครั้ง** (หัวข้อ 84.11) ไม่พึ่งว่า job จะถูกประมวลผลแค่ครั้งเดียวเสมอ
+- [ ] **Scheduled job ที่สำคัญพิจารณาแล้วว่า in-process scheduler พอหรือต้องใช้ OS-level cron/distributed lock** (หัวข้อ 84.12) โดยเฉพาะถ้า deploy หลาย instance
+- [ ] **Worker รองรับการ scale แนวนอน (หลาย instance) ได้โดยไม่ต้องเปลี่ยนโค้ด** (หัวข้อ 84.13) และปิดตัวแบบ graceful ไม่ตัดจบ job กลางคัน (หัวข้อ 84.14)
+- [ ] **Log ของแต่ละ job ผูก id ที่ค้นหาย้อนหลังได้** (หัวข้อ 84.15) เพื่อ debug ได้เร็วเมื่อลูกค้าร้องเรียน
+
+checklist นี้ไม่ใช่กฎเหล็กที่ต้องผ่านทุกข้อเสมอ (เช่น งานที่ไม่สำคัญมากอาจไม่ต้องมี dead-letter list ก็ได้) แต่เป็นจุดที่ควร**ตัดสินใจอย่างมีสติ**ว่าจะข้ามข้อไหนไปเพราะอะไร ไม่ใช่ข้ามไปเพราะไม่ได้นึกถึงเลย
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

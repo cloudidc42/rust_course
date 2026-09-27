@@ -243,6 +243,49 @@ PostgreSQL มี **window function** ที่แก้ปัญหานี้
 
 **ย้ำเรื่อง `ORDER BY`** (ตามที่ Part 70 หัวข้อ 70.6 เตือนไว้แล้ว): `LIMIT`/`OFFSET` ยังต้องมี `ORDER BY` ที่ชัดเจนและ**deterministic** เสมอ (เช่น sort ตาม `id` ที่ไม่ซ้ำกัน ไม่ใช่ sort ตาม column ที่มีค่าซ้ำได้อย่าง `category` เพียว ๆ ที่ไม่การันตีลำดับภายใน category เดียวกัน) — ไม่อย่างนั้นหน้าที่ 1 กับหน้าที่ 2 อาจมีข้อมูลซ้ำหรือขาดหายได้ ยิ่งสำคัญขึ้นเมื่อรวมกับ `COUNT(*) OVER()` เพราะ error เชิง pagination แบบนี้จะไม่มีอาการอะไรที่ compiler หรือ SQLx ช่วยจับให้ได้เลย เป็น logic bug ล้วน ๆ ที่ต้องอาศัย test ที่ครอบคลุมเท่านั้น
 
+**ข้อจำกัดของ `LIMIT`/`OFFSET` ที่ควรรู้ก่อนใช้กับตารางขนาดใหญ่มาก**: `OFFSET` บอก PostgreSQL ให้ "อ่านแล้วข้าม" แถวที่ถูก skip ทุกแถวก่อนถึงหน้าที่ต้องการจริง — หน้าที่ 1 (`OFFSET 0`) เร็วมากเสมอ แต่หน้าที่ 10,000 (`OFFSET 100000` ถ้า page size คือ 10) ต้องอ่านผ่าน 100,000 แถวก่อน แม้จะไม่คืนแถวเหล่านั้นออกมาก็ตาม ยิ่งหน้าลึกเท่าไรยิ่งช้าลงเป็นเส้นตรง — Part 70 ทิ้งท้ายไว้ว่ามีเทคนิคที่ดีกว่าเรียกว่า **keyset/cursor-based pagination** ในหัวข้อถัดไปจะลงรายละเอียดพร้อมโค้ดจริง
+
+#### Keyset Pagination: ทางเลือกสำหรับตารางขนาดใหญ่มาก
+
+แนวคิดคือใช้ **ค่าของแถวสุดท้ายในหน้าก่อนหน้า** (โดยทั่วไปคือ `id` หรือคอลัมน์ที่ sort อยู่ ไม่ซ้ำกัน) เป็น "คีย์อ้างอิง" (cursor) แทนการนับ offset เป็นตัวเลข — `WHERE id > $last_seen_id LIMIT $n` แทน `OFFSET` ตรง ๆ:
+
+```rust
+#[derive(Debug, sqlx::FromRow)]
+struct BookKeyset {
+    id: i64,
+    title: String,
+}
+
+// keyset/cursor-based pagination: ใช้ WHERE id > $last_seen_id แทน OFFSET
+// ประสิทธิภาพคงที่ไม่ว่าจะอยู่หน้าไหน (ไม่ต้องอ่านข้ามแถวที่ถูก skip เหมือน OFFSET)
+async fn list_after_cursor(
+    pool: &sqlx::PgPool,
+    after_id: i64,
+    limit: i64,
+) -> Result<Vec<BookKeyset>, sqlx::Error> {
+    sqlx::query_as!(
+        BookKeyset,
+        "SELECT id, title FROM books WHERE id > $1 ORDER BY id ASC LIMIT $2",
+        after_id,
+        limit
+    )
+    .fetch_all(pool)
+    .await
+}
+```
+
+ผู้เขียนรันจริงเรียกดูสามหน้าติดกัน โดยแต่ละหน้าใช้ `id` สุดท้ายของหน้าก่อนเป็น cursor สำหรับหน้าถัดไป:
+
+```
+page1: [(1, "Seed Book 0"), (2, "Seed Book 1"), (3, "Seed Book 2")]
+page2 (after id=3): [(4, "Seed Book 3"), (5, "Seed Book 4"), (6, "Seed Book 5")]
+page3 (after id=6): [(7, "Seed Book 6"), (8, "Seed Book 7"), (9, "Seed Book 8")]
+```
+
+**เหตุผลที่เร็วกว่า `OFFSET` สำหรับตารางใหญ่**: `WHERE id > $1 ORDER BY id LIMIT $2` ใช้ประโยชน์จาก **index บน `id`** (btree ของ primary key ที่มีอยู่แล้วเสมอ) โดยตรง — PostgreSQL หา "จุดที่ id มากกว่า cursor" ผ่าน index ได้ในเวลาคงที่ (ไม่ขึ้นกับว่าอยู่หน้าที่เท่าไร) แล้วอ่านต่อไปแค่ `limit` แถว จบ ในขณะที่ `OFFSET 100000 LIMIT 10` ต้อง**อ่านผ่าน**ทั้ง 100,000 แถวก่อนจะถึงแถวที่ 100,001 ที่ต้องการจริง
+
+**ข้อแลกเปลี่ยนที่ต้องรู้**: keyset pagination **ไม่รองรับการ "กระโดดไปหน้าที่ N โดยตรง"** ได้ตามธรรมชาติ (เช่น "ไปหน้า 50 เลย" โดยไม่ต้องเปิดหน้า 1-49 ก่อน) เพราะ cursor ต้องมาจากแถวสุดท้ายของหน้าก่อนหน้าเสมอ (ต่างจาก `OFFSET` ที่คำนวณ `offset = page_size * page_number` ได้ตรง ๆ ไม่ว่าจะข้ามไปหน้าไหนก็ตาม) เหมาะกับ UI แบบ "infinite scroll"/"โหลดเพิ่มเติม" ที่ผู้ใช้เลื่อนไปข้างหน้าเรื่อย ๆ มากกว่า UI แบบตัวเลขหน้าที่กระโดดไปมาได้ (pagination ที่มีเลขหน้าให้กดตรง ๆ ยังต้องพึ่ง `OFFSET`/`COUNT(*) OVER()` ตามหัวข้อก่อนหน้าอยู่ดี) — เลือกใช้ตามที่ UX ของระบบต้องการจริง ไม่ใช่เลือกเพราะ "เร็วกว่า" เพียงอย่างเดียว และไม่มี `COUNT(*) OVER()` ที่ใช้คู่กับ keyset pagination ได้ตรง ๆ แบบเดียวกับ `OFFSET` (เพราะไม่มี concept ของ "หน้าที่ N" ที่ต้องรู้จำนวนรวมล่วงหน้า) ถ้าต้องการทั้งจำนวนรวมและ infinite scroll พร้อมกัน มักต้องยิง query แยกสำหรับจำนวนรวม (ยอมรับ round-trip ที่สองเป็นข้อแลกเปลี่ยน)
+
 ### 71.4 Batch Operations: Bulk Insert ด้วย `UNNEST` เทียบกับ Insert ทีละแถว
 
 #### ทำไม insert ทีละแถวในลูปถึงช้า
@@ -611,6 +654,42 @@ FROM _sqlx_migrations ORDER BY version;
 
 ตารางนี้คือ**แหล่งความจริงเดียว** (single source of truth) ว่าฐานข้อมูลตัวนี้อยู่ที่ "เวอร์ชัน schema" ไหนแล้ว — เครื่องมือ deploy อัตโนมัติ (CI/CD) มักเช็คตารางนี้ก่อนตัดสินใจว่าต้องรัน migration ตัวไหนเพิ่มก่อน deploy เวอร์ชันใหม่ของแอป
 
+#### Migration ที่ปลอดภัยตอน Deploy หลาย Instance พร้อมกัน: แนวคิด Expand-Contract
+
+Part 70 หัวข้อ 70.5 เตือนไว้แล้วว่าห้ามแก้ไฟล์ migration เก่าที่ apply ไปแล้ว — หัวข้อนี้ไปอีกขั้น: สถานการณ์ที่ระบบจริง deploy แอปพร้อมกันหลาย instance (rolling deployment ที่ instance เก่าและใหม่รันพร้อมกันชั่วครู่ระหว่าง deploy) migration ที่ "ดูปลอดภัย" อาจทำให้ instance เวอร์ชันเก่าที่ยังรันอยู่ระหว่าง deploy **พังกลางอากาศ** ได้ ถ้าออกแบบไม่ดี
+
+ลองนึกภาพสถานการณ์ที่ต้อง**เปลี่ยนชื่อคอลัมน์** `author` เป็น `author_name` (เหตุผลสมมติ: ทีมต้องการชื่อที่สื่อความหมายชัดเจนกว่า) วิธีที่ **ผิด** คือทำในคำสั่งเดียว:
+
+```sql
+-- ❌ อันตรายมากถ้า deploy แบบ rolling — instance เวอร์ชันเก่าที่ยังรันโค้ดเดิมจะ query "author" ไม่เจอทันที
+ALTER TABLE books RENAME COLUMN author TO author_name;
+```
+
+ปัญหาคือ: migration รันเสร็จเร็วมาก (metadata operation ล้วน ๆ) แต่การ deploy โค้ดใหม่ของแอปไปยังทุก instance **ใช้เวลานานกว่านั้น** (rolling deployment ทยอย deploy instance ทีละตัว ไม่ใช่ deploy ทุกตัวพร้อมกันในเสี้ยววินาที) — ในช่วงเวลาที่ migration รันเสร็จไปแล้ว แต่ยังมี instance เก่าที่รันโค้ดที่ query `SELECT author FROM books` อยู่ (โค้ดเวอร์ชันเก่าที่ยังไม่ได้ deploy ทับ) instance เหล่านั้นจะเจอ error `column "author" does not exist` ทันที ทั้งที่โค้ดของมันเองไม่ได้เปลี่ยนอะไรเลย
+
+**แนวคิด Expand-Contract** (บางครั้งเรียก "parallel change") แก้ปัญหานี้ด้วยการแบ่งงานเป็นหลาย migration/deploy step ที่**ทับซ้อนกันได้อย่างปลอดภัย**:
+
+1. **Expand**: migration แรกแค่**เพิ่ม**คอลัมน์ใหม่ (`author_name`) โดยไม่ลบของเก่า — โค้ดเวอร์ชันเก่ายัง query `author` ได้ตามปกติ ไม่กระทบอะไรเลย
+   ```sql
+   ALTER TABLE books ADD COLUMN author_name TEXT;
+   UPDATE books SET author_name = author; -- copy ข้อมูลเดิมมาไว้ในคอลัมน์ใหม่
+   ```
+2. **Migrate (deploy โค้ด)**: deploy โค้ดเวอร์ชันใหม่ที่ **เขียนเข้าทั้งสองคอลัมน์พร้อมกัน** (`author` และ `author_name`) แต่**อ่านจากคอลัมน์ใหม่** — ระหว่างนี้ไม่ว่า instance ไหนจะรันเวอร์ชันเก่าหรือใหม่ ข้อมูลทั้งสองคอลัมน์ยังตรงกันเสมอ (เวอร์ชันเก่าเขียนแค่ `author` แต่มี `UPDATE ... SET author_name = author` เดิมคอยซิงค์อยู่แล้วในบางกรณี หรือใช้ trigger ช่วยซิงค์ระหว่างสองคอลัมน์ชั่วคราวถ้าจำเป็น)
+3. **Contract**: หลังจากมั่นใจว่า instance ทุกตัวถูก deploy เป็นเวอร์ชันใหม่หมดแล้ว (ไม่มี instance เก่าเหลืออยู่เลย) ค่อยสร้าง migration ที่**ลบ**คอลัมน์เก่าทิ้ง
+   ```sql
+   ALTER TABLE books DROP COLUMN author;
+   ```
+
+**หลักการที่ต้องจำ**: ทุก migration ที่ **ลบ/เปลี่ยนชื่อ/เปลี่ยน type** ของคอลัมน์ที่โค้ดเวอร์ชันปัจจุบันยังใช้อยู่ ควรถูกมองว่า**อันตรายต่อ rolling deployment เสมอ** จนกว่าจะพิสูจน์ได้ว่าไม่มี instance เก่าเหลืออยู่แล้วจริง ๆ — migration ที่ปลอดภัยที่สุดคือ migration ที่**เพิ่มสิ่งใหม่โดยไม่แตะของเก่า** (`ADD COLUMN` แบบที่หัวข้อนี้ทำกับ `category`/`metadata` ก็เป็นตัวอย่างที่ปลอดภัยอยู่แล้วในความหมายนี้ เพราะไม่กระทบโค้ดเก่าที่ไม่รู้จักคอลัมน์ใหม่เลย มันแค่ไม่เห็นคอลัมน์นั้นเฉย ๆ ไม่ error) ระบบขนาดเล็กที่ deploy แบบหยุดแล้วเริ่มใหม่ทั้งระบบ (ไม่ใช่ rolling) อาจไม่ต้องกังวลเรื่องนี้มากเท่าระบบขนาดใหญ่ที่ downtime เป็นศูนย์เป็นข้อกำหนดสำคัญ — แต่ควรรู้จักแนวคิดนี้ไว้ก่อนที่ระบบจะโตไปถึงจุดที่ rolling deployment กลายเป็นเรื่องจำเป็น
+
+#### เมื่อไรควรใช้ Migration แบบไม่ Reversible (ไม่ใส่ `-r`)
+
+Part 70 หัวข้อ 70.5 แนะนำใส่ `-r` เสมอเพื่อได้ทั้ง `up.sql`/`down.sql` — แต่ในทางปฏิบัติมี migration บางประเภทที่**เขียน `down.sql` ที่ถูกต้องจริง ๆ ไม่ได้เลย** เช่น migration ที่ลบข้อมูลบางแถวออกอย่างถาวร (`DELETE FROM books WHERE category = 'deprecated'`) — ถ้าเขียน `down.sql` เป็น `-- ไม่สามารถย้อนกลับได้` เฉย ๆ ก็ไม่ต่างจากไม่มี `down.sql` เลยในทางปฏิบัติ (แค่หลอกตัวเองว่ามี rollback path) กรณีแบบนี้การสร้าง migration แบบไม่ reversible ตรง ๆ (ไม่ใส่ `-r` ได้ไฟล์เดียวคือ `<timestamp>_<name>.sql`) สื่อความหมายตรงกว่า: **"migration นี้ไม่มีทางย้อนกลับอัตโนมัติได้ ถ้าต้อง rollback ต้อง restore จาก backup เท่านั้น"** ทีมที่เห็นไฟล์แบบนี้ในโค้ดจะรู้ทันทีว่าต้องระวังเป็นพิเศษก่อน deploy (เช่น backup ฐานข้อมูลก่อนรัน migration นี้เสมอ) แทนที่จะเข้าใจผิดว่ามี safety net จาก `down.sql` ที่ใช้งานไม่ได้จริงรออยู่
+
+#### การ Squash Migration เมื่อมีจำนวนมากเกินไป
+
+โปรเจกต์ที่พัฒนามานานหลายปีอาจสะสม migration ไฟล์หลักร้อยไฟล์ — การรัน migration ทั้งหมดตั้งแต่ไฟล์แรกทุกครั้งที่ตั้งฐานข้อมูลใหม่ (เช่น environment สำหรับ test/CI ที่สร้างขึ้นใหม่บ่อย ๆ) ใช้เวลานานขึ้นเรื่อย ๆ ตามจำนวนไฟล์ที่สะสม แนวทางที่ทีมใหญ่ใช้กันคือ **squash migration**: รวม migration เก่าจำนวนมากที่ apply ไปแล้วในทุก environment ที่สำคัญ (ไม่มี environment ไหนเหลือค้างที่ยังไม่ได้ apply ไฟล์เก่าเหล่านั้นแล้ว) ให้เหลือเป็นไฟล์เดียวที่สร้าง schema สุดท้ายตรง ๆ (เหมือน `pg_dump --schema-only` ของ schema ปัจจุบัน) แล้ว**ลบไฟล์เก่าที่ถูก squash ไปทั้งหมด** — SQLx เองไม่มีคำสั่ง squash อัตโนมัติให้ (ต่างจากบางเครื่องมือ migration ของภาษาอื่น) ต้องทำด้วยมือ: `pg_dump --schema-only` ฐานข้อมูลที่มี schema ล่าสุด แล้ววาง SQL ที่ได้ในไฟล์ migration ใหม่ไฟล์เดียว จากนั้นต้อง**อัปเดตตาราง `_sqlx_migrations` เองด้วยมือ**ในทุกฐานข้อมูลที่มีอยู่แล้ว (insert แถวที่บอกว่า migration ใหม่ตัวนี้ "ถูก apply แล้ว" พร้อม checksum ที่ตรงกับไฟล์ใหม่) เพื่อไม่ให้ `sqlx migrate run` พยายามรันไฟล์ใหม่ตัวนี้ทับฐานข้อมูลที่มี schema นี้อยู่แล้ว — เป็นกระบวนการที่ต้องระวังมาก ควรทำเฉพาะเมื่อจำนวนไฟล์ migration เริ่มเป็นปัญหาจริงจังต่อความเร็วในการตั้ง environment ใหม่เท่านั้น ไม่ใช่ทำเป็นประจำ
+
 ### 71.7 Connection Pool Tuning เชิงลึก: ผูกกับ Tokio Task Concurrency
 
 Part 70 หัวข้อ 70.3/70.11 สอน `PgPoolOptions` พื้นฐานและพิสูจน์พฤติกรรม pool exhaustion (รอจนกว่าจะมี connection ว่างหรือ timeout) ไปแล้ว — หัวข้อนี้ตอบคำถามที่ทีมจริงต้องเจอบ่อยที่สุด: **"ตั้ง `max_connections` เท่าไรดี และทำไม API ของฉันถึงเริ่ม timeout พร้อมกันหมดตอน traffic สูงขึ้น?"**
@@ -721,6 +800,24 @@ println!("คืน 2 connection แล้ว: size={} num_idle={}", pool.size()
 
 สังเกตว่า `size` **ไม่ลดลง**เมื่อคืน connection (ยังคงเป็น `3` ตลอด — connection ที่เปิดแล้วจะถูกเก็บไว้ใน pool รอใช้ซ้ำ ไม่ปิดทิ้งทันทีที่คืน ตามหลักการของ pool ที่ Part 70 อธิบายไว้) ในขณะที่ `num_idle` เปลี่ยนตามจำนวน connection ที่**ว่าง ณ ขณะนั้น**จริง — สอง metric นี้คือจุดเริ่มต้นที่ดีที่สุดสำหรับ observability ของ pool ในระบบจริง: expose ค่าทั้งสองผ่าน endpoint `/metrics` (เช่นในรูปแบบ Prometheus) แล้วตั้ง alert เมื่อ `num_idle` เท่ากับ `0` ต่อเนื่องนานเกินเกณฑ์ที่ยอมรับได้ — จะรู้ปัญหา pool exhaustion **ก่อน**ที่ client จะเริ่ม timeout จริง ไม่ต้องรอให้ user ร้องเรียนก่อนแล้วมาสืบย้อนหลัง
 
+#### สูตรประมาณค่า `max_connections` ที่เหมาะสม: Little's Law
+
+คำถาม "ควรตั้ง `max_connections` เท่าไร" มีสูตรประมาณเชิงคณิตศาสตร์ที่ช่วยให้ไม่ต้องเดามั่ว ๆ — ทฤษฎีแถวคอย (queueing theory) มีกฎพื้นฐานที่เรียกว่า **Little's Law**: `L = λ × W` โดย `L` คือจำนวนงานเฉลี่ยที่อยู่ในระบบพร้อมกัน (ในที่นี้คือจำนวน connection ที่ต้องใช้พร้อมกันโดยเฉลี่ย) `λ` (แลมบ์ดา) คือ throughput หรืออัตราการมาถึงของงาน (จำนวน query ต่อวินาที) และ `W` คือเวลาเฉลี่ยที่งานหนึ่งชิ้นอยู่ในระบบ (เวลาเฉลี่ยที่ query หนึ่งครั้งใช้ ตั้งแต่ acquire connection จนถึงคืนกลับ pool)
+
+ลองใช้ตัวเลขจริงจากหัวข้อ 71.11: query แบบ `JOIN` เดียวที่วัดได้ **1.10ms** ต่อครั้ง ถ้าระบบต้องรองรับ **1,000 query ต่อวินาที** (`λ = 1000`, `W = 0.0011` วินาที):
+
+```
+L = λ × W = 1000 × 0.0011 = 1.1
+```
+
+แปลว่าโดยเฉลี่ยต้องมี connection ที่ถูกใช้งานพร้อมกันจริง ๆ แค่ **~1.1 ตัว** ณ เวลาใดเวลาหนึ่ง — `max_connections = 10` ก็เหลือเฟือมากสำหรับ throughput ระดับนี้ (มี margin รองรับ traffic spike ได้สบาย) แต่ถ้า query เดียวกันช้าลงเป็น **50ms** ต่อครั้ง (เช่นเกิด N+1 ตามหัวข้อ 71.11 ที่ทำให้ query แต่ละครั้งใช้เวลานานขึ้น หรือ query ที่ขาด index) ที่ throughput เท่าเดิม:
+
+```
+L = 1000 × 0.050 = 50
+```
+
+ตอนนี้ต้องมี connection พร้อมกันเฉลี่ย **~50 ตัว** — ถ้า `max_connections` ยังตั้งไว้ที่ 10 เหมือนเดิม (ตามค่าที่คำนวณไว้ตอน query ยังเร็ว) pool จะเข้าสู่สภาวะ**เต็มค้างถาวร**ทันที (`L` ที่ต้องการมากกว่า `max_connections` ที่มีถึง 5 เท่า) เกิดอาการ timeout พร้อมกันตามที่อธิบายไว้ข้างบนพอดี — **นี่คือสิ่งที่ Little's Law เผยให้เห็นชัดเจน**: ปัญหา pool exhaustion มักไม่ได้มาจาก "traffic สูงขึ้นกะทันหัน" อย่างเดียว แต่มาจาก **`W` (เวลาต่อ query) เพิ่มขึ้น** ควบคู่ไปด้วยบ่อยครั้งกว่าที่คิด (ตรงกับขั้นตอนวินิจฉัยข้อ 2 ที่อธิบายไว้ข้างบน) — สูตรนี้ไม่ได้ให้ตัวเลขที่แม่นยำ 100% สำหรับ production จริง (ยังไม่รวมความแปรปรวนของ traffic แบบ burst, distribution ของเวลา query ที่ไม่ใช่ค่าคงที่เดียว ฯลฯ) แต่เพียงพอสำหรับเป็น**จุดเริ่มต้นประมาณค่า**ที่ดีกว่าการเดาล้วน ๆ มาก และช่วยอธิบายเหตุผลว่าทำไม "traffic เท่าเดิม แต่ query ช้าลงนิดเดียว" ถึงทำให้ pool ที่เคยพอเพียงกลายเป็นไม่พอได้ทันที
+
 ### 71.8 Prepared Statement Caching: ลด Overhead ของการ `PREPARE` ซ้ำ
 
 #### กลไก statement cache ของ SQLx
@@ -824,6 +921,33 @@ producer: ส่ง NOTIFY แล้ว
 
 ด้วยข้อจำกัดเหล่านี้ `LISTEN`/`NOTIFY` **ไม่ใช่ตัวแทนของ message queue เต็มรูปแบบ** (เช่น RabbitMQ, Kafka, หรือ SQS ที่ Part 82 จะสอนในหลักสูตรต่อไป) ที่ต้องมี delivery guarantee, persistent buffer, retry mechanism, และ ordering ที่เข้มงวดกว่านี้มาก — ควรมองมันเป็น**ทางเลือกที่เบากว่ามาก**สำหรับกรณีง่าย ๆ ที่ยอมรับได้ว่าข้อความอาจหายได้บ้างเป็นบางครั้ง (best-effort) โดยไม่ต้องเพิ่ม infrastructure ใหม่เข้าระบบ (ไม่ต้องตั้ง message broker แยก ใช้ PostgreSQL ที่มีอยู่แล้วได้ทันที) — เมื่อความต้องการซับซ้อนขึ้น (ต้องการันตีการส่งถึง, ต้องรองรับ throughput สูงมาก, ต้องมี consumer group หลายตัวแบ่งงานกัน) ควรย้ายไปใช้ message queue จริงตามที่ Part 82 จะสอน
 
+#### ตัวอย่างประยุกต์: ส่ง Notification ต่อไปยัง Client ผ่าน SSE (ระดับแนวคิด)
+
+สถานการณ์ที่ใช้ `PgListener` ได้ประโยชน์จริงในระบบห้องสมุด/ตั๋วคือการแจ้ง client ที่เปิดหน้าเว็บทิ้งไว้ (ผ่าน Server-Sent Events หรือ WebSocket) ว่า "มีการยืมหนังสือเกิดขึ้นใหม่" แบบ real-time โดยไม่ต้องให้ client poll ถามซ้ำ ๆ — โครงร่างแนวคิด (ไม่ลงรายละเอียด SSE เต็มรูปแบบ เพราะเกินขอบเขตบทนี้ แต่ควรเห็นภาพว่าประกอบกันอย่างไร):
+
+```rust
+// แนวคิดคร่าว ๆ: task พื้นหลังหนึ่งตัวคอย listen แล้ว broadcast ต่อให้ทุก SSE connection ที่เปิดอยู่
+async fn notification_forwarder(pool: sqlx::PgPool, tx: tokio::sync::broadcast::Sender<String>) {
+    let mut listener = PgListener::connect_with(&pool).await.expect("connect listener");
+    listener.listen("borrow_events").await.expect("listen");
+
+    loop {
+        match listener.recv().await {
+            Ok(notification) => {
+                // ส่งต่อ payload ให้ทุกคนที่ subscribe ผ่าน broadcast channel (Part 39/48 เรื่อง channel)
+                let _ = tx.send(notification.payload().to_string());
+            }
+            Err(e) => {
+                eprintln!("listener error: {e}, กำลังพยายามใหม่...");
+                // ในโค้ดจริงควรมี retry/reconnect logic ที่นี่ — connection ของ listener อาจหลุดได้
+            }
+        }
+    }
+}
+```
+
+`tokio::sync::broadcast::Sender` (ตาม Part 39/48 ที่สอนเรื่อง channel สำหรับสื่อสารข้าม task) รับ payload จาก `PgListener` แล้วส่งต่อให้ทุก SSE handler ที่ subscribe ไว้พร้อมกัน — แต่ละ handler เพียงแค่ `tx.subscribe()` แล้ว loop ส่งข้อมูลที่ได้กลับไปยัง client ของตัวเองผ่าน HTTP response แบบ streaming — สถาปัตยกรรมนี้ทำให้ **connection ของ `PgListener` มีแค่ตัวเดียวทั้งระบบ** (ไม่ว่าจะมี client เชื่อมต่ออยู่กี่คนก็ตาม) เพราะ broadcast ทำหน้าที่กระจายต่อในระดับ in-memory ของ Rust process เอง ไม่ต้องเปิด `PgListener` ใหม่ต่อ client แต่ละคน (ซึ่งจะเข้าเงื่อนไขกับดักที่ 6 ท้ายบทถ้าทำแบบนั้น — connection รั่วไหลสะสมที่ไม่ถูกนับใน `max_connections`)
+
 ### 71.10 Testing กับ Transaction: Pattern "เปิด Transaction แล้วไม่ Commit"
 
 #### ทวนจาก Part 70: `#[sqlx::test]` ทำอะไร และมีข้อจำกัดอะไร
@@ -917,6 +1041,46 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 **เลือกใช้แนวทางไหน**: `#[sqlx::test]` (Part 70) เหมาะเป็นค่า default เพราะ setup น้อยที่สุดและ isolation แน่นอนที่สุด (ไม่มีทางที่ test หนึ่งจะเห็นข้อมูลของอีก test ได้เลย เพราะเป็นฐานข้อมูลคนละตัวกันจริง ๆ) — pattern "transaction ไม่ commit" ในหัวข้อนี้เหมาะสำหรับทีมที่ test suite ใหญ่มากจนความเร็วรวมของการรัน test กลายเป็นปัญหาจริงจัง และยอมรับความซับซ้อนที่เพิ่มขึ้นเล็กน้อย (ต้องเขียน `pool.begin()`/ส่ง `&mut *tx` ให้ทุก query ในทุก test เอง ตามกับดักข้อ 2 ของ Part 70 ที่เตือนไว้เรื่องการสลับ `&pool`/`&mut *tx` ผิดที่) เพื่อแลกกับความเร็วที่มากกว่า
 
+#### ลดโค้ดซ้ำ: Helper Function สำหรับเปิด Transaction ทดสอบ
+
+การเขียน `pool.begin().await.unwrap()` ซ้ำทุก test function เป็น boilerพลेตที่รำคาญถ้ามี test จำนวนมาก — helper function ง่าย ๆ ช่วยลดความซ้ำซ้อนนี้ได้ (ยังไม่ถึงขั้นต้องเขียน custom attribute macro ของตัวเอง เพียงแค่ฟังก์ชันช่วยธรรมดา):
+
+```rust
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+
+/// เปิด pool (ใช้ pool เดียวกันได้ทุก test เพราะ transaction ที่ไม่ commit ไม่ทิ้งผลกระทบ)
+/// แล้วเปิด transaction ให้พร้อมใช้ในบรรทัดเดียว — ไม่ต้อง unwrap() ซ้ำทุกที่
+async fn begin_test_tx() -> Transaction<'static, Postgres> {
+    static POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+    let pool = POOL
+        .get_or_init(|| async {
+            PgPoolOptions::new()
+                .max_connections(5)
+                .connect("postgres://postgres:postgres@127.0.0.1:5432/part71_scratch")
+                .await
+                .expect("connect failed")
+        })
+        .await;
+    pool.begin().await.expect("begin tx failed")
+}
+
+#[tokio::test]
+async fn example_using_helper() {
+    let mut tx: Transaction<'_, Postgres> = begin_test_tx().await;
+    sqlx::query!(
+        "INSERT INTO books (isbn, title, author, total_copies, available_copies, category)
+         VALUES ($1, $2, $3, 1, 1, 'tx-test')",
+        "978-txhelper-001", "Helper Test Book", "Author",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    // ไม่ commit — tx ถูก drop ตอนจบ scope ก็ rollback ให้อัตโนมัติ
+}
+```
+
+**อธิบาย**: `tokio::sync::OnceCell` (ตาม Part 39/48 เรื่องการแชร์ state ข้าม task อย่างปลอดภัย) เปิด pool เพียง**ครั้งเดียว**ตลอดทั้ง test binary (ไม่ว่าจะมี test function กี่ตัวเรียก `begin_test_tx()` ก็ตาม) แล้ว pool ตัวนั้นถูกใช้ซ้ำข้าม test — เพราะแต่ละ test ทำงานใน transaction ของตัวเองที่ไม่เคย commit การแชร์ pool เดียวกันจึงไม่ทำให้ test ชนกันเลย (ตรงกันข้ามกับการแชร์ pool แบบเดียวกันถ้าไม่มี transaction คั่นไว้ ซึ่งจะชนกันแน่นอน) — pattern นี้ทำให้แต่ละ test function สั้นลงมาก เหลือแค่ `let mut tx = begin_test_tx().await;` บรรทัดแรก แล้วเขียน logic ของ test ต่อได้เลยโดยไม่ต้องยุ่งกับ boilerplate การเปิด pool ซ้ำทุกครั้ง
+
 ### 71.11 ปัญหา N+1 Query: พิสูจน์ด้วยตัวเลขจริง
 
 #### โค้ดที่ "ดูปกติ" แต่ซ่อนปัญหาประสิทธิภาพร้ายแรง
@@ -1002,6 +1166,56 @@ async fn list_batch_any(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
 ผู้เขียนทดสอบจริงได้ `batch ANY(): 2 queries คงที่` — สอง query นี้ไม่ขึ้นกับจำนวนแถวของ `borrow_records` เลย (ต่างจาก N+1 ที่ query ที่สองคูณตามจำนวนแถว) แม้จะไม่ดีเท่า `JOIN` เดียวตรง ๆ (ที่เหลือแค่ 1 query) แต่ก็ยังดีกว่า N+1 อย่างมหาศาล และเป็นทางเลือกที่ใช้ได้ในสถานการณ์ที่ `JOIN` ทำไม่ได้จริง ๆ
 
 **หลักการที่ต้องจำและตรวจสอบทุกครั้งที่เห็น loop ที่มี `.await` ข้างใน**: ทุกครั้งที่เห็นโค้ดที่มี `for`/`while` loop ที่ข้างในมีการเรียก query (`.fetch_one()`, `.fetch_all()`, `.execute()`) **ให้สงสัยไว้ก่อนว่าอาจเป็น N+1** — ถามตัวเองว่า "งานนี้รวมเป็น query เดียวได้ไหมด้วย `JOIN`" ก่อนเสมอ ถ้าทำไม่ได้จริง ๆ ให้ถามต่อว่า "รวบรวมเงื่อนไขทั้งหมดแล้วยิงเป็น batch เดียวด้วย `= ANY($1)` ได้ไหม" — ทั้งสองทางเลือกนี้ควรเป็นค่า default ในหัวเสมอเมื่อเจอ pattern "query ในลูป" ไม่ใช่สิ่งที่นึกถึงทีหลังตอน performance มีปัญหาแล้ว
+
+#### N+1 แบบ Aggregation: รูปแบบที่แนบเนียนกว่าเดิม
+
+N+1 ไม่ได้เกิดแค่กับการ "หารายละเอียด" ของแต่ละแถวเท่านั้น — อีกรูปแบบที่พบบ่อยไม่แพ้กันคือการ **นับ/สรุปข้อมูลที่เกี่ยวข้องทีละแถว** เช่น "หนังสือแต่ละเล่มถูกยืมไปแล้วกี่ครั้ง" ถ้าเขียนแบบวน loop นับทีละเล่ม:
+
+```rust
+// ❌ N+1 แบบ aggregation: หา book ทั้งหมดก่อน แล้ววน loop นับ borrow_records ของแต่ละเล่มทีละครั้ง
+async fn count_naive(pool: &sqlx::PgPool) -> Result<Vec<(i64, i64)>, sqlx::Error> {
+    let books = sqlx::query!("SELECT id FROM books ORDER BY id").fetch_all(pool).await?;
+    let mut results = Vec::with_capacity(books.len());
+    for b in books {
+        let count: i64 = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM borrow_records WHERE book_id = $1", b.id
+        )
+        .fetch_one(pool)
+        .await?
+        .unwrap_or(0);
+        results.push((b.id, count));
+    }
+    Ok(results)
+}
+```
+
+ทางแก้คือ `GROUP BY` ครั้งเดียว (ใช้ `LEFT JOIN` เพื่อให้หนังสือที่**ยังไม่เคยถูกยืมเลย**ยังปรากฏในผลลัพธ์ด้วย `count = 0` ไม่ใช่ถูกตัดออกไปแบบที่ `JOIN`/`INNER JOIN` ธรรมดาจะทำ):
+
+```rust
+// ✅ GROUP BY ครั้งเดียว: นับทุกเล่มพร้อมกันในคำสั่งเดียว
+async fn count_group_by(pool: &sqlx::PgPool) -> Result<Vec<(i64, i64)>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"SELECT b.id, COUNT(br.id) AS borrow_count
+           FROM books b
+           LEFT JOIN borrow_records br ON br.book_id = b.id
+           GROUP BY b.id
+           ORDER BY b.id"#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.borrow_count.unwrap_or(0))).collect())
+}
+```
+
+ผู้เขียนวัดจริงบนข้อมูล 40 เล่ม (แต่ละเล่มมี `borrow_records` เกี่ยวข้องหลายแถวตามที่ seed ไว้):
+
+```
+naive per-book count: 40 เล่ม, 41 queries, 24.49ms
+GROUP BY: 40 เล่ม, 1 query, 1.14ms
+speedup = 21.4x, query ลดจาก 41 เหลือ 1
+```
+
+ผลลัพธ์เดียวกันกับหัวข้อก่อนหน้าเป๊ะในเชิงรูปแบบ (41 queries เหลือ 1, เร็วขึ้น 21.4 เท่า) — ย้ำว่า N+1 ไม่ใช่แค่ "อย่าลืม join ตอน list ข้อมูล" เท่านั้น แต่เป็น**หลักการทั่วไป**ที่ต้องระวังทุกครั้งที่โค้ดต้อง "หาข้อมูลที่เกี่ยวข้องกับแต่ละแถว" ไม่ว่าจะเป็นรายละเอียดเต็ม ๆ หรือแค่ตัวเลขสรุปก็ตาม — คำตอบที่ถูกมักจะเป็น SQL aggregate (`GROUP BY`, `COUNT`, `SUM`, ...) เดียวที่ทำงานให้ทุกแถวพร้อมกัน แทนการวน loop สั่งให้ฐานข้อมูลทำงานเล็ก ๆ ซ้ำ ๆ หลายร้อยหลายพันครั้ง
 
 ### 71.12 Capstone: รวมทุกอย่างเข้ากับ Axum
 
@@ -1167,6 +1381,25 @@ $ curl -s "http://127.0.0.1:4071/books/borrowed" | head -c 300
 
 ทุก endpoint ทำงานตรงตามที่ออกแบบ: `total` เปลี่ยนตาม filter ที่ใช้จริง (`40` ไม่กรอง, `10` กรอง `fiction`), `sort=desc` เรียง id จากมากไปน้อยจริง (`37, 33, 29`), และ `/books/borrowed` คืนข้อมูลที่ join มาจากทั้ง `borrow_records` และ `books` ในคำสั่งเดียว (query เดียว ไม่มี N+1) — นี่คือตัวอย่างที่รวมทุกเทคนิคของบทนี้ (`QueryBuilder`, `COUNT(*) OVER()`, migration ที่เพิ่ม `category`/index, และการหลีกเลี่ยง N+1 ด้วย `JOIN`) เข้าเป็นระบบเดียวที่ทำงานได้จริงครบวงจร ต่อยอดจาก `AppState`/`PgPool` pattern เดียวกันกับ Part 70 ทุกประการ
 
+### 71.13 เลือกเทคนิคให้เหมาะกับสถานการณ์: ตารางสรุปการตัดสินใจ
+
+บทนี้ผ่านเทคนิคมาหลายตัวที่แก้ปัญหาคล้ายกันในรายละเอียดต่างกัน — ตารางนี้สรุปเป็น "ถ้าเจอสถานการณ์แบบนี้ ให้นึกถึงเทคนิคนี้ก่อน" เพื่อใช้เป็นจุดเริ่มต้นตัดสินใจเร็ว ๆ ในงานจริง (ไม่ใช่กฎตายตัวที่ใช้ได้ทุกกรณีเสมอไป แต่เป็นจุดเริ่มต้นที่ดีก่อนตัดสินใจลงรายละเอียด):
+
+| สถานการณ์ | เทคนิคที่ควรนึกถึงก่อน | เหตุผลสั้น ๆ |
+|---|---|---|
+| จำนวนเงื่อนไข `WHERE` ไม่แน่นอนตาม input | `QueryBuilder` (`.push()`/`.push_bind()`) | `query!`/`query_as!` ต้องการ SQL literal ตายตัว ใช้กับ filter แบบ dynamic ไม่ได้ตรง ๆ |
+| ต้อง list ข้อมูลพร้อมจำนวนรวมทั้งหมด | `COUNT(*) OVER()` แทนสอง query แยก | ลด round-trip จาก 2 เหลือ 1 โดยไม่เสีย correctness |
+| Insert/update ข้อมูลมากกว่า ~20 แถวพร้อมกัน | `UNNEST` (SQL literal ตายตัว) หรือ `QueryBuilder::push_values` (ถ้าต้อง dynamic อยู่แล้ว) | ลด round-trip จาก N ครั้งเหลือ 1 ครั้ง — วัดจริงเร็วขึ้น 39-70 เท่า |
+| ต้อง fetch หลายแถวจาก id ที่รู้อยู่แล้วเป็นลิสต์ | `WHERE id = ANY($1)` | ไม่ต้องสร้าง SQL แบบ dynamic ตามจำนวน id เหมือน `IN (...)` |
+| ข้อมูล metadata ที่ shape ต่างกันตามประเภท | `sqlx::types::Json<T>` กับ enum ที่ tag ด้วย serde | ได้ type-safety เต็มรูปแบบ ดีกว่า `serde_json::Value` แบบ dynamic เมื่อรู้ shape ล่วงหน้า |
+| ต้อง filter/ค้นภายใน JSONB บ่อย ๆ บนตารางใหญ่ | GIN index + operator `@>` | `->>`  ธรรมดาต้องสแกนทั้งตารางเสมอ ไม่มีทาง index ช่วยตรง ๆ |
+| เพิ่มคอลัมน์ใหม่บนตารางที่มีข้อมูลอยู่แล้ว | `ADD COLUMN ... DEFAULT ...` เสมอถ้าเป็น `NOT NULL` | ไม่มี default จะ error ทันทีถ้าตารางไม่ว่าง |
+| ลบ/เปลี่ยนชื่อคอลัมน์บนระบบที่ deploy แบบ rolling | Expand-Contract (เพิ่มก่อน ค่อยลบทีหลัง) | ป้องกัน instance เก่าที่ยังรันอยู่ระหว่าง deploy พังกลางอากาศ |
+| API timeout พร้อมกันตอน traffic สูง | เช็ค `pool.size()`/`num_idle()` ก่อนปรับ `max_connections` | ต้องแยกให้ออกว่า pool เล็กเกินไป หรือ query ช้าลงจริง ก่อนแก้ |
+| ต้องแจ้งเตือนแบบเบา ๆ ข้าม instance โดยไม่อยากตั้ง message queue | `PgListener` (`LISTEN`/`NOTIFY`) | ใช้ PostgreSQL ที่มีอยู่แล้ว แต่ไม่มี delivery guarantee — ไม่ใช่ทางเลือกสำหรับงานสำคัญจริงจัง |
+| Test suite ใหญ่มากจนรันช้า | Transaction ที่ไม่ commit แทน `#[sqlx::test]` | เร็วกว่ามากเพราะไม่ต้อง `CREATE DATABASE`/migration ทุก test แลกกับ isolation ที่ต้องเขียนเอง |
+| เห็น query ในลูป (ไม่ว่าจะหารายละเอียดหรือแค่นับ) | `JOIN`/`GROUP BY` ครั้งเดียว | นี่คือ N+1 — วัดจริงในบทนี้เร็วขึ้น 21-25 เท่าทุกกรณีที่ทดสอบ |
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### 1. ต่อ SQL string เองสำหรับ filter แบบ dynamic แทนใช้ `QueryBuilder`
@@ -1249,6 +1482,27 @@ for r in records {
 ```
 
 เช่นเดียวกับกับดักที่ 4 นี่คือปัญหาที่**ไม่มี compiler error หรือ runtime error ใด ๆ** ให้เห็น — ผู้เขียนวัดจริงตามหัวข้อ 71.11 ได้ **201 queries, 27.67ms** (naive loop กับข้อมูล 200 แถว) เทียบกับ **1 query, 1.10ms** (`JOIN` เดียว) — ต่างกัน **25.2 เท่า** ทั้งเวลาและจำนวน query **วิธีตรวจจับ**: ทุกครั้งที่เห็น `for`/`while` loop ที่ข้างในมีการเรียก query ให้สงสัยไว้ก่อนเสมอว่าอาจเป็น N+1 — เครื่องมือที่ช่วยตรวจจับสิ่งนี้ได้จริงในโลกจริงคือการ log จำนวน query ที่ยิงไปฐานข้อมูลต่อ request หนึ่งครั้ง (ถ้าตัวเลขนี้ผูกกับขนาดของ response แบบเป็นเส้นตรง นั่นคือสัญญาณเตือนของ N+1) **วิธีแก้**: ใช้ `JOIN` (ถ้าข้อมูลอยู่ในฐานข้อมูลเดียวกัน) หรือรวบรวม id ทั้งหมดก่อนแล้วยิง `WHERE id = ANY($1)` เป็น batch เดียว (ถ้าต้อง fetch จากแหล่งอื่นแยกกันจริง ๆ)
+
+### 6. เข้าใจผิดว่า `PgListener` ยืม Connection จาก Pool (นับรวมกับ `max_connections`)
+
+```rust
+let pool = PgPoolOptions::new().max_connections(5).connect(url).await?;
+println!("pool.size() ก่อนเปิด listener = {}", pool.size());
+
+let mut listener = PgListener::connect_with(&pool).await?;
+listener.listen("gotcha_channel").await?;
+
+println!("pool.size() หลังเปิด listener = {}", pool.size());
+```
+
+ผู้เขียนรันจริงเพื่อพิสูจน์ว่า `pool.size()` **ไม่เปลี่ยน**เลยแม้เปิด `PgListener` ไปแล้ว:
+
+```
+pool.size() ก่อนเปิด listener = 1
+pool.size() หลังเปิด listener = 1 (ไม่เพิ่ม — เป็น connection แยก)
+```
+
+**อธิบาย**: แม้ `PgListener::connect_with(&pool)` จะรับ `&PgPool` เป็น argument (ทำให้ดูเหมือนว่ามันยืม connection จาก pool ตัวนั้น) แต่จริง ๆ แล้วมันแค่**อ่าน connection config** จาก pool (host, port, user, password, database) มาใช้เปิด **connection ใหม่ของตัวเอง** ที่แยกออกไปต่างหากอย่างสิ้นเชิง — connection ของ `PgListener` จึงไม่ถูกนับรวมกับ `max_connections` ของ pool เลย (พิสูจน์แล้วจาก `pool.size()` ที่ไม่ขยับ) แต่**ยังคงเป็น connection จริงหนึ่งตัว**ที่กิน resource ฝั่ง PostgreSQL เหมือน connection ปกติทุกประการ (ปรากฏใน `pg_stat_activity` เหมือนกัน) — ผลที่ตามมาอีกจุดที่ต้องรู้: `pool.close()` (Part 70 หัวข้อ 70.12) **ไม่ได้ปิด connection ของ `PgListener` ไปด้วย** เพราะมันไม่ได้เป็นส่วนหนึ่งของ pool ตั้งแต่แรก — ถ้าเปิด `PgListener` ไว้แล้วต้อง shutdown แอปอย่างเป็นระเบียบ ต้องปิด `listener` เอง (หรือปล่อยให้ `Drop` ของมันทำงานตามธรรมชาติเมื่อ scope จบ) แยกจากการเรียก `pool.close()` **วิธีแก้/ข้อควรจำ**: นับจำนวน `PgListener` ที่เปิดไว้ในระบบแยกจากการคำนวณ `max_connections` ของ pool เสมอ (ถ้าเปิด listener หลายตัวโดยไม่ได้ตั้งใจ เช่น เปิดใหม่ทุกครั้งที่ handler ถูกเรียกโดยไม่ปิดตัวเก่า จะสร้าง connection รั่วไหลสะสมที่ไม่มีทาง track ผ่าน `pool.size()` ได้เลย)
 
 ## แบบฝึกหัด (Exercises)
 

@@ -12,7 +12,8 @@
 - เขียน CRUD เต็มรูปแบบด้วย ActiveRecord-style API บน domain `books`/`borrow_records` เดียวกับ Part 70 (`Entity::find().all()`, `Entity::find_by_id().one()`, สร้างผ่าน `ActiveModel { ..Default::default() }` แล้ว `.insert()`, อัปเดตผ่าน `.into_active_model()` แล้ว `.update()`, ลบผ่าน `.delete()`) พร้อมเทียบความยาว/ระดับ abstraction ของโค้ดชุดเดียวกันกับที่ Part 70 เขียนด้วย SQLx ตรง ๆ
 - ใช้ query builder ของ SeaORM (`.filter()`, `.order_by_asc()`/`.order_by_desc()`, `.paginate()`) รวมถึงโหลดข้อมูลเชื่อมโยงแบบ one-to-many ทั้งแบบ eager (`.find_with_related()`) และแบบ lazy (`.find_related()`) — พร้อมอธิบายว่า `.paginate()` ที่มีมาให้ในตัวคือความสะดวกที่ SQLx (Part 71) ต้องเขียน `LIMIT`/`OFFSET` มือเอง
 - ใช้ transaction ผ่าน `db.begin()`/`.commit()`/`.rollback()` ทำ operation แบบ atomic บน domain เดิม (ยืมหนังสือ) พร้อมพิสูจน์ rollback ด้วยโค้ดจริงที่จงใจทำให้ query ที่สองใน transaction ล้มเหลว และเขียน migration แบบ code-first ด้วย `sea-orm-migration` พร้อมอธิบาย workflow ที่แท้จริงระหว่างการ migrate schema กับการ generate entity (สองทิศทางที่ SeaORM รองรับทั้งคู่)
-- แปลง `DbErr` เป็น `AppError` ตาม pattern เดียวกับ Part 66/70 ได้ถูกต้อง รวมถึงตรวจจับ unique-constraint violation จริงจาก `DbErr::Query` ที่ห่อ `sqlx::Error::Database` ไว้ข้างใน และสรุปตารางเปรียบเทียบ SQLx/Diesel/SeaORM แบบตรงไปตรงมา (async-native, ระดับ abstraction, compile-time guarantee, learning curve, ความยาวโค้ดของ operation เดียวกัน) พร้อมยืนยันจุดยืนของหลักสูตรว่าจะใช้ SQLx เป็นตัวหลักต่อไปจาก Part 74 เป็นต้นไป
+- แปลง `DbErr` เป็น `AppError` ตาม pattern เดียวกับ Part 66/70 ได้ถูกต้อง รวมถึงตรวจจับ unique-constraint violation จริงจาก `DbErr::Query` ที่ห่อ `sqlx::Error::Database` ไว้ข้างใน และต่อ `DatabaseConnection` เข้ากับ `AppState` ของ Axum ทำ endpoint จริงที่รันแล้วยิงด้วย `curl` ได้ครบทุก status code (`200`/`201`/`404`/`409`) ตาม pattern เดียวกับ Part 70.10
+- สรุปตารางเปรียบเทียบ SQLx/Diesel/SeaORM แบบตรงไปตรงมา (async-native, ระดับ abstraction, compile-time guarantee, learning curve, ความยาวโค้ดของ operation เดียวกัน) พร้อมยืนยันจุดยืนของหลักสูตรว่าจะใช้ SQLx เป็นตัวหลักต่อไปจาก Part 74 เป็นต้นไป — และรู้จัก `MockDatabase` เครื่องมือทดสอบของ SeaORM ที่ไม่ต้องมีฐานข้อมูลจริงเลย เป็นทางเลือกเสริมสำหรับ unit test ที่ไม่อยากพึ่งพา infrastructure จริง
 
 ## ความรู้ที่ต้องมีมาก่อน
 
@@ -90,7 +91,7 @@ pub use sqlx::error::Error as SqlxError;
 pub use sqlx::postgres::PgDatabaseError as SqlxPostgresError;
 ```
 
-Error type ของ SeaORM เองก็ห่อ `sqlx::Error`/`sqlx::postgres::PgDatabaseError` ไว้ข้างในตรง ๆ (หัวข้อ 73.9 จะลงรายละเอียดเรื่องนี้) — สรุปคือ **นี่ไม่ใช่แค่ "แนวคิดคล้ายกัน" แต่เป็นความจริงระดับ dependency graph**: connection pool ที่ SeaORM ใช้ข้างใต้คือ `sqlx::PgPool` ตัวเดียวกันกับที่ Part 70 สอนสร้างด้วย `PgPoolOptions` ทุกประการ, การส่ง query ไปยัง PostgreSQL ก็ผ่าน `sqlx-postgres` driver ตัวเดียวกัน, และ error ที่เกิดขึ้นก็คือ `sqlx::Error` ที่ SeaORM แค่ห่อไว้อีกชั้นเท่านั้น
+Error type ของ SeaORM เองก็ห่อ `sqlx::Error`/`sqlx::postgres::PgDatabaseError` ไว้ข้างในตรง ๆ (หัวข้อ 73.10 จะลงรายละเอียดเรื่องนี้) — สรุปคือ **นี่ไม่ใช่แค่ "แนวคิดคล้ายกัน" แต่เป็นความจริงระดับ dependency graph**: connection pool ที่ SeaORM ใช้ข้างใต้คือ `sqlx::PgPool` ตัวเดียวกันกับที่ Part 70 สอนสร้างด้วย `PgPoolOptions` ทุกประการ, การส่ง query ไปยัง PostgreSQL ก็ผ่าน `sqlx-postgres` driver ตัวเดียวกัน, และ error ที่เกิดขึ้นก็คือ `sqlx::Error` ที่ SeaORM แค่ห่อไว้อีกชั้นเท่านั้น
 
 #### ทำไมข้อเท็จจริงนี้สำคัญ: มันคือเหตุผลที่ SeaORM เป็น async-native ได้จริง
 
@@ -318,6 +319,32 @@ pub use super::borrow_records::Entity as BorrowRecords;
 
 `prelude.rs` ทำหน้าที่เป็นทางลัด — เวลาใช้งานจริงคุณ `use entities::prelude::*;` แล้วอ้าง `Books::find()`/`BorrowRecords::find()` ได้ตรง ๆ โดยไม่ต้องพิมพ์ `books::Entity`/`borrow_records::Entity` เต็ม ๆ ทุกครั้ง
 
+#### อธิบาย attribute ของ `Relation` enum ทีละส่วน
+
+ก่อนไปหัวข้อถัดไป มาดูว่าแต่ละ attribute ใน `Relation` enum ที่ generate มาให้หมายถึงอะไรบ้าง — ดู `borrow_records::Relation` (ฝั่ง "belongs to") เพราะเป็นฝั่งที่มี attribute มากกว่า:
+
+```rust
+#[sea_orm(
+    belongs_to = "super::books::Entity",   // (1) ปลายทางของความสัมพันธ์
+    from = "Column::BookId",               // (2) คอลัมน์ฝั่งนี้ (borrow_records) ที่ใช้ join
+    to = "super::books::Column::Id",       // (3) คอลัมน์ฝั่งโน้น (books) ที่ใช้ join
+    on_update = "NoAction",                // (4) พฤติกรรมเมื่อ books.id ถูก UPDATE
+    on_delete = "NoAction"                 // (5) พฤติกรรมเมื่อ books.id ถูก DELETE
+)]
+Books,
+```
+
+- **(1) `belongs_to`** — บอกว่าแถวของ `borrow_records` หนึ่งแถว "เป็นของ" `books` หนึ่งแถว (ทิศทาง many-to-one จากมุมมองของ `borrow_records`) ตรงข้ามกับ `has_many` ที่ generate ไว้ฝั่ง `books::Relation` (หนึ่ง book มีได้หลาย borrow_records) — นี่คือสองฝั่งของความสัมพันธ์ one-to-many เดียวกัน มองจากมุมต่างกัน
+- **(2)-(3) `from`/`to`** — ระบุคอลัมน์ที่ใช้ join กันตรง ๆ (`borrow_records.book_id = books.id`) ตรงกับ `FOREIGN KEY` constraint ที่มีอยู่จริงในฐานข้อมูล (`sea-orm-cli generate entity` อ่านค่านี้มาจาก constraint จริงตอน introspect ไม่ได้เดาสุ่ม)
+- **(4)-(5) `on_update`/`on_delete`** — มาจาก `ON UPDATE`/`ON DELETE` clause ของ `FOREIGN KEY` constraint จริงในฐานข้อมูล — ในตัวอย่างนี้เป็น `NoAction` เพราะ SQL ตอนสร้างตาราง (`REFERENCES books(id)` เฉย ๆ ไม่มี `ON DELETE CASCADE`/`ON DELETE SET NULL` ต่อท้าย) ไม่ได้ระบุพฤติกรรมพิเศษไว้ — ค่านี้เป็นแค่**ข้อมูลที่ SeaORM เก็บไว้อ่านอย่างเดียว** ไม่ได้ไปเปลี่ยนพฤติกรรมจริงของฐานข้อมูล (พฤติกรรมจริงตอน `DELETE`/`UPDATE` ถูกกำหนดโดย constraint ในฐานข้อมูลเอง) — ถ้าต้องการให้ลบ `books` แล้วลบ `borrow_records` ที่เกี่ยวข้องอัตโนมัติ ต้องแก้ที่ระดับ SQL/migration (`ON DELETE CASCADE`) ไม่ใช่แก้ค่านี้ในไฟล์ entity
+
+ฝั่ง `books::Relation` (has-many ตรงข้ามของ belongs-to) สั้นกว่ามาก เพราะไม่ต้องระบุ `from`/`to`/`on_update`/`on_delete` เอง (SeaORM หาให้จากฝั่ง `belongs_to` ที่มีข้อมูลครบอยู่แล้ว):
+
+```rust
+#[sea_orm(has_many = "super::borrow_records::Entity")]
+BorrowRecords,
+```
+
 **สิ่งสำคัญที่ต้องเข้าใจ**: `#[derive(DeriveEntityModel)]` ตัวเดียวใน struct `Model` คือจุดที่ generate ทุกอย่างที่คุณจะใช้ในบทนี้ — จาก Part 44-45 คุณรู้ว่า derive macro คือ proc macro ที่ parse struct definition แล้ว generate `impl` block ให้ — `DeriveEntityModel` ทำงานหนักกว่า derive macro ปกติมาก มัน generate ให้ทั้ง: struct `Entity` (marker type ที่แทนตาราง), enum `Column` (แต่ละ variant คือหนึ่งคอลัมน์ เข้าถึงแบบ type-safe), enum `PrimaryKey`, struct `ActiveModel` (คู่กับ `Model` แต่ทุก field เป็น `ActiveValue<T>` แทน `T` ตรง ๆ), และ `impl` ทุกตัวที่ทำให้ `Entity`/`Model`/`ActiveModel` ทำงานร่วมกันได้ (`EntityTrait`, `ModelTrait`, `ActiveModelTrait`, ฯลฯ) — นี่คือเหตุผลว่าทำไมไฟล์ที่ generate มาดู "สั้น" มาก (20-35 บรรทัด) แต่ให้ API เต็มรูปแบบ: โค้ดส่วนใหญ่ไม่ได้อยู่ในไฟล์นี้ แต่ถูก generate ซ่อนอยู่หลัง macro ตอน compile
 
 ### 73.3 วงคำศัพท์หลักของ SeaORM: Entity, Model, ActiveModel, Column, Relation
@@ -435,7 +462,7 @@ println!("find_by_id(1) -> {:?}", one.map(|m| m.title));
 find_by_id(1) -> Some("Programming Rust")
 ```
 
-`.one(&db).await` คืน `Result<Option<Model>, DbErr>` — สังเกตว่าเป็น `Option<Model>` ไม่ใช่ error เมื่อไม่พบแถว (ต่างจาก SQLx's `.fetch_one()` ที่คืน `Err(sqlx::Error::RowNotFound)` เมื่อไม่พบแถวเลย ตามที่ Part 70 สอน) — SeaORM เลือกให้ "ไม่พบ" เป็น `None` ที่ต้องจัดการด้วย pattern matching ปกติ (เชื่อมกับ Part 11 เรื่อง `Option<T>`) ในขณะที่ SQLx เลือกให้เป็น error variant หนึ่ง ทั้งสองแนวคิดถูกทั้งคู่ เพียงแต่เป็นการออกแบบ API ที่ต่างกัน — เวลาแปลงเข้า `AppError` (หัวข้อ 73.9) ต้องระวังจุดนี้ให้ดี: กับ SeaORM คุณต้อง `.ok_or(AppError::NotFound)?` เองตรง ๆ ไม่มี variant `RecordNotFound` ที่ SeaORM จะคืนให้อัตโนมัติจากการ query แถวเดียวที่ไม่เจอ (ต่าง context กับ `DbErr::RecordNotFound` ที่ SeaORM ใช้ในสถานการณ์อื่น เช่น `.update()` ที่ไม่เจอแถวให้แก้)
+`.one(&db).await` คืน `Result<Option<Model>, DbErr>` — สังเกตว่าเป็น `Option<Model>` ไม่ใช่ error เมื่อไม่พบแถว (ต่างจาก SQLx's `.fetch_one()` ที่คืน `Err(sqlx::Error::RowNotFound)` เมื่อไม่พบแถวเลย ตามที่ Part 70 สอน) — SeaORM เลือกให้ "ไม่พบ" เป็น `None` ที่ต้องจัดการด้วย pattern matching ปกติ (เชื่อมกับ Part 11 เรื่อง `Option<T>`) ในขณะที่ SQLx เลือกให้เป็น error variant หนึ่ง ทั้งสองแนวคิดถูกทั้งคู่ เพียงแต่เป็นการออกแบบ API ที่ต่างกัน — เวลาแปลงเข้า `AppError` (หัวข้อ 73.10) ต้องระวังจุดนี้ให้ดี: กับ SeaORM คุณต้อง `.ok_or(AppError::NotFound)?` เองตรง ๆ ไม่มี variant `RecordNotFound` ที่ SeaORM จะคืนให้อัตโนมัติจากการ query แถวเดียวที่ไม่เจอ (ต่าง context กับ `DbErr::RecordNotFound` ที่ SeaORM ใช้ในสถานการณ์อื่น เช่น `.update()` ที่ไม่เจอแถวให้แก้)
 
 #### 3. สร้างข้อมูลใหม่: `ActiveModel { ..Default::default() }` แล้ว `.insert()`
 
@@ -617,6 +644,8 @@ page 1: 1 rows
 
 **อธิบาย**: `.paginate(&db, page_size)` คืน `Paginator` ที่มี method ให้ครบ: `.num_pages()` (คำนวณจำนวนหน้าทั้งหมดจาก `COUNT(*)` ที่มันยิง query แยกให้เอง), `.fetch_page(n)` (ดึงหน้าที่ `n` โดยตรง), หรือ `.into_stream()` (แบบที่ใช้ข้างบน — stream ทีละหน้าต่อเนื่องกัน เหมาะกับ scenario ที่ต้อง process ทุกหน้าตามลำดับ) ข้างใต้ SeaORM สร้าง SQL ที่มี `LIMIT`/`OFFSET` ให้เองตามเลขหน้า — คุณไม่ต้องคำนวณ `OFFSET = (page - 1) * page_size` เองแบบที่ SQLx (Part 71) สอนให้ทำมือ นี่คือตัวอย่างที่เป็นรูปธรรมของ "ORM ระดับสูงประหยัดโค้ด boilerplate ที่พบซ้ำ ๆ บ่อยมากในเว็บแอปจริง" — pagination เป็นสิ่งที่ทุกระบบ list ข้อมูลต้องมี การมี helper สำเร็จรูปแบบนี้ลดโอกาสเขียนสูตร `OFFSET` ผิด (บั๊กคลาสสิกคือคำนวณ page เริ่มจาก 0 หรือ 1 สลับกันจนข้อมูลซ้ำ/ขาดไปหนึ่งแถว)
 
+**ข้อสังเกตเรื่อง `.count()` vs `.num_items()`**: SeaORM มีสอง method ที่ฟังดูคล้ายกันแต่ความหมายต่างกันชัดเจน (อ่านจาก doc comment จริงของ source code) — `PaginatorTrait::count(self, db)` นับจำนวนแถวที่ query **ตามที่เป็นอยู่** (ถ้า query มี `.limit()`/`.offset()` ติดมาด้วยอยู่แล้ว จะนับแค่ในกรอบนั้น ผ่าน `SELECT COUNT(*) FROM (...) AS subquery`) ในขณะที่ `Paginator::num_items()` (ที่ `.num_pages()` เรียกใช้ข้างใต้) จะ**ล้าง limit/offset ออกก่อนนับ** เพื่อให้ได้ยอดรวมทั้งหมดสำหรับคำนวณจำนวนหน้า — ถ้าใช้ผิดตัว (เช่น เผลอใช้ `.count()` กับ query ที่ตั้ง `.limit(10)` ไว้ก่อนแล้ว) จะได้ตัวเลขที่ดู "ถูก" แต่ผิดความหมายที่ต้องการ (นับได้สูงสุดแค่ 10 ทั้งที่ข้อมูลจริงมีมากกว่านั้น) — ต้องเลือกใช้ให้ตรงกับคำถามที่ต้องการตอบ: "มีทั้งหมดกี่แถว (เพื่อ paginate)" ใช้ `num_pages()`/`num_items()`, "query นี้ตามที่ตั้งเงื่อนไขไว้นับได้กี่แถว" ใช้ `.count()`
+
 ### 73.7 ความสัมพันธ์ (Relations): One-to-Many ระหว่าง Books และ Borrow Records
 
 จากหัวข้อ 73.2 คุณเห็นแล้วว่า `sea-orm-cli generate entity` ตรวจ foreign key constraint (`borrow_records.book_id REFERENCES books.id`) แล้ว generate `Relation` enum ให้อัตโนมัติทั้งสองฝั่ง — หัวข้อนี้มาดูว่าเอา `Relation` ไปใช้โหลดข้อมูลที่เชื่อมโยงกันยังไง (mirroring แนวคิด association ของ Diesel Part 72 — Diesel ก็มี `#[belongs_to]`/`joinable!` แต่ต้องประกาศเองในไฟล์ที่แยกจาก `schema.rs`, SeaORM generate ให้ในไฟล์เดียวจาก introspection เลย)
@@ -663,7 +692,18 @@ book 3 has 1 borrow_records (find_related)
 
 `.find_related(BorrowRecords)` เรียกตรงบน `Model` ตัวเดียว (ไม่ใช่บน `Entity` ทั้งตาราง) — คืน query builder ที่โหลดเฉพาะ `borrow_records` ของ book ตัวนี้เท่านั้น (ยิง query แยกอีกครั้งตอนที่คุณเรียก `.all()`/`.one()`) นี่คือ**lazy loading** — โหลดข้อมูลเชื่อมโยงแค่ตอนที่ต้องใช้จริง ๆ เหมาะกับสถานการณ์ที่ไม่แน่ใจว่าจะต้องใช้ข้อมูลเชื่อมโยงหรือไม่ (ประหยัดกว่าถ้าไม่ต้องใช้จริง แต่ถ้าเรียกใน loop ของหลาย ๆ book จะกลายเป็นปัญหา N+1 ทันที — **ต้องเลือกใช้ตามสถานการณ์**: ใช้ `.find_with_related()` เมื่อรู้แน่ว่าต้องใช้ข้อมูลเชื่อมโยงของทุกแถว, ใช้ `.find_related()` เมื่อทำกับแถวเดียวหรือไม่แน่ใจว่าจะต้องใช้)
 
-**ข้อสังเกตเรื่อง `find_also_related` (ที่โจทย์กำหนดให้กล่าวถึง)**: SeaORM มี `.find_also_related()` ด้วย ซึ่งคล้าย `.find_with_related()` มาก แต่ต่างกันตรงที่ `.find_also_related()` คืน `Vec<(Model, Option<RelatedModel>)>` (ใช้กับความสัมพันธ์แบบ **one-to-one**/**belongs-to** ที่แต่ละแถวมีความสัมพันธ์ได้แค่หนึ่งแถวหรือไม่มีเลย) ในขณะที่ `.find_with_related()` คืน `Vec<(Model, Vec<RelatedModel>)>` (ใช้กับ **one-to-many** ที่หนึ่งแถวมีความสัมพันธ์ได้หลายแถว — กรณี books-has-many-borrow_records ในบทนี้) เลือกตัวที่ตรงกับ cardinality ของความสัมพันธ์จริง
+**ข้อสังเกตเรื่อง `find_also_related`**: SeaORM มี `.find_also_related()` ด้วย ซึ่งคล้าย `.find_with_related()` มาก แต่ต่างกันตรงที่ `.find_also_related()` คืน `Vec<(Model, Option<RelatedModel>)>` (ใช้กับความสัมพันธ์แบบ **one-to-one**/**belongs-to** ที่แต่ละแถวมีความสัมพันธ์ได้แค่หนึ่งแถวหรือไม่มีเลย) ในขณะที่ `.find_with_related()` คืน `Vec<(Model, Vec<RelatedModel>)>` (ใช้กับ **one-to-many** ที่หนึ่งแถวมีความสัมพันธ์ได้หลายแถว — กรณี books-has-many-borrow_records ในบทนี้) เลือกตัวที่ตรงกับ cardinality ของความสัมพันธ์จริง
+
+#### เทียบวิธีโหลดข้อมูลเชื่อมโยงข้ามสามไลบรารี
+
+| | SQLx (Part 70-71) | Diesel (Part 72) | SeaORM (บทนี้) |
+|---|---|---|---|
+| Eager loading (โหลดพร้อมกันในคราวเดียว) | เขียน `JOIN` เองใน SQL แล้ว map ผลลัพธ์ที่ซ้ำแถวเป็นโครงสร้างที่ต้องการมือ | `.left_join()` + จัดกลุ่มผลลัพธ์เองหลัง query (หรือ query สองรอบแล้ว `.grouped_by()`) | `.find_with_related()`/`.find_also_related()` — จัดกลุ่มให้อัตโนมัติ |
+| Lazy loading (โหลดตอนต้องใช้) | เขียน query แยกเองตรง ๆ ไม่มี helper พิเศษ | เขียน query แยกเอง (ไม่มี lazy-load helper ในตัว) | `.find_related()` — เรียกตรงบน `Model` ได้เลย |
+| การนิยามความสัมพันธ์ | ไม่มี concept นี้ในระดับ library (คุณคุมทุก join เองผ่าน SQL) | `#[belongs_to]`/`joinable!` ประกาศเองแยกจาก `schema.rs` | `Relation` enum + `Related<T>` — generate อัตโนมัติจาก foreign key ตอน introspect |
+| ความเสี่ยง N+1 query | เกิดได้เท่ากับที่โค้ดเขียนเอง (ไม่มี abstraction มาซ่อนปัญหา แต่ก็ไม่มีอะไรมาป้องกันให้อัตโนมัติ) | เกิดได้เหมือนกันถ้าเรียก query แยกใน loop | เกิดได้ถ้าใช้ `.find_related()` ผิดที่ (ตามกับดักข้อ 5) แต่มี `.find_with_related()` ให้เลือกป้องกันได้ตรง ๆ |
+
+ตารางนี้ตอกย้ำภาพที่เห็นมาตลอดบท: ความสัมพันธ์ระหว่างตารางเป็น concept ที่ **SQLx ไม่มีเลยในระดับ library** (เพราะ SQLx ไม่รู้จัก "ตาราง"/"ความสัมพันธ์" อะไรเลย รู้จักแค่ SQL string กับผลลัพธ์ที่ map เข้า struct) ในขณะที่ Diesel และ SeaORM ทั้งคู่มี concept นี้ในระดับ type system แต่ต่างกันที่ Diesel ต้องประกาศ association เองแยกไฟล์ ส่วน SeaORM ได้มาอัตโนมัติจากการ introspect foreign key constraint จริง
 
 ### 73.8 Transaction: `db.begin()`, Commit, Rollback
 
@@ -745,9 +785,62 @@ before_rollback=4 after_rollback=4
 
 `before_rollback` และ `after_rollback` **เท่ากันจริง** (`4 == 4`) — พิสูจน์ว่าการ `update_many()` ที่สำเร็จไปแล้วก่อนคำสั่งที่สองจะ fail ถูกยกเลิกไปด้วยจริงตอน `.rollback()` เหมือนกับที่ SQLx พิสูจน์ไว้ใน Part 70 ทุกประการ (เพราะกลไก transaction ข้างใต้เป็น SQLx transaction ตัวเดียวกัน — ผลลัพธ์เหมือนกันไม่ใช่เรื่องบังเอิญ)
 
-**ข้อสังเกตสำคัญ**: error message ที่เห็น (`Query Error: error returned from database: insert or update on table "borrow_records" violates foreign key constraint ...`) ขึ้นต้นด้วย `Query Error:` ซึ่งคือ `Display` implementation ของ `DbErr::Query(...)` variant (ตามที่หัวข้อ 73.9 จะอธิบายละเอียด) ส่วนข้อความหลัง `error returned from database:` คือ**ข้อความเดียวกันตรงตัว**กับที่ SQLx ส่งมาตรง ๆ (เทียบกับ Part 70 หัวข้อ 70.9 ที่ได้ error message เดียวกันเป๊ะ) — นี่คือหลักฐานเชิงพฤติกรรมอีกชิ้นที่ยืนยันว่า SeaORM ไม่ได้สร้าง error message ของตัวเองใหม่ทั้งหมด แค่ห่อ error ของ SQLx ไว้อีกชั้นเท่านั้น
+**ข้อสังเกตสำคัญ**: error message ที่เห็น (`Query Error: error returned from database: insert or update on table "borrow_records" violates foreign key constraint ...`) ขึ้นต้นด้วย `Query Error:` ซึ่งคือ `Display` implementation ของ `DbErr::Query(...)` variant (ตามที่หัวข้อ 73.10 จะอธิบายละเอียด) ส่วนข้อความหลัง `error returned from database:` คือ**ข้อความเดียวกันตรงตัว**กับที่ SQLx ส่งมาตรง ๆ (เทียบกับ Part 70 หัวข้อ 70.9 ที่ได้ error message เดียวกันเป๊ะ) — นี่คือหลักฐานเชิงพฤติกรรมอีกชิ้นที่ยืนยันว่า SeaORM ไม่ได้สร้าง error message ของตัวเองใหม่ทั้งหมด แค่ห่อ error ของ SQLx ไว้อีกชั้นเท่านั้น
 
 **เหมือนกับ SQLx**: ถ้าไม่เรียก `.commit()` เลย (เช่น `?` return early ก่อนถึง `.commit()`) transaction จะ**rollback อัตโนมัติ**ตอน `DatabaseTransaction` ถูก drop (ผ่าน `Drop` implementation ที่ส่งคำสั่ง `ROLLBACK` ให้ก่อน connection ถูกคืนกลับ pool — พฤติกรรมเดียวกับ SQLx's `Transaction` ตามที่ Part 70 อธิบาย เพราะข้างใต้เป็นกลไกเดียวกัน)
+
+#### ทางเลือกที่สะดวกกว่า: `.transaction()` Closure Helper
+
+นอกจาก `db.begin()`/`.commit()`/`.rollback()` แบบ manual ที่ตรงกับ SQLx ทุกประการ SeaORM ยังมี helper ที่ SQLx ไม่มีในรูปแบบเดียวกัน: `TransactionTrait::transaction()` — รับ closure ที่คืน `Future` แล้ว**จัดการ commit/rollback ให้อัตโนมัติตามผลลัพธ์ของ closure นั้น** (ไม่ต้องเขียน `match`/`.commit()`/`.rollback()` เองเลย):
+
+```rust
+use sea_orm::{TransactionError, TransactionTrait};
+
+let result = db
+    .transaction::<_, (), DbErr>(|txn| {
+        Box::pin(async move {
+            Books::update_many()
+                .col_expr(books::Column::AvailableCopies, Expr::col(books::Column::AvailableCopies).sub(1))
+                .filter(books::Column::Id.eq(book_id))
+                .exec(txn)
+                .await?;
+
+            borrow_records::ActiveModel {
+                book_id: Set(book_id),
+                borrower_name: Set("ClosureTest".to_owned()),
+                ..Default::default()
+            }
+            .insert(txn)
+            .await?;
+
+            Ok(())
+        })
+    })
+    .await;
+
+match result {
+    Ok(_) => println!("closure transaction committed successfully"),
+    Err(TransactionError::Connection(e)) => println!("connection error: {e}"),
+    Err(TransactionError::Transaction(e)) => println!("transaction rolled back due to: {e}"),
+}
+```
+
+**กลไก**: ถ้า closure คืน `Ok(_)` — SeaORM `.commit()` ให้อัตโนมัติ ถ้าคืน `Err(_)` — SeaORM `.rollback()` ให้อัตโนมัติ (ไม่ต้องพึ่งพฤติกรรม default ตอน drop เหมือนวิธี manual) ผู้เขียนทดสอบจริงทั้งสอง path — path ที่สำเร็จ:
+
+```
+closure transaction committed successfully
+```
+
+และ path ที่จงใจให้ query ที่สองล้มเหลว (`book_id = 999_999` ที่ไม่มีจริง เหมือนหัวข้อก่อนหน้า) เขียนโค้ดเดียวกันเป๊ะแต่เปลี่ยนแค่ `book_id` ที่ insert — **ไม่ต้องเรียก `.rollback()` เองเลยแม้แต่บรรทัดเดียว**:
+
+```
+auto-rollback แล้วเพราะ: Query Error: error returned from database: insert or update on table "borrow_records" violates foreign key constraint "borrow_records_book_id_fkey" at line 2608
+available_copies after both attempts = 4
+```
+
+`available_copies after both attempts = 4` (ลดจาก `5` เหลือ `4` แค่ครั้งเดียวจาก transaction แรกที่สำเร็จ ไม่ใช่ `3`) พิสูจน์ว่า transaction ที่สอง (ที่ closure คืน `Err` เพราะ foreign key violation) **rollback การลด `available_copies` ของมันไปด้วยจริง** ไม่ทิ้งผลข้างเคียงไว้เลย แม้จะไม่ได้เขียน `.rollback()` มือสักบรรทัด — ระวังจุดหนึ่ง: type ของ error ที่ได้จาก `.transaction()` คือ `TransactionError<E>` (ไม่ใช่ `DbErr` ตรง ๆ) ที่มีสอง variant คือ `Connection(DbErr)` (เชื่อมต่อ/begin ผิดพลาดตั้งแต่แรก) กับ `Transaction(E)` (closure คืน error ชนิด `E` ที่คุณกำหนด — ในตัวอย่างนี้คือ `DbErr` เพราะ query ข้างในคืน `DbErr`) ต้อง `match` ให้ครบทั้งสอง variant เพื่อดึง error จริงออกมา
+
+**เลือกใช้แบบไหนดี**: ใช้ `.transaction()` closure เมื่อ logic ตรงไปตรงมา (ทำตามลำดับ ถ้า error ที่ไหนก็ rollback ทั้งหมด) เพราะโค้ดสั้นกว่าและ**ไม่มีทางลืมเรียก `.rollback()`** ใช้ `db.begin()`/`.commit()`/`.rollback()` แบบ manual เมื่อ logic ซับซ้อนกว่านั้น (เช่น ต้องตรวจเงื่อนไขบางอย่างแล้ว**เลือกเอง**ว่าจะ commit หรือ rollback โดยไม่ได้ผ่าน `Result` ธรรมดา หรือต้องทำอะไรเพิ่มเติมระหว่างทางที่ไม่ใช่แค่ "สำเร็จ/ล้มเหลว")
 
 ### 73.9 Migration ด้วย `sea-orm-migration`: Code-First Direction
 
@@ -1241,6 +1334,21 @@ logged statement: Transaction { stmts: [Statement { sql: "SELECT \"books\".\"id\
 | Learning curve | ต่ำ (รู้ SQL อยู่แล้วก็ใช้ได้เกือบทันที) | สูง (ต้องเรียน DSL เต็มระบบ + lifetime ของ query builder ที่ซับซ้อน) | กลาง (ต้องเรียน entity/ActiveModel/dirty tracking แต่ concept คล้าย ORM ภาษาอื่นที่คนจำนวนมากคุ้นเคยอยู่แล้ว) |
 | Migration | `sqlx-cli` (SQL ดิบ) | `diesel_cli` (SQL ดิบ + auto-gen `schema.rs`) | `sea-orm-migration` (โค้ด Rust, portable ข้าม backend) **หรือ** introspect ตรง (ไม่ต้องมี migration เลยก็ได้) |
 | Workflow สร้าง struct | เขียนมือทั้งหมด | Introspect schema แต่ model struct เขียนมือ | **Generate ให้ครบอัตโนมัติ** |
+
+**ทางออกเมื่อ ActiveModel/query builder เขียน query ที่ต้องการไม่ได้**: บางครั้ง query ซับซ้อนเกินกว่าที่ `.filter()`/`.find_with_related()` จะเขียนได้สะดวก (เช่น subquery ซับซ้อน, window function, CTE) — SeaORM ไม่ได้ปิดทางเขียน SQL ดิบเลย มี escape hatch ผ่าน `Statement::from_sql_and_values()` ร่วมกับ `ConnectionTrait::query_all()`/`.query_one()`:
+
+```rust
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+let stmt = Statement::from_sql_and_values(
+    DatabaseBackend::Postgres,
+    "SELECT id, title FROM books WHERE available_copies > $1 ORDER BY title",
+    [1_i32.into()],
+);
+let rows = db.query_all(stmt).await?; // คืน Vec<QueryResult> — ดึงค่าออกทีละคอลัมน์ด้วย .try_get() เหมือน sqlx::Row
+```
+
+นี่คือจุดที่สาม abstraction มาบรรจบกันอีกครั้ง: `query_all()`/`query_one()` ของ SeaORM ท้ายที่สุดก็ส่ง SQL ผ่าน SQLx ข้างใต้เหมือนทุก query อื่นในบทนี้ — แค่ให้คุณ**ข้ามชั้น** entity/ActiveModel ไปเขียน SQL ตรง ๆ ได้เมื่อจำเป็นจริง ๆ โดยไม่ต้องออกจาก SeaORM ทั้งระบบไปพึ่ง SQLx โดยตรง (แม้จะทำแบบนั้นได้เหมือนกันเพราะ `sea_orm::sqlx` re-export ไว้ให้ตามหัวข้อ 73.1)
 
 #### เทียบความยาวโค้ดของ operation เดียวกัน: "Insert หนึ่ง book ใหม่"
 

@@ -33,7 +33,7 @@
 - สร้างโปรเจกต์ scratch แยกนอก repo เพิ่ม `diesel` เป็น dependency พร้อม feature ตามที่บทนี้สอน
 - รัน `diesel setup`, `diesel migration generate`, เขียน SQL migration จริงสำหรับตาราง `books`/`shelves`/`borrow_records`, รัน `diesel migration run` จริง แล้วรัน `diesel print-schema` จริงเพื่อดู `schema.rs` ที่ generate จริง
 - คอมไพล์และรันโค้ด Rust ที่ใช้ DSL ของ Diesel จริง (filter/select/order/limit/insert/update/delete/join) ต่อฐานข้อมูลจริง พร้อมจับ SQL string จริงที่ Diesel generate ผ่าน `diesel::debug_query!`
-- จงใจเขียน query ที่ผิด (คอลัมน์ไม่มีจริง) เพื่อจับ **compiler error จริง** ของ Diesel มาแสดงในหัวข้อ 72.8
+- จงใจเขียน query ที่ผิด (คอลัมน์ไม่มีจริง) เพื่อจับ **compiler error จริง** ของ Diesel มาแสดงในหัวข้อ 72.9
 
 **อุปสรรคที่เจอจริงและวิธีแก้ที่ใช้จริง**: การ compile `diesel_cli`/โปรเจกต์ที่ใช้ Diesel กับ feature `postgres` ต้องพึ่ง **`libpq`** (C client library ตัวเดียวกับที่ `psql` ใช้) ที่ crate `pq-sys` link ด้วยตอน build (อธิบายเหตุผลเต็มที่ในหัวข้อ 72.3) — เครื่องที่ใช้เขียนบทนี้มี `libpq5` (**runtime** library) ติดตั้งอยู่แล้วจาก PostgreSQL server ที่ตั้งไว้ (เหมือน Part 70) แต่**ไม่มี** `libpq-dev` (development package ที่มี unversioned symlink `libpq.so` ที่ linker ต้องการตอน build) และ network policy ของ sandbox ที่เขียนบทนี้ไม่อนุญาตให้ติดตั้ง package ระบบเพิ่มผ่าน `apt` จริง (พยายามแล้วได้ connection timeout ไปยัง Ubuntu archive mirror) — ครั้งแรกที่ลอง `cargo install diesel_cli --no-default-features --features postgres` จึง**พังจริงตอน linking** ด้วย error `rust-lld: error: unable to find library -lpq` ตรงตามที่คาดจากการไม่มี `libpq-dev`
 
@@ -83,7 +83,7 @@ let results: Vec<Book> = books
 
 **ฝั่ง SQLx**: คุณเขียน SQL ที่เป็น **string literal ล้วน ๆ ในสายตาของ Rust compiler เอง** — compiler มองว่ามันเป็นแค่ `&str` ธรรมดา ไม่รู้อะไรเกี่ยวกับ SQL หรือ schema ของฐานข้อมูลเลย ความปลอดภัยทั้งหมดมาจาก **proc macro ของ `sqlx-macros`** ที่แยก parse string นั้นออกมาต่างหาก แล้วส่งไปตรวจกับฐานข้อมูลจริง (หรือ `.sqlx` cache) ตอน compile time — เท่ากับว่า SQLx ต้อง "จำลอง" ความสามารถของ SQL parser+type checker ขึ้นมาเป็นเลเยอร์แยกที่ทำงาน**คู่กับ**ระบบ type ของ Rust แต่ไม่ใช่ส่วนหนึ่งของมันโดยตรง
 
-**ฝั่ง Diesel**: คุณเขียน `books.filter(available_copies.gt(0))` ซึ่ง**เป็น Rust code จริง ๆ ที่ compiler เข้าใจทุกตัวอักษร** — `books` คือ struct/module ที่ macro `table!` generate ให้ (หัวข้อ 72.4), `available_copies` คือ struct ที่แทนคอลัมน์นั้นโดยเฉพาะ (มี type ที่ผูกกับ SQL type ของคอลัมน์นั้นจริง เช่น `Integer`), `.filter()` คือ trait method ที่รับ argument ที่ implement trait `Expression<SqlType = Bool>` เท่านั้น, `.gt(0)` คือ method ที่สร้าง expression การเปรียบเทียบที่ type-check ตรงกับ type ของคอลัมน์ฝั่งซ้าย — **ทุกจุดต่อกันด้วย trait bound ของ Rust type system เอง ไม่มีเลเยอร์ตรวจสอบพิเศษแยกออกมาเลย** ถ้าคุณเขียนโค้ดที่ type ไม่ตรงกัน (เช่น `available_copies.eq("สิบเล่ม")` ทั้งที่คอลัมน์เป็น `Integer`) มันจะเป็น**ข้อผิดพลาดเรื่อง trait bound ธรรมดา** เหมือนเขียน Rust code ผิดทั่วไป (จะเห็นตัวอย่างจริงในหัวข้อ 72.8)
+**ฝั่ง Diesel**: คุณเขียน `books.filter(available_copies.gt(0))` ซึ่ง**เป็น Rust code จริง ๆ ที่ compiler เข้าใจทุกตัวอักษร** — `books` คือ struct/module ที่ macro `table!` generate ให้ (หัวข้อ 72.4), `available_copies` คือ struct ที่แทนคอลัมน์นั้นโดยเฉพาะ (มี type ที่ผูกกับ SQL type ของคอลัมน์นั้นจริง เช่น `Integer`), `.filter()` คือ trait method ที่รับ argument ที่ implement trait `Expression<SqlType = Bool>` เท่านั้น, `.gt(0)` คือ method ที่สร้าง expression การเปรียบเทียบที่ type-check ตรงกับ type ของคอลัมน์ฝั่งซ้าย — **ทุกจุดต่อกันด้วย trait bound ของ Rust type system เอง ไม่มีเลเยอร์ตรวจสอบพิเศษแยกออกมาเลย** ถ้าคุณเขียนโค้ดที่ type ไม่ตรงกัน (เช่น `available_copies.eq("สิบเล่ม")` ทั้งที่คอลัมน์เป็น `Integer`) มันจะเป็น**ข้อผิดพลาดเรื่อง trait bound ธรรมดา** เหมือนเขียน Rust code ผิดทั่วไป (จะเห็นตัวอย่างจริงในหัวข้อ 72.9)
 
 ผลที่ตามมาที่สำคัญมาก: **Diesel ไม่ต้องมี connection ไปยังฐานข้อมูลตอน compile query DSL เลย** (ต่างจาก SQLx ที่ต้องมี `DATABASE_URL` หรือ `.sqlx` cache ตอน compile เสมอ) เพราะความถูกต้องของ query DSL ไม่ได้พึ่งพาการถามฐานข้อมูลจริง — มันพึ่งพา**ไฟล์ `schema.rs`** ที่ generate ไว้ล่วงหน้าครั้งเดียว (จาก schema จริงตอนนั้น) แล้ว compiler ก็ตรวจกับไฟล์นั้นเหมือนไฟล์ Rust ธรรมดาไฟล์หนึ่ง — นี่คือเหตุผลที่ตารางของ Part 70 เขียนไว้ว่า Diesel ตรวจสอบผ่าน "Rust type system เอง"
 
@@ -97,7 +97,7 @@ let results: Vec<Book> = books
 | ต้องมี DB connection ตอน compile query ไหม | ต้องมี (หรือ `.sqlx` cache ที่สร้างจาก DB จริงมาก่อน) | ไม่ต้อง (ใช้แค่ `schema.rs` ที่เป็นไฟล์ Rust ธรรมดา) |
 | ถ้า schema เปลี่ยนไปจริงแต่ยังไม่ sync กับที่ macro/schema.rs รู้ | SQLx macro จะไปเช็คกับ DB จริงใหม่ทุกครั้งที่ build (เจอความเปลี่ยนแปลงอัตโนมัติถ้า DB connection ยังต่อได้) | Diesel จะ **ไม่รู้เลย** ว่า schema จริงเปลี่ยนไปแล้ว จนกว่าจะรัน `diesel print-schema` ใหม่มา sync `schema.rs` เอง — เป็นภาระที่ผู้พัฒนาต้องจำทำเอง |
 | ความยืดหยุ่นของ SQL ที่เขียนได้ | สูงมาก — เขียน SQL อะไรก็ได้ที่ PostgreSQL รองรับ | จำกัดตามที่ DSL ของ Diesel รองรับ (SQL ที่ซับซ้อนมาก ๆ บางแบบต้องใช้ `sql_query`/raw SQL หลบ DSL) |
-| Error ที่เจอเมื่อเขียนผิด | Error จาก macro บอกตรง ๆ ว่า SQL/DB ไม่ตรง (มักอ่านง่าย) | Error จาก trait bound ของ Rust (มักยาวและซับซ้อนกว่า เพราะเป็น generic trait error ธรรมดา — หัวข้อ 72.8) |
+| Error ที่เจอเมื่อเขียนผิด | Error จาก macro บอกตรง ๆ ว่า SQL/DB ไม่ตรง (มักอ่านง่าย) | Error จาก trait bound ของ Rust (มักยาวและซับซ้อนกว่า เพราะเป็น generic trait error ธรรมดา — หัวข้อ 72.9) |
 
 **ข้อสังเกตเชิงลึกที่มักถูกมองข้าม**: หลายคนเข้าใจผิดว่า Diesel "ปลอดภัยกว่า" SQLx เพราะไม่มี SQL string เลย แต่จริง ๆ แล้วทั้งสองฝั่งให้การันตีคนละแบบ — SQLx การันตีว่า **SQL string ที่คุณเขียนตรงกับ schema จริง ณ เวลาที่ build** (เชื่อมกับฐานข้อมูลจริงหรือ cache ที่มาจากฐานข้อมูลจริง) ส่วน Diesel การันตีว่า **โค้ด Rust ที่คุณเขียนตรงกับ `schema.rs` ที่มีอยู่ในโปรเจกต์** ซึ่งไฟล์นั้น**อาจไม่ตรงกับฐานข้อมูลจริง ณ ปัจจุบัน**ก็ได้ ถ้าใครลืมรัน `diesel print-schema` หลัง migration ใหม่ ๆ (Diesel compile ผ่านสนิท แต่พังตอน runtime จริงเมื่อ query ไปโดนคอลัมน์ที่ schema.rs จำผิด) — ทั้งสองแบบจึงมี "จุดอ่อนที่ผู้พัฒนาต้องรับผิดชอบเอง" คนละจุด ไม่มีฝั่งไหนสมบูรณ์แบบ 100%
 
@@ -118,7 +118,7 @@ Diesel query **คือ blocking code แบบเต็มรูปแบบ**
 ```rust
 // ตัวอย่าง "ผิด" ที่ห้ามทำ — เรียก Diesel sync query ตรงในบล็อก async
 async fn list_books_wrong(
-    State(pool): State<DbPool>, // r2d2 pool ของ Diesel (หัวข้อ 72.9)
+    State(pool): State<DbPool>, // r2d2 pool ของ Diesel (หัวข้อ 72.10)
 ) -> Result<Json<Vec<Book>>, AppError> {
     use crate::schema::books::dsl::*;
 
@@ -147,7 +147,7 @@ async fn list_books_correct(
     // closure ด้านในนี้รันบน thread แยก — block ได้เต็มที่โดยไม่กระทบ worker thread ของ async scheduler
     let all_books = tokio::task::spawn_blocking(move || {
         use crate::schema::books::dsl::*;
-        let mut conn = pool.get()?; // ยืม connection จาก r2d2 pool (หัวข้อ 72.9) — เป็น blocking call ด้วย แต่ก็อยู่ใน closure นี้แล้ว
+        let mut conn = pool.get()?; // ยืม connection จาก r2d2 pool (หัวข้อ 72.10) — เป็น blocking call ด้วย แต่ก็อยู่ใน closure นี้แล้ว
         books.load::<Book>(&mut conn)
     })
     .await // .await ตัวนี้ต่างจากการ .await query โดยตรง — มันแค่รอ "งานบน thread อื่นเสร็จ" ไม่ block worker thread ของ async scheduler เลย
@@ -217,7 +217,7 @@ cargo add diesel --features postgres,chrono,r2d2
 
 - **`postgres`** — เปิด backend สำหรับ PostgreSQL โดยเฉพาะ (Diesel รองรับ MySQL, SQLite ผ่าน feature แยก `mysql`/`sqlite` เหมือนหลักการเดียวกับ SQLx ใน Part 70 — เปิดเฉพาะตัวที่ใช้จริง)
 - **`chrono`** — เปิดการแปลงระหว่าง PostgreSQL type `TIMESTAMPTZ` กับ `chrono::DateTime<Utc>` เหมือนที่ Part 70 อธิบายไว้กับ SQLx (มี feature ชื่อเดียวกันพอดี ทำงานแนวคิดเดียวกัน)
-- **`r2d2`** — เปิด integration กับ crate `r2d2` สำหรับทำ connection pooling แบบ synchronous (หัวข้อ 72.9) — Diesel เองไม่มี pool ในตัวแบบที่ SQLx มี `PgPoolOptions` มาให้ในตัว ต้องพึ่ง crate ภายนอกอย่าง `r2d2` เสมอ
+- **`r2d2`** — เปิด integration กับ crate `r2d2` สำหรับทำ connection pooling แบบ synchronous (หัวข้อ 72.10) — Diesel เองไม่มี pool ในตัวแบบที่ SQLx มี `PgPoolOptions` มาให้ในตัว ต้องพึ่ง crate ภายนอกอย่าง `r2d2` เสมอ
 - **`32-column-tables`** — Diesel ต้อง generate trait implementation สำหรับ tuple/query ที่มีจำนวนคอลัมน์ต่าง ๆ ไว้ล่วงหน้า (ข้อจำกัดจาก generic ของ Rust ที่ไม่มี variadic tuple) ค่า default รองรับสูงสุด 32 คอลัมน์ต่อ query — ถ้าตารางไหนกว้างเกิน 32 คอลัมน์ต้องเปิด `64-column-tables`/`128-column-tables` เพิ่ม (แลกกับเวลา compile ที่นานขึ้นมาก) โดเมนของบทนี้ (`books`/`shelves`/`borrow_records`) ไม่มีตารางไหนเกิน 32 คอลัมน์เลยจึงไม่ต้องสนใจ feature นี้เพิ่ม
 - **`pq-src`** (อยู่ในรายการ deactivated ด้านบน สังเกตเครื่องหมาย `-`) — feature ทางเลือกที่ให้ Diesel **compile libpq จาก source ไปในตัว** แทนพึ่ง libpq ที่ติดตั้งในระบบผ่าน `pq-sys`/`pg_config` — มีประโยชน์มากในสถานการณ์ที่เครื่อง build ไม่มี PostgreSQL development library ติดตั้งไว้เต็มรูปแบบ (เช่น CI ที่ minimal image หรือสถานการณ์แบบที่ผู้เขียนบทนี้เจอจริงตามที่อธิบายไว้ในหมายเหตุตรวจสอบเนื้อหาด้านบน) แลกกับเวลา compile ที่นานขึ้นมาก บทนี้**ไม่ได้เปิด** feature นี้ (เลือกแก้ปัญหาด้วยการสร้าง symlink `libpq.so` แทน) แต่ถ้าเครื่องคุณไม่มีสิทธิ์สร้าง symlink ระดับระบบเลย ให้ลองเปิด feature นี้เพิ่มแทน (`cargo add diesel --features postgres,chrono,r2d2,pq-src`)
 
@@ -303,7 +303,7 @@ Creating migrations/2026-09-27-004201-0000_create_library_tables/down.sql
 
 #### เขียน SQL migration: ตาราง `books`, `shelves`, `borrow_records`
 
-บทนี้ต่อยอดโดเมนห้องสมุดจาก Part 70 แต่เพิ่มตาราง **`shelves`** ขึ้นมาใหม่ (หนึ่งชั้นวางมีหนังสือได้หลายเล่ม — one-to-many ที่หัวข้อ 72.7 จะใช้สอน join) `migrations/2026-09-27-004201-0000_create_library_tables/up.sql`:
+บทนี้ต่อยอดโดเมนห้องสมุดจาก Part 70 แต่เพิ่มตาราง **`shelves`** ขึ้นมาใหม่ (หนึ่งชั้นวางมีหนังสือได้หลายเล่ม — one-to-many ที่หัวข้อ 72.8 จะใช้สอน join) `migrations/2026-09-27-004201-0000_create_library_tables/up.sql`:
 
 ```sql
 -- ชั้นวางหนังสือในห้องสมุด (ตารางใหม่สำหรับบทนี้ — ใช้สอนความสัมพันธ์ one-to-many กับ books)
@@ -431,7 +431,7 @@ diesel::allow_tables_to_appear_in_same_query!(books, borrow_records, shelves,);
 
 - `diesel::table! { books (id) { ... } }` — ประกาศว่ามีตาราง `books` ที่ primary key คือ `id` เนื้อหาข้างในคือรายการคอลัมน์ทั้งหมดพร้อม **SQL type ของ Diesel** (ไม่ใช่ Rust type ตรง ๆ) — `Int8` คือ SQL type ที่แทน `BIGINT` (สอดคล้องกับ `BIGSERIAL` ที่แท้จริงคือ `BIGINT` + sequence), `Text` แทน `TEXT`, `Nullable<Int4>` แทน `INTEGER` ที่ nullable — สังเกตว่า `Nullable<T>` เป็น type wrapper ระดับ SQL type เอง (คู่กับ `Option<T>` ระดับ Rust type ที่จะมาผูกกันตอนนิยาม struct ในหัวข้อ 72.5)
 - macro นี้ generate module ชื่อ `books` ที่มี struct ย่อยแทนแต่ละคอลัมน์ (เช่น struct `id`, `title`, `available_copies`) พร้อม `impl` ที่ผูก type แต่ละคอลัมน์กับ SQL type ที่ระบุไว้ — struct เหล่านี้แหละที่หัวข้อ 72.1 พูดถึงว่าเป็น "ตัวแทนคอลัมน์แต่ละตัวที่ Rust compiler ตรวจสอบได้จริง" ไม่ใช่ string ชื่อคอลัมน์ธรรมดา
-- `diesel::joinable!(books -> shelves (shelf_id))` — macro ที่**บอก Diesel ว่าตาราง `books` join กับ `shelves` ได้ผ่านคอลัมน์ `shelf_id`** (แนวคิดเดียวกับ foreign key แต่ประกาศไว้เป็น Rust code ที่ query DSL ใช้ตรวจสอบ join ได้ตอน compile — หัวข้อ 72.7 จะใช้ macro นี้ทำ `.inner_join()`) — สังเกตว่า `diesel print-schema` **generate macro นี้ให้อัตโนมัติ**จาก foreign key constraint ที่ตรวจพบจริงในฐานข้อมูล (บรรทัดที่สอง `diesel::joinable!(borrow_records -> books (book_id))` ก็มาจากกลไกเดียวกัน อ่านจาก FK ของ `borrow_records.book_id` ที่ migration สร้างไว้ — Diesel เวอร์ชันปัจจุบันจึง infer ความสัมพันธ์นี้ให้เองโดยไม่ต้องเขียนมือ ตราบใดที่ foreign key ถูกประกาศไว้ถูกต้องในระดับฐานข้อมูลจริงตั้งแต่ migration)
+- `diesel::joinable!(books -> shelves (shelf_id))` — macro ที่**บอก Diesel ว่าตาราง `books` join กับ `shelves` ได้ผ่านคอลัมน์ `shelf_id`** (แนวคิดเดียวกับ foreign key แต่ประกาศไว้เป็น Rust code ที่ query DSL ใช้ตรวจสอบ join ได้ตอน compile — หัวข้อ 72.8 จะใช้ macro นี้ทำ `.inner_join()`) — สังเกตว่า `diesel print-schema` **generate macro นี้ให้อัตโนมัติ**จาก foreign key constraint ที่ตรวจพบจริงในฐานข้อมูล (บรรทัดที่สอง `diesel::joinable!(borrow_records -> books (book_id))` ก็มาจากกลไกเดียวกัน อ่านจาก FK ของ `borrow_records.book_id` ที่ migration สร้างไว้ — Diesel เวอร์ชันปัจจุบันจึง infer ความสัมพันธ์นี้ให้เองโดยไม่ต้องเขียนมือ ตราบใดที่ foreign key ถูกประกาศไว้ถูกต้องในระดับฐานข้อมูลจริงตั้งแต่ migration)
 - `diesel::allow_tables_to_appear_in_same_query!(...)` — บอก Diesel ว่าตารางกลุ่มนี้ **อนุญาตให้ปรากฏร่วมกันใน query เดียวกันได้** (จำเป็นสำหรับ join ข้ามตาราง) — เป็น safety mechanism ระดับ compile-time อีกชั้นที่ป้องกันการเขียน query ข้าม schema/tenant กันโดยไม่ตั้งใจในระบบที่ซับซ้อนกว่านี้ (multi-schema database)
 
 #### `schema.rs` คือ "แคช" ของ schema จริง ไม่ใช่ source of truth ที่แท้จริง
@@ -514,7 +514,7 @@ struct NewBook<'a> {
 
 หัวข้อนี้เดินผ่าน CRUD ครบทุกแบบบนตาราง `books` เทียบกับ SQL string จริงที่ Diesel generate ให้ (ผ่าน `diesel::debug_query!`) เพื่อให้เห็นว่า DSL แต่ละบรรทัด map ไปเป็น SQL อะไร — **ทดสอบจริงทุกก้อนต่อฐานข้อมูล `diesel_course_scratch`**
 
-#### ตั้ง connection แบบตรง ๆ (ก่อนพูดถึง pool ในหัวข้อ 72.9)
+#### ตั้ง connection แบบตรง ๆ (ก่อนพูดถึง pool ในหัวข้อ 72.10)
 
 ```rust
 use diesel::pg::PgConnection;
@@ -528,7 +528,7 @@ fn establish_connection() -> PgConnection {
 }
 ```
 
-สังเกตว่า `PgConnection::establish()` เป็น **synchronous function ธรรมดา** (ไม่มี `.await`) ตรงตามที่หัวข้อ 72.2 อธิบายไว้ — `PgConnection` คือ connection เดี่ยว ๆ ตัวเดียว (ไม่ใช่ pool) ใช้ตรง ๆ แบบนี้ได้ในโปรแกรมง่าย ๆ/สคริปต์ แต่ในเว็บแอปจริงต้องใช้ pool (หัวข้อ 72.9)
+สังเกตว่า `PgConnection::establish()` เป็น **synchronous function ธรรมดา** (ไม่มี `.await`) ตรงตามที่หัวข้อ 72.2 อธิบายไว้ — `PgConnection` คือ connection เดี่ยว ๆ ตัวเดียว (ไม่ใช่ pool) ใช้ตรง ๆ แบบนี้ได้ในโปรแกรมง่าย ๆ/สคริปต์ แต่ในเว็บแอปจริงต้องใช้ pool (หัวข้อ 72.10)
 
 #### SELECT ด้วย `.filter()`/`.select()`/`.order()`/`.limit()`
 
@@ -641,7 +641,272 @@ Generated SQL: DELETE FROM "books" WHERE ("books"."id" = $1) -- binds: [3]
 
 `.execute(conn)` คืนค่า `usize` — จำนวนแถวที่ถูกลบจริง (เทียบเท่า `rows_affected()` ของ SQLx ใน Part 70) — ใช้เช็คได้ว่า `id` ที่ระบุมามีอยู่จริงไหม (ถ้าคืน `0` แสดงว่าไม่มีแถวไหน match เลย ควรแปลงเป็น 404 ที่ handler)
 
-### 72.7 Associations และ Join: `shelves` มีหนังสือหลายเล่ม (`.inner_join()`)
+#### Batch Insert: เพิ่มหลายแถวในคำสั่งเดียว
+
+ในระบบจริงบางสถานการณ์ต้อง insert ข้อมูลหลายแถวพร้อมกัน (เช่น นำเข้าหนังสือจาก CSV ทีละหลายร้อยเล่ม) — การเรียก `.values()`/`.execute()` วนลูปทีละแถวทำงานได้แต่เสีย network round-trip ไปยัง PostgreSQL ทุกครั้งที่ insert หนึ่งแถว (คนละ query คนละครั้งที่ต้องรอ round-trip) Diesel รองรับการส่ง `Vec` ของ struct ที่ derive `Insertable` เข้า `.values()` ตรง ๆ เพื่อ insert **หลายแถวในคำสั่ง SQL เดียว**:
+
+```rust
+fn insert_many_books(conn: &mut PgConnection, new_books: &[NewBook]) -> QueryResult<Vec<Book>> {
+    use crate::schema::books::dsl::books as books_table;
+
+    diesel::insert_into(books_table)
+        .values(new_books) // &[NewBook] หรือ &Vec<NewBook> ก็ได้ — ไม่ใช่ &NewBook เดี่ยว ๆ แบบก่อนหน้า
+        .returning(Book::as_select())
+        .get_results(conn) // .get_results() (มี s) แทน .get_result() — คืน Vec ของทุกแถวที่ insert สำเร็จ
+}
+```
+
+**ผลลัพธ์จริง** (ทดสอบด้วย `Vec` ของ `NewBook` สองเล่ม):
+
+```
+Generated SQL: INSERT INTO "books" ("isbn", "title", "author", "total_copies",
+"available_copies", "published_year", "shelf_id")
+VALUES ($1, $2, $3, $4, $5, DEFAULT, DEFAULT), ($6, $7, $8, $9, $10, DEFAULT, DEFAULT)
+RETURNING "books"."id", "books"."isbn", "books"."title", "books"."author",
+"books"."total_copies", "books"."available_copies", "books"."published_year",
+"books"."shelf_id", "books"."created_at"
+-- binds: ["isbn-batch-1", "Book A", "Author A", 1, 1, "isbn-batch-2", "Book B", "Author B", 1, 1]
+
+Inserted 2 books in one round-trip
+  Book A (isbn-batch-1)
+  Book B (isbn-batch-2)
+```
+
+**จุดที่น่าสนใจมาก**: SQL ที่ Diesel generate ให้เป็น `INSERT INTO ... VALUES (...), (...)` — **`VALUES` หลายชุดในคำสั่งเดียว** (มาตรฐาน SQL ที่ PostgreSQL รองรับสำหรับ multi-row insert) แทนการรัน `INSERT` ทีละครั้งวนลูป ทำให้เหลือ network round-trip แค่ครั้งเดียวไม่ว่าจะ insert กี่แถวก็ตาม (ในตัวอย่างนี้สองแถว แต่หลักการเดียวกันใช้ได้กับหลายพันแถว) — สังเกตด้วยว่าคอลัมน์ `published_year`/`shelf_id` ที่ `NewBook` ทั้งสองตัวในตัวอย่างนี้ไม่ได้ระบุค่า (เป็น `None`) ปรากฏเป็น `DEFAULT` ตรง ๆ ใน SQL (ไม่ใช่ `NULL` — เพราะคอลัมน์เหล่านี้ไม่มี `DEFAULT` ที่ระดับฐานข้อมูลจริง ๆ Diesel เลือกใช้ keyword `DEFAULT` ของ SQL ที่บอกให้ PostgreSQL ใส่ค่า default ของคอลัมน์นั้นเอง ซึ่งในกรณีคอลัมน์ nullable ที่ไม่มี `DEFAULT` ประกาศไว้ ค่านั้นก็คือ `NULL` อยู่ดี)
+
+#### Upsert ด้วย `.on_conflict().do_update()`
+
+อีกรูปแบบที่พบบ่อยมากในระบบจริงคือ **upsert** ("insert หรือ update ถ้ามีอยู่แล้ว") — เช่น sync ข้อมูลหนังสือจากระบบภายนอกที่ระบุ ISBN มา ถ้า ISBN นั้นมีอยู่แล้วให้ปรับจำนวนสำเนาที่มี ถ้ายังไม่มีให้ insert ใหม่ Diesel มี DSL ที่ map ตรงกับ PostgreSQL `INSERT ... ON CONFLICT ... DO UPDATE` เป๊ะ:
+
+```rust
+fn upsert_book_by_isbn(conn: &mut PgConnection, incoming: &NewBook) -> QueryResult<Book> {
+    use crate::schema::books::dsl::{available_copies, books as books_table, isbn};
+
+    diesel::insert_into(books_table)
+        .values(incoming)
+        .on_conflict(isbn) // คอลัมน์ที่มี UNIQUE constraint ที่จะใช้ตรวจ conflict (ต้องมี UNIQUE/PRIMARY KEY จริงในฐานข้อมูล)
+        .do_update()
+        .set(available_copies.eq(available_copies + incoming.available_copies))
+        .returning(Book::as_select())
+        .get_result(conn)
+}
+```
+
+**ผลลัพธ์จริง** (ทดสอบด้วย ISBN ที่มีอยู่แล้วในฐานข้อมูล พร้อม `available_copies` ใหม่ = 5):
+
+```
+Generated SQL: INSERT INTO "books" ("isbn", "title", "author", "total_copies",
+"available_copies", "published_year", "shelf_id") VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT ("isbn") DO UPDATE SET "available_copies" = ("books"."available_copies" + $8)
+RETURNING "books"."id", "books"."isbn", "books"."title", "books"."author",
+"books"."total_copies", "books"."available_copies", "books"."published_year",
+"books"."shelf_id", "books"."created_at"
+-- binds: ["978-1-59327-828-1", "Programming Rust (ignored on conflict)", "Jim Blandy", 5, 5, 2021, 1, 5]
+
+After upsert: Book { id: 1, isbn: "978-1-59327-828-1", title: "Programming Rust", ...,
+available_copies: 7, ... }
+```
+
+สังเกตว่าค่า `title`/`author` ที่ส่งเข้ามาใน `incoming` (`"Programming Rust (ignored on conflict)"`) **ไม่ถูกใช้เลย** เพราะ `.set()` ระบุแค่ `available_copies` เท่านั้นให้อัปเดตเมื่อชน conflict — แถวที่ได้กลับมายังคงมี `title = "Programming Rust"` ค่าเดิม (จากแถวที่มีอยู่แล้วในฐานข้อมูล) มีแค่ `available_copies` ที่เปลี่ยนจาก 2 เป็น 7 (2 + 5) ตรงตามที่ `.set()` ระบุไว้ — พฤติกรรมนี้ตรงตาม SQL `ON CONFLICT` มาตรฐานของ PostgreSQL เป๊ะ: `DO UPDATE SET` อัปเดตแค่คอลัมน์ที่ระบุไว้เท่านั้น คอลัมน์อื่นของแถวเดิมไม่ถูกแตะเลย
+
+#### Error Handling: `diesel::result::Error` และการแปลงเป็น `AppError`
+
+จาก Part 66 คุณรู้แล้วว่าการแปลง error ของ database driver ให้เป็น error type ของแอปเอง (`AppError`) เป็นขั้นตอนที่จำเป็นเพื่อคืน HTTP status code ที่เหมาะสม — `diesel::result::Error` มี variant สำคัญที่ควรรู้จักคล้ายกับ `sqlx::Error` ใน Part 70:
+
+```rust
+use diesel::result::{DatabaseErrorKind, Error as DieselError};
+
+enum AppError {
+    NotFound,
+    Conflict(String),
+    Internal(String),
+}
+
+impl From<DieselError> for AppError {
+    fn from(err: DieselError) -> Self {
+        match err {
+            DieselError::NotFound => AppError::NotFound,
+            DieselError::DatabaseError(DatabaseErrorKind::UniqueViolation, info) => {
+                AppError::Conflict(info.message().to_string())
+            }
+            DieselError::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, info) => {
+                AppError::Conflict(info.message().to_string())
+            }
+            other => AppError::Internal(other.to_string()),
+        }
+    }
+}
+```
+
+**ทดสอบจริง**: จงใจ insert หนังสือที่มี `isbn` ซ้ำกับที่มีอยู่แล้ว (ละเมิด `UNIQUE` constraint ที่ Part 70 อธิบายไว้ตอนออกแบบ schema) แล้วพิมพ์ error object ที่ได้กลับมาแบบ `{:#?}`:
+
+```
+Err(
+    DatabaseError(
+        UniqueViolation,
+        "duplicate key value violates unique constraint \"books_isbn_key\"",
+    ),
+)
+```
+
+และเมื่อดึงรายละเอียดออกมาผ่าน method ของ `DatabaseErrorInformation` (`.message()`, `.details()`, `.constraint_name()`):
+
+```
+kind = UniqueViolation
+message = duplicate key value violates unique constraint "books_isbn_key"
+details = Some("Key (isbn)=(978-1-59327-828-1) already exists.")
+constraint_name = Some("books_isbn_key")
+```
+
+**สังเกตความคล้ายกับ Part 70 อย่างมาก**: `diesel::result::Error::DatabaseError(DatabaseErrorKind::UniqueViolation, ...)` ทำหน้าที่เดียวกันเป๊ะกับ `sqlx::Error::Database(...)` ที่ต้องเช็ค `.is_unique_violation()`/`.constraint()` ต่อใน Part 70 — ทั้งสอง driver ห่อ error ดิบจาก PostgreSQL (SQLSTATE code `23505` สำหรับ unique violation) มาเป็น Rust enum ที่ตรวจสอบได้ผ่าน pattern matching แทนต้องไปแยก string เอง — `constraint_name` (`"books_isbn_key"`) คือชื่อ constraint ที่ PostgreSQL สร้างให้อัตโนมัติตอน `CREATE TABLE ... UNIQUE` (รูปแบบชื่อมาตรฐานคือ `<table>_<column>_key`) มีประโยชน์มากเมื่อตารางมี unique constraint หลายตัว (แยกได้ว่าตัวไหนถูกละเมิด เพื่อคืน error message ที่เจาะจงให้ผู้ใช้)
+
+#### Raw SQL Escape Valve: `diesel::sql_query` เมื่อ DSL ไม่พอ
+
+หัวข้อ 72.1 บอกไว้ว่า DSL ของ Diesel มีข้อจำกัดเรื่องความยืดหยุ่นเทียบกับ SQL ดิบ — SQL บางรูปแบบ (window function ซับซ้อน, CTE หลายชั้น, `GROUP BY` ร่วมกับ aggregate function ที่ DSL ยังไม่ครอบคลุมสะดวก) เขียนผ่าน DSL ได้ยากหรือเขียนไม่ได้เลย Diesel จึงมี **escape valve** ให้เขียน SQL ดิบตรง ๆ ผ่าน `diesel::sql_query()` โดยยังได้ type-safety ระดับหนึ่งกลับมาผ่าน `#[derive(QueryableByName)]`:
+
+```rust
+use diesel::sql_types::{BigInt, Text};
+
+// struct สำหรับผลลัพธ์ raw query — ต้องระบุ SQL type ของแต่ละคอลัมน์เอง (ไม่มี schema.rs ช่วยตรวจให้อัตโนมัติแบบ DSL ปกติ)
+#[derive(Debug, QueryableByName)]
+struct ShelfBookCount {
+    #[diesel(sql_type = Text)]
+    shelf_code: String,
+    #[diesel(sql_type = BigInt)]
+    book_count: i64,
+}
+
+fn count_books_per_shelf(conn: &mut PgConnection) -> QueryResult<Vec<ShelfBookCount>> {
+    diesel::sql_query(
+        "SELECT s.code AS shelf_code, COUNT(b.id) AS book_count \
+         FROM shelves s LEFT JOIN books b ON b.shelf_id = s.id \
+         GROUP BY s.code ORDER BY s.code",
+    )
+    .load::<ShelfBookCount>(conn)
+}
+```
+
+**ทดสอบจริง** (ต่อฐานข้อมูลที่มีชั้นวาง `A1` และหนังสือสองเล่มอยู่ในชั้นนั้น):
+
+```
+=== raw sql_query GROUP BY result ===
+  shelf A1 -> 2 books
+```
+
+**ข้อสังเกตสำคัญที่เชื่อมกลับไปหัวข้อ 72.1 โดยตรง**: `sql_query()` รับ `&str` เป็น SQL ดิบล้วน ๆ **เหมือน SQLx ทุกประการ** — จุดนี้คือที่ที่ Diesel "ยืม" แนวทางของ SQLx มาใช้ชั่วคราวเมื่อ DSL ไม่พอ แต่ต่างจาก SQLx ตรงที่**ไม่มีการตรวจสอบ SQL string นี้กับฐานข้อมูลจริงตอน compile เลย** (ไม่มี macro แบบ `query!` มาช่วย) — ความปลอดภัยที่ยังพอได้กลับมาคือแค่ระดับ **"ชนิดข้อมูลที่ struct ประกาศไว้ตรงกับที่ query คืนมาไหม"** ผ่าน `#[diesel(sql_type = ...)]` ที่ต้องระบุมือทุกคอลัมน์ (ตรวจแค่ตอน**รัน**ถ้าระบุ SQL type ผิด ไม่ใช่ตอน compile) — เท่ากับว่า `sql_query` สูญเสียจุดขายหลักของ Diesel (compile-time DSL safety) ไปเกือบทั้งหมด แลกกับความยืดหยุ่นของ SQL ดิบ **ควรใช้เป็นทางเลือกสุดท้าย** เฉพาะกรณีที่ DSL ปกติเขียนไม่ได้จริง ๆ เท่านั้น (คล้ายกับที่หัวข้อ 70.4 ของ Part 70 แนะนำเรื่อง `sqlx::Row`/`.try_get()` แบบ dynamic — เป็น pattern เดียวกันในทั้งสอง ecosystem: มี "ทางลัดที่สูญเสีย safety" ไว้เผื่อสถานการณ์ที่ abstraction หลักไม่พอ)
+
+### 72.7 Transaction: การันตี Atomicity ด้วย `conn.transaction()`
+
+จาก Part 70 คุณรู้แล้วว่าการยืมหนังสือ (ลด `available_copies` + สร้าง `borrow_records`) ต้องเป็น **atomic operation** — ทั้งสองคำสั่งต้องสำเร็จพร้อมกันหรือไม่สำเร็จเลยทั้งคู่ (ไม่ใช่ลด `available_copies` ไปแล้วแต่สร้าง record ไม่สำเร็จ ทำให้ข้อมูลไม่ตรงกัน) Diesel มี method `conn.transaction(|conn| { ... })` ที่ทำหน้าที่เดียวกับ `pool.begin()`/`commit()`/`rollback()` ของ SQLx แต่ด้วย pattern ที่ต่างออกไปเล็กน้อย (ผูกกับ closure แทนเรียก method แยก):
+
+```rust
+use diesel::result::Error as DieselError;
+
+fn borrow_book_tx(
+    conn: &mut PgConnection,
+    target_book_id: i64,
+    borrower: &str,
+) -> QueryResult<()> {
+    use crate::schema::books::dsl::{available_copies, books, id};
+    use crate::schema::borrow_records::dsl::borrow_records;
+
+    // conn.transaction() รับ closure ที่คืน Result<T, E> — ถ้า closure คืน Ok ทั้ง transaction จะ COMMIT
+    // ถ้าคืน Err (ไม่ว่าจาก query จริงที่ fail หรือจากการ return Err เองตรง ๆ) จะ ROLLBACK อัตโนมัติทั้งหมด
+    conn.transaction(|conn| {
+        // เงื่อนไข available_copies > 0 อยู่ใน WHERE — ถ้าไม่มีเล่มให้ยืม UPDATE จะไม่กระทบแถวไหนเลย (0 rows)
+        let updated_rows = diesel::update(
+            books.filter(id.eq(target_book_id)).filter(available_copies.gt(0)),
+        )
+        .set(available_copies.eq(available_copies - 1))
+        .execute(conn)?;
+
+        if updated_rows == 0 {
+            // ไม่มีเล่มให้ยืมแล้ว — คืน Err เพื่อบังคับ rollback (ยกเลิกทุกอย่างในนี้ ถึงจะยังไม่มีอะไรให้ยกเลิกก็ตาม)
+            return Err(DieselError::RollbackTransaction);
+        }
+
+        #[derive(Insertable)]
+        #[diesel(table_name = crate::schema::borrow_records)]
+        struct NewBorrowRecord<'a> {
+            book_id: i64,
+            borrower_name: &'a str,
+        }
+
+        diesel::insert_into(borrow_records)
+            .values(&NewBorrowRecord { book_id: target_book_id, borrower_name: borrower })
+            .execute(conn)?;
+
+        Ok(())
+    })
+}
+```
+
+**อธิบายกลไก**: closure ที่ส่งให้ `conn.transaction(...)` รับ `&mut PgConnection` ตัวใหม่ (ที่อยู่ภายใต้ transaction จริง — ทุก query ข้างในต้องใช้ connection ตัวนี้ ไม่ใช่ตัวนอก) และต้องคืน `Result<T, E>` — Diesel ดูค่าที่ closure คืนมาเป็นตัวตัดสินว่าจะ `COMMIT` หรือ `ROLLBACK`: **`Ok(_)` → `COMMIT`, `Err(_)` → `ROLLBACK`** โดยอัตโนมัติ ไม่ต้องเรียก `.commit()`/`.rollback()` เองแบบ SQLx เลย (SQLx ให้ `Transaction` object แยกที่ต้องเรียก method เองตรง ๆ — Diesel เลือกผูกกับ closure/return value ให้ compiler ช่วยการันตีว่าคุณจัดการ path สำเร็จ/ล้มเหลวครบทุกทางจริง เพราะ `Result` เป็น type ที่ Rust บังคับให้ตรวจ)
+
+`diesel::result::Error::RollbackTransaction` คือ variant พิเศษที่มีไว้สำหรับ "ตั้งใจ rollback โดยไม่ได้มี query error จริง ๆ" (เช่นในตัวอย่างนี้ — เงื่อนไขทางธุรกิจไม่ผ่าน ไม่ใช่ database error) — `?` ที่ตามหลัง `.execute(conn)?`/`.execute(conn)?` อื่น ๆ ในนี้ก็ทำให้ query error จริงใด ๆ (เช่น constraint violation) ทำให้ทั้ง closure คืน `Err` และ rollback อัตโนมัติเช่นกัน โดยไม่ต้องเขียน rollback เองเลย
+
+**พิสูจน์ rollback ทำงานจริง** (ทดสอบจริง — ตั้ง `available_copies = 0` ก่อน แล้วเรียก `borrow_book_tx`):
+
+```
+=== Before failed borrow: available_copies = 0 ===
+borrow_result = Err(RollbackTransaction)
+=== After failed borrow (should be unchanged): available_copies = 0 ===
+=== borrow_records count after rollback attempt: 0 ===
+```
+
+สังเกตว่า `available_copies` **ยังเป็น 0 เหมือนเดิม** (ไม่ได้ถูกลดเป็น -1 แม้จะมีการเรียก `.execute()` ของ `UPDATE` ไปแล้วในนี้ก็ตาม — เพราะ `WHERE available_copies > 0` ทำให้ `UPDATE` นี้ไม่กระทบแถวไหนเลยอยู่แล้วตั้งแต่ต้น ไม่ใช่ผลจาก rollback) และ `borrow_records` **ไม่มี record ใหม่เกิดขึ้นเลย** (count = 0) ยืนยันว่าไม่มี "ครึ่ง ๆ กลาง ๆ" เกิดขึ้น — พอลองตั้ง `available_copies = 1` แล้วเรียกใหม่ (คราวนี้ควรสำเร็จ):
+
+```
+success_result = Ok(())
+=== After successful borrow: available_copies = 0 ===
+=== borrow_records count after success: 1 ===
+```
+
+ทั้งสองคำสั่งสำเร็จพร้อมกันจริง (`available_copies` ลดจาก 1 เป็น 0 **และ** `borrow_records` มี record ใหม่เกิดขึ้นพร้อมกัน) — พิสูจน์ atomicity ครบทั้งสองทาง (สำเร็จทั้งคู่ กับ ล้มเหลวทั้งคู่) เหมือนหลักการที่ Part 70 พิสูจน์ไว้กับ SQLx transaction ทุกประการ เพียงแต่ syntax ต่างกัน (closure + return value แทน `.begin()`/`.commit()`/`.rollback()` แยก method)
+
+#### Testing กับ Diesel: `conn.begin_test_transaction()`
+
+จาก Part 32-33 คุณรู้แล้วว่า integration test ที่แตะฐานข้อมูลจริงต้องมีวิธี "ล้างข้อมูลทดสอบ" ไม่ให้ตกค้างข้าม test แต่ละตัว (Part 70 แก้ปัญหานี้ด้วย `#[sqlx::test]` ที่สร้างฐานข้อมูลแยกอัตโนมัติต่อ test) Diesel มีกลไกที่เบากว่าแต่ทำงานคล้ายกันมาก: **`conn.begin_test_transaction()`**:
+
+```rust
+#[test]
+fn test_insert_book_does_not_leak_into_other_tests() {
+    let mut conn = establish_connection();
+    conn.begin_test_transaction().unwrap(); // เปิด transaction ที่ "ตั้งใจไม่ commit เด็ดขาด"
+
+    use crate::schema::books::dsl::books as books_table;
+    let temp_book = NewBook {
+        isbn: "isbn-temp-test",
+        title: "Temp Test Book",
+        author: "Test Author",
+        total_copies: 1,
+        available_copies: 1,
+        published_year: None,
+        shelf_id: None,
+    };
+    diesel::insert_into(books_table).values(&temp_book).execute(&mut conn).unwrap();
+
+    let count_inside: i64 = books_table.count().get_result(&mut conn).unwrap();
+    assert_eq!(count_inside, 2); // เห็นข้อมูลที่ insert ไปเมื่อกี้จริงภายใน transaction เดียวกัน
+
+    // conn ถูก drop ที่ท้าย scope ของฟังก์ชันนี้ — Diesel rollback transaction ให้อัตโนมัติตอน drop
+}
+```
+
+**กลไกที่แท้จริง**: `begin_test_transaction()` เปิด transaction ปกติ แต่ผูก connection ไว้ในสถานะที่ **rollback เสมอตอน `Drop`** (ไม่ว่า test จะจบแบบ pass หรือ panic ก็ตาม) แทนที่จะต้องเรียก `.rollback()` เองท้าย test ทุกครั้ง — ผลคือทุกอย่างที่ทำใน connection นี้ (insert/update/delete) **มองเห็นได้จริงภายใน test ตัวเดียวกัน** (เหมือนทำงานกับฐานข้อมูลจริงปกติทุกประการ) แต่**หายไปทั้งหมดทันทีที่ test จบ** ไม่ทิ้งข้อมูลตกค้างให้ test ตัวถัดไปเจอ
+
+**ทดสอบจริง**: ยืนยันด้วยการเปิด connection ใหม่ (แยกจาก connection ที่ใช้ทำ `begin_test_transaction()`) หลังฟังก์ชันทดสอบข้างบนจบแล้ว:
+
+```
+=== count inside test transaction: 2 ===
+=== count in a FRESH connection after test fn ended: 1 ===
+```
+
+`count` ภายใน test เห็น 2 แถว (1 แถวจากข้อมูลตั้งต้น + 1 แถวที่ insert ใหม่) แต่ connection ใหม่ (ที่เปิดหลัง test จบ) เห็นแค่ 1 แถวเท่านั้น — ยืนยันว่า `begin_test_transaction()` rollback ทุกอย่างไปจริงตอน connection ก่อนหน้าถูก drop ไม่มีข้อมูลทดสอบหลงเหลือให้กระทบ test ตัวอื่น
+
+**เทียบกับ `#[sqlx::test]` ของ SQLx (Part 70)**: `#[sqlx::test]` แก้ปัญหาด้วยการ**สร้างฐานข้อมูลใหม่แยกกันทั้งตัว**ต่อ test function หนึ่งตัว (isolation ระดับฐานข้อมูล) ส่วน `begin_test_transaction()` ของ Diesel แก้ปัญหาด้วย**transaction ที่ไม่ commit**บนฐานข้อมูลเดียวกัน (isolation ระดับ transaction) — ทั้งสองวิธีให้ผลลัพธ์ที่คล้ายกัน (test ไม่ทิ้งข้อมูลตกค้าง) แต่วิธีของ Diesel **เบากว่ามาก** (ไม่ต้องสร้าง/ลบฐานข้อมูลจริงทุก test ซึ่งมี overhead สูงกว่า) แลกกับข้อจำกัดที่ว่าถ้า test เขียนโค้ดที่เปิด **connection ใหม่เอง** (แยกจาก connection ที่ `begin_test_transaction()` ไว้) connection ใหม่นั้นจะไม่เห็นข้อมูลที่ insert ไว้ใน transaction เลย (เพราะ PostgreSQL isolation ปกติ transaction ที่ยังไม่ commit จะไม่เห็นข้ามการเชื่อมต่อ) — เหมาะกับ test ที่ทำงานผ่าน connection เดียวตลอดทั้ง test เท่านั้น
+
+### 72.8 Associations และ Join: `shelves` มีหนังสือหลายเล่ม (`.inner_join()`)
 
 จากตาราง `shelves`/`books` ที่สร้างไว้ในหัวข้อ 72.3 (ชั้นวางหนึ่งชั้นมีหนังสือได้หลายเล่ม ผ่าน `books.shelf_id -> shelves.id`) ลองเขียน query ที่ join สองตารางนี้เพื่อดึง "หนังสือทุกเล่มพร้อมชื่อชั้นวางที่มันอยู่":
 
@@ -688,7 +953,7 @@ The Rust Programming Language -> shelf A2
 
 **หมายเหตุเรื่อง `#[diesel(select_expression = ...)]`**: attribute นี้ (เพิ่มเข้ามาในเวอร์ชันใหม่ ๆ ของ `diesel_derives`) ให้ struct หนึ่งตัวรวมคอลัมน์จากหลายตารางเข้าด้วยกันตอนใช้ `Selectable`/`as_select()` กับ query ที่ join — ถ้าไม่ต้องการความสะดวกนี้ ใช้วิธีที่ตรงไปตรงกว่า (แบบในตัวอย่างฟังก์ชัน `list_books_with_shelf` ที่ `.select((books::title, shelves::code))` แล้ว `.load::<(String, String)>()` เป็น tuple ตรง ๆ) ก็ได้ผลลัพธ์เดียวกัน เพียงแต่ไม่ได้ struct ที่มีชื่อ field ให้อ่านง่าย
 
-### 72.8 Compile-Time Query Safety ในทางปฏิบัติ: อ่าน Error จริงของ Diesel
+### 72.9 Compile-Time Query Safety ในทางปฏิบัติ: อ่าน Error จริงของ Diesel
 
 นี่คือจุดขายหลักของ Diesel — มาดูว่าเมื่อเขียน query ผิดจริง ๆ จะเกิดอะไรขึ้น สองกรณีคลาสสิกที่สุด: **พิมพ์ชื่อคอลัมน์ผิด** และ **เทียบ type ผิด**
 
@@ -796,7 +1061,7 @@ note: required by a bound in `diesel::RunQueryDsl::load`
 
 **วิธีแก้**: เปลี่ยนให้ type ตรงกัน — ถ้าตั้งใจจะเทียบตัวเลข ให้ใส่ `i32` ตรง ๆ (`available_copies.eq(10)`) ถ้าตั้งใจจะเทียบ column ที่เป็น `Text` จริง ๆ ต้องเปลี่ยนไปใช้ column ที่ถูก (เช่น `title.eq(...)`) — Diesel **ป้องกัน bug ประเภท "เทียบ column ผิด type โดยไม่ตั้งใจ" ได้ 100% ตอน compile** ซึ่งเป็นสิ่งที่ SQLx (โดย `query!`/`query_as!`) ก็ทำได้เหมือนกัน (Part 70) เพียงแต่ error ของ SQLx macro มักสั้นและตรงประเด็นกว่ามาก (เพราะมันสร้าง error message ของตัวเองโดยเฉพาะ ไม่ได้พึ่ง trait bound error ทั่วไปของ `rustc`) — **นี่คือ trade-off ที่แท้จริงระหว่างสองแนวทางที่พิสูจน์ได้จากตัวอย่างข้างบนตรง ๆ**: Diesel ได้ compile-time safety แบบเดียวกัน แต่ error message มาจากกลไก generic ทั่วไปของภาษา (จึงยาว/ซับซ้อน/มีหลายก้อนพร้อมกันในบาง case) ส่วน SQLx ลงทุนเขียน error message เฉพาะทางไว้ในตัว macro เอง (จึงสั้นกว่ามากในหลาย case แต่ต้องมี DB connection/cache ตอน build เสมอ)
 
-### 72.9 Connection Pooling กับ Diesel: `r2d2` เทียบกับ Pool ของ SQLx
+### 72.10 Connection Pooling กับ Diesel: `r2d2` เทียบกับ Pool ของ SQLx
 
 #### `r2d2`: pool แบบ synchronous ดั้งเดิม
 
@@ -846,7 +1111,7 @@ struct AppState {
     pool: DbPool,
 }
 
-// handler แบบเต็มรูปแบบที่รวมทุกอย่างที่หัวข้อ 72.2/72.9 สอนไว้: pool + spawn_blocking
+// handler แบบเต็มรูปแบบที่รวมทุกอย่างที่หัวข้อ 72.2/72.10 สอนไว้: pool + spawn_blocking
 async fn list_available_books(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Book>>, AppError> {
@@ -892,7 +1157,7 @@ fn app(pool: DbPool) -> Router {
 
 **สิ่งที่ต้องสังเกต**: ทุก handler ที่ใช้ Diesel ในระบบจริงจะมีรูปแบบซ้ำ ๆ แบบนี้เสมอ (`spawn_blocking` + `pool.get()` + query + `.await` สองชั้น) ต่างจาก SQLx handler ของ Part 70 ที่เขียน `pool.fetch_all(...).await?` บรรทัดเดียวตรง ๆ ในบล็อก async ได้เลย — นี่คือ**ภาระทางไวยากรณ์ (syntactic overhead) ที่แลกมากับการได้ query DSL แบบ type-safe เต็มรูปแบบของ Diesel** ในโปรเจกต์จริงหลายทีมเขียน helper function กลาง ๆ ที่ห่อ pattern นี้ไว้ให้ (เช่น `async fn run_blocking<F, T>(pool: DbPool, f: F) -> Result<T, AppError> where F: FnOnce(&mut PgConnection) -> QueryResult<T> + Send + 'static, T: Send + 'static`) เพื่อไม่ต้องเขียน `spawn_blocking` boilerplate ซ้ำทุก handler
 
-### 72.10 เมื่อไหร่ควรเลือก Diesel เมื่อไหร่ควรเลือก SQLx
+### 72.11 เมื่อไหร่ควรเลือก Diesel เมื่อไหร่ควรเลือก SQLx
 
 ถึงจุดนี้คุณเห็นทั้งสองฝั่งทำงานจริงบนโดเมนเดียวกันแล้ว (Part 70-71 กับ SQLx, บทนี้กับ Diesel) มาสรุปเป็นหลักการตัดสินใจที่ใช้ได้จริงในโปรเจกต์จริง — **ไม่มีคำตอบที่ถูกเสมอไปทุกสถานการณ์** ทั้งสองมี trade-off จริงที่ชัดเจน:
 
@@ -909,6 +1174,19 @@ fn app(pool: DbPool) -> Router {
 - ทีมคุ้นเคย SQL อยู่แล้วและต้องการ**ควบคุม query เต็มรูปแบบ** (SQL ที่ซับซ้อนมาก ๆ เช่น window function, CTE ซับซ้อนหลายชั้น, database-specific feature) — เขียน SQL ตรง ๆ มักตรงไปตรงมากว่าพยายามหา DSL ที่ตรงกับความต้องการเป๊ะ
 - ต้องการ dependency footprint ที่เป็น **pure Rust ล้วน ๆ** ไม่มี C library (`libpq`) มาเป็นภาระ build/deploy (สำคัญมากในสถานการณ์ cross-compile หรือ container image ที่อยากให้เล็กและ build เร็ว)
 - ทีมต้องการ error message จาก compile-time check ที่ **อ่านง่ายและสั้นกว่า** ในกรณีส่วนใหญ่ (macro error ของ SQLx ออกแบบมาเฉพาะทาง ต่างจาก generic trait bound error ทั่วไปของ Diesel)
+
+**ตารางเช็คลิสต์ตัดสินใจแบบเร็ว** (ใช้ตอบคำถามต่อไปนี้กับโปรเจกต์จริงที่กำลังตัดสินใจ — ถ้าตอบ "ใช่" ข้อไหนมาก ให้เอียงไปทางฝั่งนั้น):
+
+| คำถาม | ตอบ "ใช่" เอียงไปทาง |
+|---|---|
+| แอปนี้เป็นเว็บเซิร์ฟเวอร์ async (Axum/Actix-web) ที่ต้องรองรับ concurrent request จำนวนมาก? | SQLx |
+| แอปนี้เป็น CLI/batch job/background worker ที่ไม่มี async runtime อยู่แล้ว? | Diesel |
+| ทีมมี SQL ที่ซับซ้อนมาก (window function, CTE หลายชั้น, database-specific extension) ที่ต้องคุมเองเต็มที่? | SQLx |
+| ทีมกังวลเรื่อง SQL string พิมพ์ผิดที่ไม่มีใครจับได้ก่อน production มากกว่าความยืดหยุ่นของ SQL ดิบ? | Diesel |
+| Build/deploy pipeline ต้องการ pure Rust ล้วน ๆ ไม่มี C library (`libpq`) เป็นภาระ (เช่น cross-compile ไป target แปลก ๆ)? | SQLx |
+| ทีมมีพื้นฐาน ORM แบบ schema-first จากภาษาอื่นมาก่อน และอยากได้ compile-time DSL type-safety เต็มรูปแบบ? | Diesel |
+| ต้องการ error message จาก compile-time check ที่อ่านง่ายที่สุดในกรณีทั่วไป? | SQLx |
+| ต้องการ compose query เป็นฟังก์ชันย่อย ๆ ที่ต่อกันได้ในระดับ type (ไม่ใช่แค่ต่อ string)? | Diesel |
 
 **สรุปจุดยืนของหลักสูตรนี้**: เหมือนที่ Part 69 อธิบายไว้ตอนเลือก Axum เป็น framework หลัก (แม้จะสอน Actix-web ควบคู่เพื่อให้เห็นภาพเทียบกัน) หลักสูตรนี้**เลือกสอน SQLx เป็นตัวหลักที่ใช้ต่อเนื่องในบทถัดไปทั้งหมด** (Authentication, WebSockets, Microservices ฯลฯ) เพราะสอดคล้องกับ async-native ecosystem ที่ทั้งหลักสูตรสร้างมาตั้งแต่ Part 46 เรื่อง async/await — Diesel (บทนี้) และ SeaORM (Part 73 ถัดไป) สอนไว้เพื่อให้คุณ**เข้าใจภาพรวมของทางเลือกในวงการจริง** และเลือกใช้ได้อย่างมีข้อมูลถ้าไปเจอโปรเจกต์จริงที่ใช้ตัวใดตัวหนึ่งอยู่แล้ว หรือถ้าโปรเจกต์ในอนาคตของคุณมีเงื่อนไขที่เข้ากับจุดแข็งของ Diesel/SeaORM มากกว่า
 
@@ -928,11 +1206,11 @@ async fn list_books_bad(State(pool): State<DbPool>) -> Json<Vec<Book>> {
 }
 ```
 
-**อาการที่เจอจริงตอน production**: ไม่มี error message ให้เห็นตรง ๆ เลย — สิ่งที่สังเกตได้คือ **latency ของทุก endpoint ในระบบพุ่งสูงขึ้นพร้อมกัน**เมื่อ traffic สูงขึ้น (แม้ endpoint ที่ไม่เกี่ยวกับฐานข้อมูลเลยก็ช้าไปด้วย) เพราะ Tokio worker thread ทั้งหมดถูกยึดโดย query ที่ block อยู่ — วิธีวินิจฉัย: เปิด metrics ของ Tokio runtime (เช่นผ่าน `tokio-console` ที่เป็นเครื่องมือ debug async runtime โดยเฉพาะ) จะเห็น task ที่ "ค้าง" อยู่บน worker thread นานผิดปกติโดยไม่มีการ poll สลับเลย — **วิธีแก้**: ห่อทุก Diesel call ด้วย `tokio::task::spawn_blocking` ตามที่หัวข้อ 72.2/72.9 สอนไว้เสมอ ไม่มีข้อยกเว้น
+**อาการที่เจอจริงตอน production**: ไม่มี error message ให้เห็นตรง ๆ เลย — สิ่งที่สังเกตได้คือ **latency ของทุก endpoint ในระบบพุ่งสูงขึ้นพร้อมกัน**เมื่อ traffic สูงขึ้น (แม้ endpoint ที่ไม่เกี่ยวกับฐานข้อมูลเลยก็ช้าไปด้วย) เพราะ Tokio worker thread ทั้งหมดถูกยึดโดย query ที่ block อยู่ — วิธีวินิจฉัย: เปิด metrics ของ Tokio runtime (เช่นผ่าน `tokio-console` ที่เป็นเครื่องมือ debug async runtime โดยเฉพาะ) จะเห็น task ที่ "ค้าง" อยู่บน worker thread นานผิดปกติโดยไม่มีการ poll สลับเลย — **วิธีแก้**: ห่อทุก Diesel call ด้วย `tokio::task::spawn_blocking` ตามที่หัวข้อ 72.2/72.10 สอนไว้เสมอ ไม่มีข้อยกเว้น
 
 ### 2. `schema.rs` ไม่ sync กับฐานข้อมูลจริงหลัง migration ใหม่
 
-ถ้ารัน migration ที่เพิ่มคอลัมน์ใหม่แล้ว**ลืม**รัน `diesel print-schema` (หรือไม่ได้ตั้งค่า `diesel.toml` ให้ทำอัตโนมัติตามหัวข้อ 72.4) แล้วเขียนโค้ดอ้างถึงคอลัมน์ใหม่นั้น จะได้ error แบบเดียวกับกรณี "พิมพ์ชื่อคอลัมน์ผิด" ในหัวข้อ 72.8 (เพราะในมุมของ Rust compiler มันคือ identifier ที่ไม่มีอยู่จริงเหมือนกัน — schema.rs เก่ายังไม่รู้จักคอลัมน์นั้น):
+ถ้ารัน migration ที่เพิ่มคอลัมน์ใหม่แล้ว**ลืม**รัน `diesel print-schema` (หรือไม่ได้ตั้งค่า `diesel.toml` ให้ทำอัตโนมัติตามหัวข้อ 72.4) แล้วเขียนโค้ดอ้างถึงคอลัมน์ใหม่นั้น จะได้ error แบบเดียวกับกรณี "พิมพ์ชื่อคอลัมน์ผิด" ในหัวข้อ 72.9 (เพราะในมุมของ Rust compiler มันคือ identifier ที่ไม่มีอยู่จริงเหมือนกัน — schema.rs เก่ายังไม่รู้จักคอลัมน์นั้น):
 
 ```
 error[E0425]: cannot find value `category` in this scope
@@ -965,15 +1243,41 @@ fn broken(conn: &mut PgConnection) -> QueryResult<Vec<Book>> {
 Pool::builder().max_size(2).build(manager) // max_size เล็กเกินไปสำหรับ traffic จริง
 ```
 
-ถ้า `max_size` ของ `r2d2` pool เล็กเกินไป (เทียบกับจำนวน concurrent request ที่ต้องคุยกับฐานข้อมูลพร้อมกันจริง) ทุก request ที่เกินจำนวนนี้จะไปกอง**รอ**อยู่ที่ `pool.get()` (block thread ของ `spawn_blocking` thread pool ตามที่หัวข้อ 72.9 อธิบาย) — ปัญหาคือ `spawn_blocking` thread pool ของ Tokio (ต่างจาก worker thread ของ async scheduler) **ขยายได้แต่ไม่ใช่ไม่จำกัดไปตลอด** ถ้ามี request จำนวนมากพอที่ต่างก็ค้างรอ `pool.get()` พร้อมกัน (เพราะ `max_size` เล็กเกิน) อาจไปถึงขีดจำกัดของ `spawn_blocking` pool เองได้ในระบบที่ traffic สูงมาก ๆ (ค่า default ของ Tokio คือ 512 blocking thread — ตัวเลขที่มากพอสมควรแต่ไม่ใช่ไม่จำกัด) — อาการที่เจอ: request timeout จำนวนมากพร้อมกันแบบ "ระเบิด" (cascading) แทนที่จะ degrade อย่างค่อยเป็นค่อยไป — **วิธีแก้**: ตั้ง `max_size` ของ `r2d2` ให้เหมาะกับ traffic จริง (คล้ายหลักการเดียวกับ `max_connections` ของ `PgPoolOptions` ใน Part 70) และตั้ง `connection_timeout` ให้เหมาะสม (`r2d2::Builder::connection_timeout(Duration)`) เพื่อให้ request ที่รอนานเกินไป **fail เร็ว** ด้วย error ที่ชัดเจน (แปลงเป็น 503 Service Unavailable) แทนปล่อยให้ค้างจนกระทบ thread pool ทั้งระบบ
+ถ้า `max_size` ของ `r2d2` pool เล็กเกินไป (เทียบกับจำนวน concurrent request ที่ต้องคุยกับฐานข้อมูลพร้อมกันจริง) ทุก request ที่เกินจำนวนนี้จะไปกอง**รอ**อยู่ที่ `pool.get()` (block thread ของ `spawn_blocking` thread pool ตามที่หัวข้อ 72.10 อธิบาย) — ปัญหาคือ `spawn_blocking` thread pool ของ Tokio (ต่างจาก worker thread ของ async scheduler) **ขยายได้แต่ไม่ใช่ไม่จำกัดไปตลอด** ถ้ามี request จำนวนมากพอที่ต่างก็ค้างรอ `pool.get()` พร้อมกัน (เพราะ `max_size` เล็กเกิน) อาจไปถึงขีดจำกัดของ `spawn_blocking` pool เองได้ในระบบที่ traffic สูงมาก ๆ (ค่า default ของ Tokio คือ 512 blocking thread — ตัวเลขที่มากพอสมควรแต่ไม่ใช่ไม่จำกัด) — อาการที่เจอ: request timeout จำนวนมากพร้อมกันแบบ "ระเบิด" (cascading) แทนที่จะ degrade อย่างค่อยเป็นค่อยไป — **วิธีแก้**: ตั้ง `max_size` ของ `r2d2` ให้เหมาะกับ traffic จริง (คล้ายหลักการเดียวกับ `max_connections` ของ `PgPoolOptions` ใน Part 70) และตั้ง `connection_timeout` ให้เหมาะสม (`r2d2::Builder::connection_timeout(Duration)`) เพื่อให้ request ที่รอนานเกินไป **fail เร็ว** ด้วย error ที่ชัดเจน (แปลงเป็น 503 Service Unavailable) แทนปล่อยให้ค้างจนกระทบ thread pool ทั้งระบบ
+
+### 5. ระบุ `#[diesel(sql_type = ...)]` ผิดใน `QueryableByName` — compile ผ่านแต่พังตอน runtime
+
+ต่อยอดจากหัวข้อ 72.6 เรื่อง `sql_query`/`QueryableByName` — เพราะ escape valve นี้ไม่มีการตรวจสอบกับฐานข้อมูลจริงตอน compile เลย (ตามที่อธิบายไว้ว่าสูญเสีย compile-time safety ไปเกือบทั้งหมด) การระบุ SQL type ผิดจะ **compile ผ่านสนิท** แล้วไปพังตอน runtime ทันทีที่ query จริงถูกเรียก:
+
+```rust
+#[derive(Debug, QueryableByName)]
+struct WrongType {
+    #[diesel(sql_type = diesel::sql_types::BigInt)] // ผิด: shelves.code เป็น TEXT ไม่ใช่ BigInt
+    code: i64,
+}
+
+let result = diesel::sql_query("SELECT code FROM shelves LIMIT 1").load::<WrongType>(&mut conn);
+```
+
+**Error จริงตอน runtime** (ทดสอบจริง):
+
+```
+Err(
+    DeserializationError(
+        "Received less than 8 bytes while decoding an i64. Was an Integer expression accidentally marked as BigInt?",
+    ),
+)
+```
+
+สังเกตว่า Diesel **พยายามช่วยเดาสาเหตุให้ในตัว error message เอง** (`Was an Integer expression accidentally marked as BigInt?`) เพราะรูปแบบ error นี้พบบ่อยพอที่ทีม Diesel จะเขียน hint เฉพาะทางไว้ — แต่ก็ยังเป็นแค่ **runtime error ธรรมดา** (ไม่ใช่ compile error) ต่างจาก DSL ปกติที่จับปัญหาแบบเดียวกันได้ตั้งแต่ตอน `cargo build` (หัวข้อ 72.9) — **วิธีแก้**: ตรวจสอบ SQL type ของทุกคอลัมน์ที่ใช้กับ `QueryableByName` ให้ตรงกับ `schema.rs` เสมอ (เปิด `schema.rs` เทียบมือทุกครั้งที่เขียน raw query ใหม่) และจำกัดการใช้ `sql_query` ให้น้อยที่สุดเท่าที่จำเป็นจริง ๆ ตามคำแนะนำในหัวข้อ 72.6
 
 ## แบบฝึกหัด (Exercises)
 
 1. **(ง่าย)** เพิ่มฟังก์ชัน `find_book_by_isbn(conn: &mut PgConnection, target_isbn: &str) -> QueryResult<Option<Book>>` ที่ query ด้วย `.filter(isbn.eq(target_isbn))` แล้วใช้ `.first::<Book>(conn).optional()` (method ของ Diesel ที่แปลง `NotFound` error เป็น `Ok(None)` โดยอัตโนมัติ แทนต้อง `match` เองกับ `diesel::result::Error::NotFound`) — Hint: `.optional()` เรียกต่อจาก `.first(conn)` ได้ตรง ๆ เปลี่ยน `QueryResult<Book>` เป็น `QueryResult<Option<Book>>` ให้อัตโนมัติ
 
-2. **(กลาง)** เขียน handler Axum `PUT /books/{id}/shelf` ที่รับ JSON body `{ "shelf_id": 3 }` แล้ว `UPDATE books SET shelf_id = $1 WHERE id = $2` ผ่าน DSL ของ Diesel — ต้องห่อด้วย `spawn_blocking` ให้ถูกต้องตามหัวข้อ 72.2/72.9 ทั้งหมด และแปลง error กรณีไม่มี `id` นั้นจริง (`.get_result()` คืน `NotFound`) เป็น HTTP 404 — Hint: ใช้ `.returning(Book::as_select()).get_result(&mut conn)` แล้ว match `Err(diesel::result::Error::NotFound)` แปลงเป็น `AppError::NotFound` เหมือนที่ Part 66 สอนไว้กับ `sqlx::Error::RowNotFound`
+2. **(กลาง)** เขียน handler Axum `PUT /books/{id}/shelf` ที่รับ JSON body `{ "shelf_id": 3 }` แล้ว `UPDATE books SET shelf_id = $1 WHERE id = $2` ผ่าน DSL ของ Diesel — ต้องห่อด้วย `spawn_blocking` ให้ถูกต้องตามหัวข้อ 72.2/72.10 ทั้งหมด และแปลง error กรณีไม่มี `id` นั้นจริง (`.get_result()` คืน `NotFound`) เป็น HTTP 404 — Hint: ใช้ `.returning(Book::as_select()).get_result(&mut conn)` แล้ว match `Err(diesel::result::Error::NotFound)` แปลงเป็น `AppError::NotFound` เหมือนที่ Part 66 สอนไว้กับ `sqlx::Error::RowNotFound`
 
-3. **(ยาก)** สร้าง migration ใหม่ที่เพิ่มตาราง `authors` (`id`, `name`, `country`) แล้วเปลี่ยนคอลัมน์ `books.author` (ที่เดิมเป็น `TEXT` ตรง ๆ) ให้เป็น `author_id BIGINT REFERENCES authors(id)` แทน (ต้องเขียน migration ที่ migrate ข้อมูลเดิมด้วย — insert ชื่อผู้เขียนที่ไม่ซ้ำเข้า `authors` ก่อน แล้วค่อย backfill `author_id` ของ `books` จากชื่อที่ตรงกัน) — จากนั้นเขียนฟังก์ชันที่ join `books` กับ `authors` ผ่าน `.inner_join()` แบบหัวข้อ 72.7 พร้อมรัน `diesel print-schema` ใหม่ให้ `joinable!` ประกาศความสัมพันธ์นี้ให้ถูกต้อง — Hint: migration ที่ต้อง "ย้ายข้อมูล" ระหว่างเปลี่ยน schema ต้องเขียนเป็น SQL DML (`INSERT INTO ... SELECT DISTINCT ...`, `UPDATE ... SET author_id = ...`) ผสมกับ DDL ในไฟล์ migration เดียวกันได้ตามปกติ (SQL ไฟล์ migration รันเป็นคำสั่งลำดับต่อกันเรื่อย ๆ ไม่จำกัดว่าต้องเป็น DDL ล้วน ๆ)
+3. **(ยาก)** สร้าง migration ใหม่ที่เพิ่มตาราง `authors` (`id`, `name`, `country`) แล้วเปลี่ยนคอลัมน์ `books.author` (ที่เดิมเป็น `TEXT` ตรง ๆ) ให้เป็น `author_id BIGINT REFERENCES authors(id)` แทน (ต้องเขียน migration ที่ migrate ข้อมูลเดิมด้วย — insert ชื่อผู้เขียนที่ไม่ซ้ำเข้า `authors` ก่อน แล้วค่อย backfill `author_id` ของ `books` จากชื่อที่ตรงกัน) — จากนั้นเขียนฟังก์ชันที่ join `books` กับ `authors` ผ่าน `.inner_join()` แบบหัวข้อ 72.8 พร้อมรัน `diesel print-schema` ใหม่ให้ `joinable!` ประกาศความสัมพันธ์นี้ให้ถูกต้อง — Hint: migration ที่ต้อง "ย้ายข้อมูล" ระหว่างเปลี่ยน schema ต้องเขียนเป็น SQL DML (`INSERT INTO ... SELECT DISTINCT ...`, `UPDATE ... SET author_id = ...`) ผสมกับ DDL ในไฟล์ migration เดียวกันได้ตามปกติ (SQL ไฟล์ migration รันเป็นคำสั่งลำดับต่อกันเรื่อย ๆ ไม่จำกัดว่าต้องเป็น DDL ล้วน ๆ)
 
 4. **(ยาก/ประยุกต์ใช้งานจริง)** เขียน integration test (ตามแนวทาง Part 32-33) ที่พิสูจน์ปัญหาในหัวข้อ "กับดักที่พบบ่อย" ข้อ 1 อย่างเป็นรูปธรรม: สร้าง Axum server ที่มี **สอง endpoint** — endpoint แรก (`/blocking-bug`) เรียก Diesel query ตรง ๆ ในบล็อก async **โดยไม่ผ่าน `spawn_blocking`** (เขียนแบบผิดตั้งใจ) และ endpoint ที่สอง (`/health`) แค่คืน `"ok"` ทันทีไม่แตะฐานข้อมูลเลย จากนั้นยิง request จำนวนมากพร้อมกันไปที่ `/blocking-bug` (ที่ query ช้าโดยตั้งใจ เช่นใส่ `pg_sleep(1)` ใน SQL raw ผ่าน `sql_query`) ด้วย `tokio::join!`/`futures::future::join_all` พร้อมกับยิง `/health` ไปด้วยพร้อมกัน แล้ววัดเวลาที่ `/health` ตอบกลับ — เทียบกับเวลาที่ `/health` ตอบกลับตอนที่ endpoint แรกใช้ `spawn_blocking` อย่างถูกต้อง (ไม่ใส่ `pg_sleep`) — Hint: ต้องจำกัดจำนวน Tokio worker thread ให้น้อย ๆ ก่อน (เช่นตั้ง `#[tokio::main(worker_threads = 2)]`) เพื่อให้เห็นผลกระทบชัดเจนขึ้นในเครื่องทดสอบที่มี CPU core จำนวนมาก (ถ้า worker thread เยอะเกินไป อาจต้องยิง concurrent request จำนวนมากกว่าจะเห็นผลกระทบจริง)
 
@@ -985,8 +1289,11 @@ Pool::builder().max_size(2).build(manager) // max_size เล็กเกิน�
 - **Diesel เป็น synchronous by default** — ทุก query เป็น blocking call จริง **ต้องห่อด้วย `tokio::task::spawn_blocking` เสมอ** เมื่อใช้ในบล็อก `async fn` ของ Axum ไม่มีข้อยกเว้น มิฉะนั้นจะเกิด runtime starvation ที่กระทบทั้งระบบ (`diesel-async` มีให้เป็นทางเลือก async-native แต่ไม่ใช่ core ของ ecosystem)
 - **`schema.rs` (generate ผ่าน `diesel print-schema`) คือ single source of truth ที่ query DSL ทั้งหมด type-check ผ่าน** — ต้อง sync กับฐานข้อมูลจริงเสมอหลัง migration ทุกครั้ง (ควรตั้งให้ `diesel migration run` generate ไฟล์นี้ให้อัตโนมัติผ่าน `diesel.toml`)
 - **Model แยกเป็นสองชุดตามธรรมเนียม**: `Queryable`/`Selectable` สำหรับอ่าน (มีครบทุกคอลัมน์ รวม `id`/`created_at`), `Insertable` สำหรับเขียนข้อมูลใหม่ (ไม่มีคอลัมน์ที่ database generate ให้เอง) — ทั้งสองเป็น derive macro ที่ generate `impl` คนละ trait จาก `serde::Serialize`/`Deserialize` โดยสิ้นเชิง แต่ทำงานคู่กันบน struct เดียวได้
-- **CRUD ผ่าน DSL** (`.filter()`, `.select()`, `.order()`, `.limit()`, `.values()`, `.set()`) generate SQL ที่ parameterize ปลอดภัยโดยอัตโนมัติเสมอ (พิสูจน์ได้จริงผ่าน `diesel::debug_query!`) — join ระหว่างตารางใช้ `.inner_join()` ร่วมกับ `diesel::joinable!` ที่ประกาศความสัมพันธ์ไว้ใน `schema.rs`
-- **Error จาก query ที่ผิด** อ้างคอลัมน์ที่ไม่มีจริงให้ error สั้นและอ่านง่าย (เพราะเป็น "cannot find value" ธรรมดาของ Rust) แต่เทียบ type ผิดให้ error ที่ยาวและซับซ้อนกว่า (generic trait bound error) — วิธีอ่านคือมองหา "expected/found" ก่อนเสมอ แล้วดู "the trait ... is not implemented for ..." เป็นลำดับถัดไป
+- **CRUD ผ่าน DSL** (`.filter()`, `.select()`, `.order()`, `.limit()`, `.values()`, `.set()`) generate SQL ที่ parameterize ปลอดภัยโดยอัตโนมัติเสมอ (พิสูจน์ได้จริงผ่าน `diesel::debug_query!`) รวมถึง **batch insert** (`.values(&vec_of_structs)` ได้ `INSERT ... VALUES (...), (...)` ในคำสั่งเดียว) และ **upsert** (`.on_conflict().do_update().set(...)` ตรงกับ `ON CONFLICT ... DO UPDATE` ของ PostgreSQL) — join ระหว่างตารางใช้ `.inner_join()` ร่วมกับ `diesel::joinable!` ที่ประกาศความสัมพันธ์ไว้ใน `schema.rs`
+- **`diesel::result::Error`** มี variant ที่ต้องแยกจัดการเหมือน `sqlx::Error` ใน Part 70: `NotFound` (→ 404), `DatabaseError(DatabaseErrorKind::UniqueViolation, ...)` (→ 409) พร้อมรายละเอียด constraint ที่ละเมิดผ่าน `.message()`/`.details()`/`.constraint_name()` — แปลงผ่าน `impl From<diesel::result::Error> for AppError` ตาม pattern เดียวกับ Part 66
+- **`conn.transaction(|conn| { ... })`** การันตี atomicity เหมือน `pool.begin()`/`commit()`/`rollback()` ของ SQLx แต่ผูกกับ closure/return value แทน (`Ok` → commit, `Err` → rollback อัตโนมัติ) — พิสูจน์ rollback จริงด้วยตัวเลขก่อน/หลัง และ `begin_test_transaction()` ใช้หลักการเดียวกันสำหรับ test ที่ไม่ทิ้งข้อมูลตกค้าง (เบากว่า `#[sqlx::test]` ของ SQLx แต่ isolation อยู่ระดับ transaction ไม่ใช่ระดับฐานข้อมูล)
+- **`diesel::sql_query`/`QueryableByName`** คือ escape valve สำหรับ SQL ที่ DSL เขียนไม่ได้ — แลกกับการสูญเสีย compile-time safety เกือบทั้งหมด (ระบุ SQL type ผิดจะ compile ผ่านแต่พังตอน runtime) ควรใช้ให้น้อยที่สุด
+- **Error จาก query ที่ผิด** อ้างคอลัมน์ที่ไม่มีจริงให้ error สั้นและอ่านง่าย (เพราะเป็น "cannot find value" ธรรมดาของ Rust) แต่เทียบ type ผิดให้ error ที่ยาวและซับซ้อนกว่า (generic trait bound error ที่อาจมาพร้อมกันหลายก้อน) — วิธีอ่านคือมองหา error ก้อนแรกและ "the trait bound ... is not satisfied" ก่อนเสมอ ก้อนที่เหลือส่วนใหญ่เป็นผลพลอยได้
 - **Diesel ไม่มี pool ในตัว** ต้องพึ่ง `r2d2` (synchronous pool ทั่วไป) ผ่าน `ConnectionManager` — ทั้ง pool และ query เป็น sync ทั้งชุด ต้องอยู่ใน `spawn_blocking` เสมอเมื่อใช้กับ Axum
 - **การเลือก Diesel กับ SQLx เป็น trade-off จริง ไม่มีคำตอบตายตัว** — Diesel เหมาะกับงาน sync-native หรือทีมที่ต้องการ DSL type-safe เต็มรูปแบบ ส่วน SQLx เหมาะกับเว็บแอป async-native ที่ต้องการควบคุม SQL เต็มที่ (หลักสูตรนี้ใช้ SQLx เป็นตัวหลักต่อจากนี้)
 

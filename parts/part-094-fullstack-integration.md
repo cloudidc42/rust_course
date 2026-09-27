@@ -1130,6 +1130,35 @@ error) แล้ว restart container ไปเรื่อย ๆ ทั้ง�
 หลัง restart — วนเป็น crash loop ที่ไม่ช่วยแก้ปัญหาอะไร ทำให้ downtime แย่ลงกว่าเดิม — นี่คือเหตุผลเชิงลึกที่
 ระบบระดับใหญ่แยกทั้งสอง endpoint ออกจากกันเสมอ (ดูแบบฝึกหัดข้อ 3 สำหรับการ implement จริง)
 
+**ตัวอย่างว่าแพลตฟอร์มอย่าง Kubernetes จะใช้ `/health` ของหัวข้อนี้อย่างไรจริง** (แค่ตัวอย่าง YAML config ที่
+อ้าง endpoint นี้ ไม่ใช่การสอน Kubernetes เต็มรูปแบบ — Part 96 และเนื้อหา orchestration ในโมดูล 6 จะสอนกลไก
+นี้ให้ลึกกว่านี้):
+
+```yaml
+# ตัวอย่างส่วนหนึ่งของ Pod spec — ใช้ /health ตัวเดียวเป็นทั้ง liveness และ readiness probe
+# (สอดคล้องกับสโคปปัจจุบันของบทนี้ที่ยังไม่แยกสอง endpoint ตามที่อธิบายไว้ข้างบน)
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8092
+  periodSeconds: 5
+  failureThreshold: 3
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8092
+  periodSeconds: 10
+  failureThreshold: 5
+  initialDelaySeconds: 10
+```
+
+`readinessProbe` ที่ล้มเหลว (`/health` ตอบ `503`) ทำให้ Kubernetes ถอด Pod นี้ออกจากรายการ endpoint ของ
+`Service` ชั่วคราว (ไม่มี traffic ใหม่ถูกส่งเข้ามาอีก จนกว่า probe จะกลับมาผ่าน) โดย**ไม่ restart container**
+— ส่วน `livenessProbe` ที่ล้มเหลวซ้ำเกิน `failureThreshold` ครั้ง ทำให้ Kubernetes **restart container ทันที**
+— ถ้าใช้ endpoint เดียวกันทำทั้งสองหน้าที่ (ตามตัวอย่างข้างบน) การที่ database ล่มชั่วคราวจะทำให้ Pod ถูก
+restart วนซ้ำตามที่อธิบายไว้ข้างบนจริง ๆ นี่คือหลักฐานที่ชัดเจนว่าทำไมแบบฝึกหัดข้อ 3 (แยก `/health/live` ออก
+จาก `/health/ready`) จึงสำคัญสำหรับระบบที่ deploy บน Kubernetes จริง ไม่ใช่แค่รายละเอียดเล็กน้อยที่มองข้ามได้
+
 ### 94.8 Logging และ Observability: Pretty vs JSON ด้วย `tracing`
 
 Part 92 หัวข้อ 92.10 ตั้ง `tracing_subscriber::fmt().with_env_filter(...).init()` ไว้ตรง ๆ — ได้ log แบบ

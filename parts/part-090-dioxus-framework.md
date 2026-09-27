@@ -831,59 +831,68 @@ web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 ```
 
-สั่ง build เป้าหมายเว็บ:
+สั่ง build เป้าหมายเว็บ (คำสั่งนี้รันจริงบนสภาพแวดล้อมที่ใช้เขียนบทนี้ ด้วย `dioxus` และ `dioxus-cli`
+เวอร์ชัน 0.7.10 ที่ติดตั้งไว้จริงตามหัวข้อ 90.2):
 
 ```bash
 dx build --platform web
 ```
 
-หลังจากรันจริงบนสภาพแวดล้อมที่ใช้เขียนบทนี้ ผลลัพธ์ที่ได้ (ตัดส่วน log การคอมไพล์ dependency ที่ยาวมากออก)
-คือ:
+log ที่ได้จริง (ตัดส่วนการคอมไพล์ dependency 175 crate ที่ยาวมากออก เหลือแค่บรรทัดสุดท้ายที่สำคัญ):
 
 ```
-$ dx build --platform web
-Compiling ticket_booking v0.1.0
-    Finished `release` profile [optimized] target(s) in 0.02s
-   Bundling app
-    Finished bundle: dist/
+ 36.68s  INFO Compiled [175/175]: ticket_booking
+ 36.71s  INFO Bundling app...
+ 37.10s  INFO Running wasm-bindgen...
+ 39.90s  INFO Client build completed successfully! 🚀
+         path="/.../ticket_booking/target/dx/ticket_booking/debug/web/public"
 ```
 
-โฟลเดอร์ `dist/` ที่ได้จะมี `index.html`, ไฟล์ `.wasm` ที่คอมไพล์แล้ว, และไฟล์ JS glue ที่ `wasm-bindgen`
-generate ให้ (แนวคิดเดียวกับ Part 87 ที่สอนไว้ว่า WASM module เพียว ๆ คุยกับ JS ไม่ได้ตรง ต้องมี glue code
-คั่นกลาง)
+สังเกตว่า path ผลลัพธ์จริงคือ `target/dx/<ชื่อแพ็กเกจ>/<profile>/web/public/` (ไม่ใช่ `dist/` ธรรมดาแบบที่
+เอกสารเก่าบางแหล่งเขียนไว้ — ค่านี้เปลี่ยนได้ผ่าน `out_dir` ใน `Dioxus.toml` ตามหัวข้อ 90.2 แต่ค่าเริ่มต้นของ
+`dioxus-cli` 0.7.10 จริงคือใต้ `target/dx/` เสมอ) ในโฟลเดอร์ `public/` มี `index.html`, โฟลเดอร์ `wasm/` ที่
+เก็บ `ticket_booking_bg.wasm` (ไฟล์ WASM ที่คอมไพล์แล้ว) และ `ticket_booking.js` (ไฟล์ JS glue ที่
+`wasm-bindgen` generate ให้ — แนวคิดเดียวกับ Part 87 ที่สอนไว้ว่า WASM module เพียว ๆ คุยกับ JS ไม่ได้ตรง
+ต้องมี glue code คั่นกลาง) และโฟลเดอร์ `assets/`
 
 **ตรวจสอบผลลัพธ์จริงในเบราว์เซอร์แบบ headless**: เนื่องจากสภาพแวดล้อมที่ใช้ตรวจสอบบทนี้เป็น container
 headless (ไม่มี display server จริง) วิธีตรวจสอบว่าแอปเว็บทำงานถูกต้องคือใช้ **headless Chromium** ผ่าน
-Playwright เสิร์ฟไฟล์ในโฟลเดอร์ `dist/` ด้วย HTTP server ธรรมดา แล้วให้ headless Chromium โหลดหน้าและอ่าน
-DOM ที่ render ออกมาจริง:
+Playwright (เวอร์ชัน 1.56.1 ที่มีอยู่ในสภาพแวดล้อมนี้) เสิร์ฟไฟล์ในโฟลเดอร์ผลลัพธ์ด้วย HTTP server ธรรมดา
+แล้วให้ headless Chromium โหลดหน้าและอ่าน DOM ที่ render ออกมาจริง:
 
 ```bash
-# เสิร์ฟไฟล์ static ธรรมดา (dist/ มี index.html + wasm อยู่แล้ว)
-npx http-server dist -p 8090 &
+# เสิร์ฟไฟล์ static ธรรมดา (โฟลเดอร์ public/ มี index.html + wasm อยู่แล้ว)
+npx http-server target/dx/ticket_booking/debug/web/public -p 8091 &
 
 # ใช้ playwright เปิดหน้าเว็บด้วย headless Chromium แล้วอ่าน DOM จริง
-node -e '
-const { chromium } = require("playwright");
-(async () => {
-  const browser = await chromium.launch();
-  const page = await browser.newPage();
-  await page.goto("http://localhost:8090");
-  await page.waitForSelector("h1");
-  console.log("H1:", await page.textContent("h1"));
-  console.log("Booked count:", await page.textContent("text=จองไปแล้วทั้งหมด"));
-  await page.click("button:has-text(\"จองตั๋ว\") >> nth=0");
-  console.log("After click:", await page.textContent("text=จองไปแล้วทั้งหมด"));
-  await browser.close();
-})();
-'
+node verify_web.js
 ```
 
-ผลลัพธ์จริงที่ headless Chromium อ่านได้จาก WASM binary ที่คอมไพล์จากโค้ด Dioxus ของเราคือ `H1: ระบบ
-จองตั๋วการแสดง` ตอนโหลดหน้าครั้งแรก และหลังจากคลิกปุ่ม "จองตั๋ว" ข้อความ "จองไปแล้วทั้งหมด: 0 ใบ" เปลี่ยน
-เป็น "จองไปแล้วทั้งหมด: 1 ใบ" ทันที — นี่คือการยืนยันว่า **signal reactivity ทำงานจริงในเบราว์เซอร์ ไม่ใช่
-แค่คอมไพล์ผ่านเฉย ๆ** WASM binary ที่ได้จริงจับ event คลิกของปุ่ม HTML จริง, เรียก closure ของ `onclick`,
-แก้ไขค่าใน `Signal`, และแก้ไข DOM node ที่แสดงจำนวนตั๋วโดยไม่ต้อง refresh หน้า — ครบวงจรของ interactive web
-app จริง
+ที่ `verify_web.js` เปิดหน้า, รอ `<h1>`, อ่านข้อความ, คลิกปุ่ม "จองตั๋ว" ปุ่มแรก, แล้วอ่านข้อความอีกครั้ง —
+ผลลัพธ์**จริง**ที่ headless Chromium อ่านได้จาก WASM binary ที่คอมไพล์จากโค้ด Dioxus ของเราคือ:
+
+```
+H1: ระบบจองตั๋วการแสดง
+BOOKED_LINE_BEFORE: จองไปแล้วทั้งหมด: 0 ใบ
+BUTTON_COUNT: 2
+BOOKED_LINE_AFTER: จองไปแล้วทั้งหมด: 1 ใบ
+SEATS_LEFT_TEXT: [ 'เหลือ 2 ที่นั่ง', 'เหลือ 0 ที่นั่ง' ]
+```
+
+นี่คือการยืนยันด้วยข้อมูลจริง (ไม่ใช่การคาดเดา) ว่า **signal reactivity ทำงานจริงในเบราว์เซอร์ ไม่ใช่แค่
+คอมไพล์ผ่านเฉย ๆ**: ก่อนคลิก แถวแรก (`Show { id: 1, seats_left: 3 }`) แสดง "เหลือ 3 ที่นั่ง" หลังคลิกปุ่ม
+"จองตั๋ว" ของแถวแรกหนึ่งครั้ง ตัวเลขลดลงเป็น "เหลือ 2 ที่นั่ง" ตรงตาม logic `seats_left -= 1` ในโค้ด และ
+ตัวนับ "จองไปแล้วทั้งหมด" ขยับจาก 0 เป็น 1 ตรงตาม `total_booked += 1` — WASM binary ที่ได้จริงจับ event
+คลิกของปุ่ม HTML จริง, เรียก closure ของ `onclick`, แก้ไขค่าใน `Signal`, และแก้ไข DOM node ที่แสดงจำนวนตั๋ว
+โดยไม่ต้อง refresh หน้า — ครบวงจรของ interactive web app จริง (ส่วนแถวที่สองซึ่งมี `seats_left: 0` ตั้งแต่
+ต้น ปุ่มของมันถูก `disabled` ไว้ตาม logic `disabled: show.seats_left == 0` จึงยังแสดง "เหลือ 0 ที่นั่ง"
+เหมือนเดิม ไม่เปลี่ยน)
+
+Console log ของเบราว์เซอร์ที่จับมาด้วยระหว่างทดสอบมี warning เรื่อง WebSocket ต่อ `_dioxus` ไม่ติด (`404`) —
+นี่เป็นเรื่องปกติและไม่ใช่บั๊ก เพราะ WebSocket นั้นสำหรับฟีเจอร์ hot-reload ของ `dx serve` (ที่ต้องมี dev
+server ของ `dx` เองรันอยู่คู่กัน) แต่ในการทดสอบนี้เราเสิร์ฟไฟล์ static ด้วย `http-server` ธรรมดาแทน (เพื่อ
+เลียนแบบสถานการณ์ deploy จริงที่ไม่มี dev server) จึงไม่มีปลายทางให้ WebSocket เชื่อมต่อ — ไม่กระทบการทำงาน
+ของแอปหลักแต่อย่างใด
 
 ### 90.6 Build เป้าหมาย Desktop จริง: `dx build --platform desktop`
 

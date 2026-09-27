@@ -110,6 +110,30 @@ scale ได้เลย นี่คือปัญหาที่ **`wasm-bind
    การจัดการ pointer, การ allocate/deallocate หน่วยความจำทั้งหมดไว้ข้างใน ผู้ใช้ฝั่ง JavaScript แค่เรียก
    `wasm.greet("Alice")` แล้วได้ string กลับมาตรง ๆ
 
+**"metadata พิเศษที่ macro ฝังไว้"** ในข้อ 2 ไม่ใช่คำอธิบายเชิงนามธรรมลอย ๆ — verify ได้จริงด้วยการเปิดดู
+ไฟล์ `.wasm` ที่ compile ได้ก่อนผ่าน `wasm-bindgen-cli` ด้วยเครื่องมือ `wasm-objdump` (จาก
+[WABT](https://github.com/WebAssembly/wabt)):
+
+```bash
+wasm-objdump -h target/wasm32-unknown-unknown/debug/demo.wasm
+```
+
+ผลลัพธ์จริงส่วนที่เกี่ยวข้อง (ตัดบางส่วนออก):
+
+```
+   Custom start=... end=... (size=0x0005d9d3) "__wasm_bindgen_unstable"
+   Custom start=... end=... (size=0x000741e8) "name"
+   Custom start=... end=... (size=0x0000004d) "producers"
+```
+
+เห็น **custom section ที่ชื่อ `"__wasm_bindgen_unstable"` อยู่จริง** — WASM binary format อนุญาตให้มี
+"custom section" แถมเข้าไปได้ (section ที่ WASM runtime มาตรฐานไม่สนใจและข้ามผ่านไปเฉย ๆ ตอนโหลด แต่เครื่องมือ
+อื่นอ่านได้) `#[wasm_bindgen]` macro ใช้ช่องทางนี้แหละในการ**ฝัง schema ของทุกฟังก์ชัน/struct ที่ export/
+import ไว้** (ชื่อ, จำนวน parameter, type ของแต่ละ parameter ฯลฯ ในรูปแบบไบนารีของตัวเอง) — `wasm-bindgen-cli`
+อ่าน custom section นี้ออกมาตอนหลัง compile เพื่อรู้ว่าต้อง generate JS wrapper หน้าตาแบบไหนให้ตรงกับ
+signature ที่คุณเขียนไว้จริงในซอร์ส Rust แบบเป๊ะ ๆ (ไม่ใช่การเดา signature แบบที่ Part 43 เตือนไว้ว่าเป็น
+อันตรายของ `extern "C"` — ในกรณีนี้ signature ถูก "ยืนยัน" อัตโนมัติจาก compiler เอง ไม่ใช่คนพิมพ์ซ้ำสองที่)
+
 #### 87.2.1 เปรียบเทียบกับ Part 43: FFI เข้าสู่ C เทียบกับ FFI เข้าสู่ JavaScript
 
 ทั้งสองกรณีคือ "ข้ามขอบเขตภาษา" แต่มีความแตกต่างเชิงลึกที่สำคัญมาก:
@@ -743,6 +767,14 @@ sum = 15
 หรือ `null`) จะได้ `None` กลับมา ตรงกับปรัชญาของ `Option` อีกครั้งที่ Part 12 สอนไว้: การแปลง type ที่
 "อาจล้มเหลว" ต้องคืนเป็น `Option`/`Result` เสมอ
 
+`js-sys` ไม่ได้มีแค่ `Array` — มันครอบคลุม JS built-in อื่น ๆ ที่ใช้บ่อยด้วย เช่น `js_sys::Object` (สร้าง/
+ตรวจสอบ JS object ทั่วไปผ่าน `Object::keys`, `Object::entries`), `js_sys::Map`/`js_sys::Set` (แทน `Map`/
+`Set` ของ JS ที่มี key เป็น value ใดก็ได้ ต่างจาก `HashMap` ของ Rust ที่ key ต้อง implement `Hash`),
+และ `js_sys::Promise` (ตัวแทนของ JS `Promise` แบบดิบที่ `wasm_bindgen_futures::JsFuture` ใช้แปลงเป็น Rust
+`Future` ในหัวข้อ 87.7 นั่นเอง) — หลักการเลือกใช้เหมือนกันหมด: ใช้ `js-sys` เมื่อต้องทำงานกับ "รูปร่างของ
+ข้อมูลที่ไม่คงที่แน่นอนล่วงหน้า" และใช้ type ที่เจาะจงกว่า (`Vec<T>`, struct ที่ derive serde,
+`web_sys::*`) เมื่อรู้ shape ของข้อมูลชัดเจนอยู่แล้ว เพราะให้ type-safety ที่ตรวจสอบได้ตอน compile มากกว่า
+
 ### 87.7 Async interop: `wasm_bindgen_futures` และ `JsFuture`
 
 หัวข้อนี้คือจุดที่ Part 46-50 (async/await, futures, Tokio) กับโลกของ WASM มาเจอกันโดยตรง — และมีข้อควร
@@ -945,6 +977,13 @@ total: 800
 `unreachable`** ซึ่งเป็น instruction พิเศษที่บอกกับ WASM runtime ว่า "ห้ามมาถึงจุดนี้เด็ดขาด — ถ้ามาถึง
 คือมีบั๊ก" — WASM runtime (ทั้งของเบราว์เซอร์และ Node.js) จะ**throw JavaScript exception ทันที** เมื่อเจอ
 instruction นี้
+
+(หมายเหตุสำหรับผู้ที่อยากลองเชิงลึกกว่านี้: `wasm-pack build` มี flag ทดลอง `--panic-unwind` ที่ compile
+`std` ใหม่ด้วย `-Z build-std` บน nightly toolchain เพื่อเปลี่ยน panic strategy เป็น `unwind` จริง ๆ ทำให้
+`catch_unwind` ทำงานข้าม FFI boundary ได้ในบางกรณี — แต่ ณ วันที่เขียนบทนี้ยังเป็น feature ระดับ experimental
+ที่ต้องใช้ nightly Rust และยังไม่ใช่แนวทางที่แนะนำสำหรับโปรเจกต์ production ทั่วไป แนวทางที่ยังคงเป็นมาตรฐาน
+คือสิ่งที่บทนี้สอน: ใช้ `Result<T, JsValue>` สำหรับ error ที่คาดหวังได้ และปฏิบัติต่อ panic ว่าเป็นบั๊กที่ควร
+ทำให้ instance ทั้งตัวไม่น่าเชื่อถืออีกต่อไป)
 
 ทดสอบจริง (จะเห็นผลลัพธ์ verify แล้วในหัวข้อทดสอบท้ายบท):
 
@@ -1479,6 +1518,56 @@ Caused by:
 | `async fn` ที่มี `#[wasm_bindgen]` | ฟังก์ชันที่คืนค่าเป็น `Promise` (87.7) | ต้อง `await`/`.then()` เสมอฝั่ง JS |
 | `js_sys::Array`/`js_sys::Object` | `Array`/`Object` ตัวจริงของ JS | ใช้เมื่อต้องรับ/สร้าง JS value แบบดิบที่ type ไม่คงที่ (87.6) |
 | `web_sys::*` (เช่น `Window`, `Document`) | Web API object ตัวจริงของเบราว์เซอร์ | เป็น typed wrapper รอบ `JsValue` ที่ compile-time ตรวจสอบชื่อ method ได้ (87.5.4) |
+
+### 87.14 สรุปคำสั่งที่ใช้บ่อยตลอดบทนี้ (Quick Reference)
+
+ก่อนไปหัวข้อกับดักและแบบฝึกหัด สรุปลำดับคำสั่งทั้งหมดที่ใช้ตั้งโปรเจกต์ตั้งแต่ศูนย์จนถึงรันได้จริง (รวบรวม
+จากทุกหัวข้อในบทนี้ไว้ในที่เดียว เผื่อกลับมาเปิดใช้ตอนเริ่มโปรเจกต์จริง):
+
+```bash
+# 1. สร้างโปรเจกต์และตั้งค่า crate-type ให้เป็น cdylib (หัวข้อ 87.3.1)
+cargo new --lib my-wasm-project
+cd my-wasm-project
+
+# 2. เพิ่ม dependency หลัก
+cargo add wasm-bindgen
+cargo add js-sys wasm-bindgen-futures serde-wasm-bindgen
+cargo add serde --features derive
+cargo add console_error_panic_hook   # สำหรับ debug panic message (87.9.2)
+
+# 3. web-sys ต้องเปิด feature เฉพาะที่ใช้ (87.5.4) — แก้ Cargo.toml เพิ่มด้วยตัวเอง
+#    [dependencies.web-sys]
+#    version = "0.3"
+#    features = ["console", "Window", "Document", "Element", "HtmlElement"]
+
+# 4. ติดตั้ง wasm-pack (ครั้งเดียว)
+npm install -g wasm-pack   # หรือ cargo install wasm-pack
+
+# 5. build ให้ตรงกับที่ที่จะใช้งาน (87.3.4)
+wasm-pack build --target web       # ใช้กับ <script type="module"> ตรง ๆ
+wasm-pack build --target bundler   # ใช้กับ webpack/Vite
+wasm-pack build --target nodejs    # ใช้กับ Node.js/testing script
+
+# 6. build จริงก่อน deploy ต้องใช้ --release เสมอ (87.3.5) ไม่ใช่ --dev
+wasm-pack build --target web --release
+
+# 7. เขียนเทสต์และรัน (87.12)
+wasm-pack test --node                       # เทสต์ที่ไม่แตะ DOM
+wasm-pack test --headless --chrome          # เทสต์ที่แตะ DOM/Web API (ต้องมี headless Chrome)
+```
+
+### 87.15 ตาราง attribute ของ `#[wasm_bindgen(...)]` ที่ใช้ในบทนี้
+
+| Attribute | ใช้ที่ไหน | ความหมาย | หัวข้อ |
+|---|---|---|---|
+| (ไม่มี attribute เพิ่ม) | function, struct, impl | export ตรง ๆ ให้ JS เรียกได้ | 87.3, 87.4 |
+| `constructor` | method ใน `impl` block | บอกว่า `new ClassName()` ในฝั่ง JS เรียก method นี้ | 87.4.1 |
+| `getter` / `setter` | method ใน `impl` block | ทำให้ JS เข้าถึงเป็น property (`obj.value`) แทนเรียกเป็น method | 87.4.1 |
+| `start` | function เดียวในทั้ง crate | รันอัตโนมัติทันทีที่ WASM module โหลดเสร็จ | 87.9.2 |
+| `js_name` | ใน `extern "C"` block หรือ function/method ที่ export | ตั้งชื่อฝั่ง JS ให้ต่างจากชื่อฝั่ง Rust | 87.5.1 |
+| `js_namespace` | ใน `extern "C"` block | บอกว่าฟังก์ชันอยู่ใต้ namespace ของ object อื่น (เช่น `Math`, `JSON`) | 87.5.1, 87.5.3 |
+| `module` | บน `extern "C"` block | import ฟังก์ชันจากไฟล์ JS ของเราเอง แทนที่จะเป็น global/built-in | 87.5.2 |
+| `catch` | บนฟังก์ชันใน `extern "C"` block | แปลง exception ของ JS ที่ import มาให้เป็น `Result::Err` แทนการปล่อยให้ panic | 87.5.3 |
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

@@ -589,6 +589,64 @@ fn App() -> impl IntoView {
 
 ข้อสังเกตสำคัญ: `BookCard` ในตัวอย่างนี้รับ `title: String` แบบ owned value ธรรมดา ไม่ใช่ signal — เหมาะสำหรับข้อมูลที่ "ตั้งค่าครั้งเดียวตอนสร้าง component แล้วไม่เปลี่ยนอีก" ถ้าต้องการให้ `BookCard` reactive ตามข้อมูลที่เปลี่ยนได้ (เช่นสถานะการยืมที่อัปเดตแบบ real-time) ต้องเปลี่ยน prop type เป็น `ReadSignal<bool>` หรือ `Signal<bool>` แทน แล้วเรียก `.get()` ข้างในแทนการใช้ค่าตรง ๆ — หลักการเดียวกับหัวข้อ 89.3 ที่ต้องมี signal (ไม่ใช่ค่าธรรมดา) ถึงจะเกิด reactive effect ได้
 
+#### Prop attribute ที่ใช้บ่อย: `#[prop(optional)]`, `#[prop(into)]`, และ `children`
+
+นอกจาก `#[prop(default = ...)]` ที่เห็นข้างบน Leptos ยังมี attribute อื่นที่ใช้บ่อยเวลาออกแบบ props ให้ยืดหยุ่น ลองดูตัวอย่าง `BookCard` เวอร์ชันที่ใช้ครบทุกแบบ (ทดสอบ compile และ render จริงในเบราว์เซอร์แล้ว):
+
+```rust
+use leptos::prelude::*;
+
+#[component]
+fn BookCard(
+    title: String,
+    // Option<T> + #[prop(optional)]: ถ้าไม่ส่งจะเป็น None โดยไม่ต้องกำหนด default เอง
+    #[prop(optional)] subtitle: Option<String>,
+    // #[prop(into)]: ผู้เรียกส่งอะไรมาก็ได้ที่ Into<Signal<i32>> — ทั้ง ReadSignal<i32>
+    // เดิม หรือค่า i32 literal ตรง ๆ (เพราะ Signal<T> implement From<T> ให้)
+    #[prop(into)] rating: Signal<i32>,
+    // children: Children คือ "ช่องรับ markup ลูก" ระหว่างเปิด-ปิด tag ของ component
+    // (เทียบได้กับ props.children ของ Yew ใน Part 88)
+    children: Children,
+) -> impl IntoView {
+    view! {
+        <div class="book-card">
+            <h3>{title}</h3>
+            {subtitle.map(|s| view! { <p class="subtitle">{s}</p> })}
+            <p>"Rating: " {move || rating.get()}</p>
+            <div class="footer">{children()}</div>
+        </div>
+    }
+}
+
+#[component]
+fn App() -> impl IntoView {
+    let (stars, _set_stars) = signal(4);
+    view! {
+        // ส่ง signal ตรง ๆ ให้ rating — reactive ได้ถ้า stars เปลี่ยนค่าทีหลัง
+        <BookCard title="The Rust Programming Language".to_string() rating=stars>
+            <em>"แนะนำสำหรับผู้เริ่มต้น"</em>
+        </BookCard>
+        // ส่ง literal ธรรมดาให้ rating — #[prop(into)] แปลงให้เป็น Signal คงที่ให้เอง
+        <BookCard
+            title="Programming Rust".to_string()
+            subtitle="ฉบับที่ 2".to_string()
+            rating=5
+        >
+            <em>"เหมาะสำหรับผู้มีพื้นฐานแล้ว"</em>
+        </BookCard>
+    }
+}
+```
+
+build เป็น WASM จริงแล้วอ่าน `document.body.innerHTML` จากเบราว์เซอร์จริง ได้ผลลัพธ์ตรงตามที่ตั้งใจทุกจุด:
+
+```html
+<div class="book-card"><h3>The Rust Programming Language</h3><!----><p>Rating: 4</p><div class="footer"><em>แนะนำสำหรับผู้เริ่มต้น</em></div></div>
+<div class="book-card"><h3>Programming Rust</h3><p class="subtitle">ฉบับที่ 2</p><p>Rating: 5</p><div class="footer"><em>เหมาะสำหรับผู้มีพื้นฐานแล้ว</em></div></div>
+```
+
+สังเกตสามจุดจากผลลัพธ์จริงนี้: (1) `BookCard` ตัวแรกไม่ได้ส่ง `subtitle` — Leptos render เป็น comment node `<!---->` แทนตำแหน่งที่ `None` (นี่คือกลไกเดียวกับที่ใช้กับ conditional rendering ทั่วไปใน Leptos — comment node ทำหน้าที่เป็น "ตำแหน่งยึด" ในโครงสร้าง DOM เผื่อค่ากลายเป็น `Some` ทีหลัง โดยไม่กระทบ node ข้างเคียง) (2) `rating=stars` (ส่ง signal) กับ `rating=5` (ส่ง literal) ทำงานได้ทั้งคู่เพราะ `#[prop(into)]` เรียก `.into()` ให้อัตโนมัติ — `ReadSignal<i32>` และ `i32` ทั้งคู่ implement `Into<Signal<i32>>` (3) `children()` render เนื้อหาระหว่าง tag เปิด-ปิดของ `<BookCard>...</BookCard>` เข้าไปในตำแหน่ง `<div class="footer">` ตรงตามที่กำหนดไว้ในโค้ด — พิสูจน์ว่า pattern การส่ง markup ลูกผ่าน component ทำงานได้เหมือนกับที่ Yew ทำผ่าน `props.children` ใน Part 88 แม้ syntax รับ parameter จะต่างกัน (Leptos รับเป็น parameter `children: Children` ตรง ๆ ไม่ต้องพึ่ง struct props ที่มี field `children`)
+
 ### 89.6 Server Functions: จุดขายหลักของ Leptos
 
 ถ้า fine-grained reactivity คือความต่างเชิงสถาปัตยกรรมของ Leptos ฝั่ง client, **server function** คือความต่างเชิงสถาปัตยกรรมที่สำคัญกว่าในภาพรวม — และคือเหตุผลหลักที่ชื่อบทนี้มีคำว่า "Full-stack Rust"
@@ -787,6 +845,79 @@ fn BookingButton(event_id: i64) -> impl IntoView {
 ```
 
 `book_action.dispatch(())` เรียก `book_seat(event_id)` — ซึ่งถ้า compile ด้วย feature `hydrate`/`csr` จะกลายเป็นโค้ดที่ยิง HTTP POST ไปยัง `/api/book_seat` ตามที่พิสูจน์ด้วย `curl` ข้างบน โดยที่**คุณไม่ได้เขียนโค้ด fetch สักบรรทัดเดียว** — นี่คือสิ่งที่ทำให้ server function เป็นจุดขายที่แท้จริงของ Leptos ไม่ใช่แค่ syntax sugar: มันลดงาน "เชื่อมต่อ client-server" ที่ปกติต้องเขียนคู่กันสองฝั่ง (endpoint + fetch call) ให้เหลือแค่ฝั่งเดียว
+
+#### ตัวเลือกการ encode: ทำไม `curl` ข้างบนต้องส่งเป็น `x-www-form-urlencoded`
+
+สังเกตว่าการทดสอบด้วย `curl` ข้างบนส่ง argument ผ่าน `Content-Type: application/x-www-form-urlencoded` (เช่น `--data "event_id=1"`) ไม่ใช่ JSON — นี่ไม่ใช่เรื่องบังเอิญ ตามเอกสารของ macro `#[server]` (หัวข้อ "Server Function Encodings" ที่ตรวจสอบมาจากซอร์สโค้ดจริงของ `leptos_macro-0.8.18/src/lib.rs`) ค่า default ของ `input` คือ `PostUrl` (POST request แบบ URL-encoded body — เหมือนที่ HTML `<form>` ธรรมดาส่ง) และค่า default ของ `output` คือ `Json` ตัวเลือกอื่นที่ระบุได้ผ่าน named argument `input`/`output` ของ `#[server(...)]`:
+
+| Encoding | HTTP Method | Request body | เหมาะกับ |
+|---|---|---|---|
+| `PostUrl` (default สำหรับ `input`) | `POST` | URL-encoded | ค่า default ทั่วไป ใช้ได้กับ argument ส่วนใหญ่ |
+| `GetUrl` | `GET` | URL-encoded (เป็น query string) | server function ที่เป็น query ล้วน ๆ ไม่มี side effect — ทำให้ browser/CDN cache ได้ (ต่างจาก `POST` ที่ไม่ถูก cache ตามธรรมชาติของ HTTP) |
+| `Cbor` | `POST` | CBOR (binary format กระชับกว่า JSON) | payload ขนาดใหญ่ที่อยากลด bandwidth |
+| `Json` (default สำหรับ `output`) | - | JSON | ค่า default ของ response แทบทุกกรณี |
+
+ตัวอย่างการเปลี่ยน `get_event` (ซึ่งเป็น query ล้วน ๆ ไม่มี side effect) ให้ใช้ `GetUrl` แทน `PostUrl` — ทำให้เรียกด้วย HTTP GET ธรรมดาได้ (เปิดทางให้ browser cache ผลลัพธ์ได้ถ้าต้องการ ต่างจาก `book_seat` ที่เป็น mutation และควรคงเป็น `POST` เพราะมี side effect เสมอ ตามหลักการ HTTP method semantics ที่ Part 61 สอนไว้):
+
+```rust
+#[server(endpoint = "get_event", input = GetUrl)]
+pub async fn get_event(event_id: i64) -> Result<EventSeats, ServerFnError> {
+    // เนื้อโค้ดเหมือนเดิมทุกอย่าง — เปลี่ยนแค่ transport
+    // ...
+}
+```
+
+หลังเปลี่ยน `curl` ที่ใช้ทดสอบก็ต้องเปลี่ยนตามให้ตรง (`GET` พร้อม query string แทน `POST` พร้อม body):
+
+```bash
+curl -sS "http://127.0.0.1:3009/api/get_event?event_id=1"
+```
+
+#### ทดสอบ server function โดยตรงแบบ unit test — ไม่ต้องมี HTTP request จริง
+
+เพราะ server function ก็คือ async function ธรรมดาเมื่อ compile ด้วย feature `ssr` (ตามที่อธิบายไว้ตั้งแต่ต้นหัวข้อ) คุณสามารถเรียกมันตรง ๆ ใน `#[tokio::test]` ได้เลยโดยไม่ต้องเปิด HTTP server จริงหรือยิง `curl` เทียบกับ integration test แบบ Part 32-33 — สิ่งเดียวที่ต้องทำเพิ่มคือ **สร้าง reactive owner และ provide context เอง** (ปกติ `leptos_axum` เป็นคนทำให้อัตโนมัติตอน handle request จริงตามที่ตั้งไว้ใน `.leptos_routes_with_context(...)` ในหัวข้อ 89.8):
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_event_directly() {
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect("postgres://postgres:postgres@localhost/leptos_scratch")
+            .await
+            .expect("connect");
+
+        // server function เรียกตรง ๆ ได้โดยไม่ต้องมี HTTP request จริง
+        // ต้อง provide_context เองเพราะปกติ leptos_axum เป็นคนทำให้ตอน handle request จริง
+        let owner = leptos::prelude::Owner::new();
+        owner.set();
+        provide_context(pool);
+
+        let result = get_event(1).await;
+        assert!(result.is_ok());
+        let event = result.unwrap();
+        assert_eq!(event.name, "Rust Conf 2026");
+    }
+}
+```
+
+ทดสอบรันจริงด้วย `cargo test` (เชื่อมต่อฐานข้อมูล `leptos_scratch` เดียวกับที่ใช้ทดสอบ `curl` ในหัวข้อนี้) ได้ผลลัพธ์จริง:
+
+```
+running 1 test
+test tests::test_get_event_directly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+```
+
+การทดสอบแบบนี้เร็วกว่าการเปิด server จริงแล้วยิง `curl`/HTTP client มาก (ไม่มี network round-trip, ไม่ต้อง serialize/deserialize ข้าม HTTP) เหมาะสำหรับ unit test ที่ต้องการตรวจสอบ business logic ข้างในเท่านั้น ส่วนการทดสอบผ่าน HTTP จริง (แบบที่ทำด้วย `curl` ตลอดหัวข้อนี้) ยังจำเป็นสำหรับ integration test ที่ต้องพิสูจน์ว่า encoding/routing ทำงานถูกต้องครบทั้ง pipeline ด้วย — ทั้งสองระดับเสริมกัน ไม่ใช่แทนกัน
+
+#### `ServerFnError` มีอะไรมากกว่าที่เห็น
+
+`ServerFnError::new(...)` ที่ใช้มาตลอดหัวข้อนี้เป็นแค่การสร้าง custom error message string — แต่ `ServerFnError<E>` เป็น enum ที่มีหลาย variant ครอบคลุม failure mode ที่พบบ่อยของ "การเรียกฟังก์ชันข้าม network" (ต่างจาก error ของฟังก์ชันธรรมดาที่ Part 12 สอน ซึ่งมักมีสาเหตุจำกัดกว่า) เช่น error ตอน serialize/deserialize argument ล้มเหลว, error ตอน network request ล้มเหลว (client หลุดการเชื่อมต่อกลางทาง), หรือ error ตอนหา endpoint ไม่เจอ (เผลอเรียก path ผิด) — ทั้งหมดนี้ Leptos ห่อให้เป็น `ServerFnError` เดียวกันเพื่อให้โค้ดฝั่ง client จัดการ error แบบเดียวกันได้ไม่ว่าจะ fail ที่ขั้นไหนของ pipeline (ตามที่ระบุไว้ใน doc comment ของ macro: "arguments need to be serialized... and the return type must be serialized... this means that the set of valid server function argument and return types is a subset of all possible Rust types") — ในทางปฏิบัติ สำหรับ error ทางธุรกิจของแอปคุณเอง (เช่น "ที่นั่งเต็มแล้ว" ในตัวอย่างนี้) การใช้ `ServerFnError::new(...)` เพียงพอแล้ว ส่วน variant อื่น ๆ ส่วนใหญ่ Leptos สร้างให้อัตโนมัติเมื่อเกิด failure ระดับ transport ที่ไม่ใช่ business logic ของคุณ
 
 ### 89.7 Rendering Modes: CSR, SSR, และ Hydration
 

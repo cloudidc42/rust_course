@@ -458,6 +458,60 @@ innerHTML` ได้ผลลัพธ์จริง:
 จะเห็นว่าข้อมูลจาก `Book` struct (title, author, สถานะ) ไหลจาก component แม่ (`App`) ไปยัง component ลูก
 (`BookCard`) ผ่าน props แล้ว render ออกมาเป็น DOM จริงครบทุกจุด — ตรงกับที่คาดไว้จากโค้ดทุกประการ
 
+#### macro `classes!`: กำหนด CSS class แบบมีเงื่อนไข
+
+ตัวอย่าง `BookCard` ข้างบนใช้ `class="book-card"` เป็น string literal ตรง ๆ ซึ่งพอสำหรับ class คงที่ แต่บ่อยครั้ง
+class ต้อง**เปลี่ยนตามเงื่อนไข** (เช่น เพิ่ม class `"highlighted"` เมื่อผู้ใช้เลือกการ์ดนั้นอยู่) — เขียน
+`format!("book-card {}", if selected { "highlighted" } else { "" })` เองได้ แต่จะเหลือ space เกินตอนไม่มีเงื่อน
+ไขจริง (`"book-card "` มี space ท้าย) และอ่านยากขึ้นเรื่อย ๆ เมื่อเงื่อนไขมีหลายตัว — Yew มี macro `classes!`
+ที่แก้ปัญหานี้ให้ตรง ๆ:
+
+```rust
+use yew::prelude::*;
+
+#[function_component(Greeting)]
+fn greeting() -> Html {
+    // use_state(|| false) — state แบบ bool ธรรมดา เก็บว่า "ไฮไลต์อยู่หรือไม่"
+    let highlighted = use_state(|| false);
+
+    let onclick = {
+        let highlighted = highlighted.clone();
+        Callback::from(move |_| highlighted.set(!*highlighted))
+    };
+
+    // classes! รับ argument ได้หลายแบบผสมกัน: &str ธรรมดา, Option<&str> (None แปลว่า "ไม่เอา class นี้"),
+    // หรือ Vec<String> — ผลลัพธ์คือ Classes ที่ Yew join ด้วย space ให้ถูกต้องเสมอ ไม่มี space เกิน
+    let classes = classes!(
+        "greeting",
+        highlighted.then(|| "greeting--highlighted"), // Option<&str>: Some เมื่อ highlighted เป็น true
+    );
+
+    html! {
+        <div>
+            <p class={classes}>{ "สวัสดี, Rustacean!" }</p>
+            <button {onclick}>{ "toggle" }</button>
+        </div>
+    }
+}
+```
+
+**ผลจากการรันจริง**: สถานะเริ่มต้น (`highlighted = false`) `document.body.innerHTML`:
+
+```html
+<div><p class="greeting">สวัสดี, Rustacean!</p><button>toggle</button></div>
+```
+
+คลิกปุ่ม `toggle` ครั้งแรก (`highlighted` กลายเป็น `true`):
+
+```html
+<div><p class="greeting greeting--highlighted">สวัสดี, Rustacean!</p><button>toggle</button></div>
+```
+
+คลิกอีกครั้ง (`highlighted` กลับเป็น `false`) — class `"greeting--highlighted"` หายไปเอง กลับไปเป็น
+`class="greeting"` เหมือนตอนแรกเป๊ะ — `classes!` คำนวณ string ที่ join กันถูกต้องให้ทุกครั้งโดยไม่ต้องมี space
+เกินหรือขาดเลย ไม่ว่าจะมีเงื่อนไขกี่ตัวผสมกัน (ในโปรเจกต์ที่ใช้ CSS framework แบบ utility-class เช่น Tailwind
+ที่ต้องผสม class เป็นสิบตัวตามเงื่อนไข `classes!` จะมีประโยชน์ชัดเจนมากขึ้นไปอีก)
+
 ### 88.4 State ด้วย Hooks: `use_state` และ `use_effect`
 
 Component ที่เห็นมาจนถึงตอนนี้เป็น component แบบ "รับข้อมูลจากข้างนอก แล้วแสดงผล" ล้วน ๆ — ไม่มี "ความจำ" ของ
@@ -595,6 +649,88 @@ pattern ที่จะใช้ในหัวข้อ 88.8 สำหรับ
 **cleanup function** ที่ Yew จะเรียกก่อน effect รอบถัดไปจะรัน หรือก่อน component ถูก unmount — ใช้บ่อยสำหรับ
 ยกเลิก timer หรือ event listener ที่ effect สร้างไว้ (ทวนแนวคิดเดียวกับ `Drop` trait ของ Part 27 แต่ผูกกับ
 "รอบของ effect" แทน "อายุของตัวแปร")
+
+#### เมื่อ `use_state` ไม่พอ: `use_reducer` สำหรับ state ที่มีหลายวิธีเปลี่ยนแปลง
+
+`use_state` เหมาะกับ state ที่ "แก้ตรง ๆ" ได้ง่าย (ตัวเลข, string, `Vec` ที่แทนที่ทั้งก้อน) แต่ถ้า state หนึ่งตัว
+มี**วิธีเปลี่ยนแปลงหลายแบบ** ที่ต้องแยกความชัดเจน (เช่น ตะกร้าสินค้าที่ "เพิ่ม" กับ "ลบ" ทำงานต่างกัน) การเขียน
+`Callback::from(move |_| state.set(...))` แยกทุกจุดจะเริ่มซ้ำซ้อนและกระจายตรรกะการแก้ state ไปทั่วทั้งไฟล์ —
+Yew มี **`use_reducer`** (ยืม pattern มาจาก `useReducer` ของ React ซึ่งก็ยืมมาจาก Redux อีกที) ที่รวบรวม "ทุก
+วิธีที่ state จะเปลี่ยนได้" ไว้เป็นฟังก์ชันเดียว แยกออกจากจุดที่ *เรียกใช้* การเปลี่ยนแปลงนั้นชัดเจน:
+
+```rust
+use std::rc::Rc;
+use yew::prelude::*;
+
+#[derive(Clone, PartialEq, Debug)]
+struct CartState {
+    count: u32,
+}
+
+// enum ที่แทน "การกระทำ" ทั้งหมดที่เป็นไปได้กับ state นี้ — ทวนจาก Part 10 เรื่อง enum/pattern matching
+enum CartAction {
+    Add,
+    Remove,
+}
+
+// Reducible คือ trait ของ Yew ที่บอกว่า "จาก state เดิม + action หนึ่งตัว จะได้ state ใหม่ยังไง"
+// รับ self เป็น Rc<Self> (ไม่ใช่ &self หรือ self ตรง ๆ) เพราะ use_reducer เก็บ state ไว้เป็น Rc ภายใน
+// เพื่อให้ clone ถูกแบบเดียวกับ UseStateHandle
+impl Reducible for CartState {
+    type Action = CartAction;
+
+    fn reduce(self: Rc<Self>, action: Self::Action) -> Rc<Self> {
+        match action {
+            CartAction::Add => Rc::new(CartState { count: self.count + 1 }),
+            CartAction::Remove => Rc::new(CartState { count: self.count.saturating_sub(1) }),
+        }
+    }
+}
+
+#[function_component(Cart)]
+fn cart() -> Html {
+    let state = use_reducer(|| CartState { count: 0 });
+
+    // .dispatch(action) คือจุดเดียวที่ "เรียกใช้" การเปลี่ยนแปลง — ไม่มีจุดไหนใน component เขียน
+    // state.count = ... ตรง ๆ เลย ตรรกะการคำนวณค่าใหม่ทั้งหมดถูกรวมไว้ที่ reduce() เพียงจุดเดียว
+    let add = {
+        let state = state.clone();
+        Callback::from(move |_| state.dispatch(CartAction::Add))
+    };
+    let remove = {
+        let state = state.clone();
+        Callback::from(move |_| state.dispatch(CartAction::Remove))
+    };
+
+    html! {
+        <div>
+            <p>{ format!("จำนวนในตะกร้า: {}", state.count) }</p>
+            <button onclick={add}>{ "+" }</button>
+            <button onclick={remove}>{ "-" }</button>
+        </div>
+    }
+}
+
+fn main() {
+    yew::Renderer::<Cart>::new().render();
+}
+```
+
+**ผลจากการรันจริง**: คลิกปุ่ม `+` สามครั้งติดกัน แล้วอ่าน `document.body.innerHTML`:
+
+```html
+<div><p>จำนวนในตะกร้า: 3</p><button>+</button><button>-</button></div>
+```
+
+คลิกปุ่ม `-` อีกครั้ง:
+
+```html
+<div><p>จำนวนในตะกร้า: 2</p><button>+</button><button>-</button></div>
+```
+
+ข้อดีของ pattern นี้เห็นชัดเมื่อ state ซับซ้อนขึ้น: ถ้าอีกสองสัปดาห์ต้องเพิ่ม action `Clear` (ล้างตะกร้าทั้งหมด)
+สิ่งที่ต้องแก้คือเพิ่ม variant ใน `CartAction` กับเพิ่ม arm ใน `match` ของ `reduce()` — ไม่ต้องไปตามหาว่ามีจุด
+ไหนใน component ที่แก้ `state.count` มือแบบกระจัดกระจายบ้าง เพราะไม่มีจุดแบบนั้นอยู่แล้วตั้งแต่ต้น
 
 ### 88.5 Event Handling: `Callback<T>` ผูก `onclick`/`oninput` เข้ากับ state
 
@@ -820,6 +956,16 @@ fn main() {
 `Book` แบบมี ownership เต็ม ๆ (props ถูก Yew เก็บไว้ใช้เทียบรอบถัดไป จะยืมจาก `Vec` เดิมที่อาจถูก drop ไปแล้ว
 ไม่ได้) — ทวนจาก Part 6-7 ตรง ๆ ว่าทำไม compiler บังคับให้ clone ในจุดนี้: lifetime ของ `books` (ตัวแปร local
 ใน `book_list()`) สั้นกว่า lifetime ของ props ที่ Yew ต้องเก็บไว้ข้าม re-render
+
+**ข้อควรระวัง**: ลองลบ `key={book.id}` ออกจากตัวอย่างข้างบนดู — โค้ดยัง **compile ผ่านและ render ผลลัพธ์ที่
+หน้าตาเหมือนเดิมทุกประการ** (ตรวจสอบจริงแล้ว — ไม่มี error, ไม่มี warning ใน console เลยด้วยซ้ำ) เพราะ Yew
+(ต่างจาก React ที่จะพิมพ์ `Warning: Each child in a list should have a unique "key" prop` ใน console ทันที)
+**ไม่เตือนเวลาลืม `key` เลย** — มันจะ diff ตาม "ตำแหน่งในลิสต์" เงียบ ๆ แทน ผลกระทบของการลืม `key` จะไม่เห็นจาก
+ข้อมูลที่ render ถูกต้องหรือไม่ (ข้อมูลจะยังถูกต้องเสมอในตัวอย่างนี้ เพราะ list ไม่มีการเพิ่ม/ลบ/สลับลำดับ) แต่
+จะเห็นผลเมื่อ list มีการเรียงลำดับใหม่ระหว่าง re-render จริง ๆ (เช่น ผู้ใช้กด sort หรือลบเล่มกลางลิสต์) — ตอน
+นั้น Yew อาจ "จับคู่ node เก่า/ใหม่ผิดตัว" ทำให้ state ภายใน component ลูก (ถ้ามี เช่น scroll position หรือ
+input ที่ focus อยู่) เพี้ยนไปติดกับ node ผิดใบ แม้ข้อมูลที่แสดงจะยังถูกต้อง — นี่คือเหตุผลที่ควรติดตั้งวินัย
+**ใส่ `key` ทุกครั้งที่ render list ด้วย `.map()`** เป็นธรรมเนียม ไม่ต้องรอให้เห็นบั๊กจริงก่อนแล้วค่อยแก้
 
 ### 88.7 Component Communication: callback เป็น prop, lifting state up, และ `use_context`
 
@@ -1383,10 +1529,34 @@ renderer ตัวเดียวกัน ไม่ใช่แค่ web) — 
 | Routing | ต้องเขียนเอง (จับ `popstate` event เอง) | `yew-router` (official) |
 | ขนาด ecosystem เสริม | เล็ก (เป็น primitive layer เอง) | ใหญ่ที่สุดในสาม Rust framework |
 | เหมาะกับ | widget เล็ก ๆ, ปะ WASM เข้าโปรเจกต์เดิม | SPA ขนาดกลางถึงใหญ่ |
+| ขนาด `.wasm` (release, gzip) ของ Hello World | ขึ้นกับโค้ดที่เขียนเอง — อาจเล็กกว่ามากถ้าเขียนบางมาก | ~94 KiB (วัดจริงในหัวข้อ 88.2 — รวม runtime ของ Yew ทั้งชุดแล้ว) |
+
+ตัวเลข ~94 KiB ที่วัดได้จริงในหัวข้อ 88.2 คือ**ต้นทุนคงที่**ของการเลือกใช้ Yew (หรือ framework ที่ทำงานบน
+แนวคิดเดียวกัน) — ไม่ว่าแอปจะเล็กหรือใหญ่แค่ไหน runtime ของ virtual DOM diffing/hooks system ต้องถูกส่งไปให้
+เบราว์เซอร์ทุกครั้งที่โหลดหน้าเว็บครั้งแรก (แม้ browser cache ไว้ให้ครั้งถัดไปก็ตาม) เทียบกับ `wasm-bindgen`
+ดิบที่ Part 87 สอน ซึ่งไม่มี "runtime" ส่วนกลางแบบนี้เลย — ขนาดไฟล์ขึ้นกับโค้ดที่คุณเขียนเองตรง ๆ เท่านั้น จุด
+นี้เป็นส่วนหนึ่งของ trade-off ที่ต้องชั่งน้ำหนักตอนเลือก framework จริง (ตัวเลขที่แม่นยำของ Leptos และ Dioxus
+สำหรับงานเดียวกันจะเห็นได้ใน Part 89-90 เพื่อเทียบกันตรง ๆ)
 
 การเปรียบเทียบแบบสามทาง (Yew vs Leptos vs Dioxus) เต็มรูปแบบจะรอไปถึงหลัง Part 90 — เมื่อคุณได้ลงมือเขียน
 โค้ดจริงกับทั้งสามตัวและเห็น trade-off ด้วยตัวเองแล้ว การตัดสินตอนนี้ (ก่อนเห็นอีกสองตัว) จะไม่เป็นธรรมต่อ
 framework ที่ยังไม่ได้เรียน
+
+### 88.11 ทดสอบ Component ของ Yew: จุดที่เชื่อมกับ Part 32-33
+
+บทนี้ยังไม่ได้พูดถึงการเขียน automated test สำหรับ component เลย — คอร์สนี้แนะนำ unit test และ integration
+test มาแล้วเต็มรูปแบบใน Part 32-33 แต่ test เหล่านั้นรันบน target `x86_64` ปกติ (หรือ target ของเครื่องที่ใช้
+พัฒนา) ไม่ใช่ `wasm32-unknown-unknown` — การทดสอบ component ของ Yew โดยเฉพาะ (เช่น "component นี้ render
+`<button>` ถูกไหม", "คลิกแล้ว state เปลี่ยนจริงไหม") ต้องรันบน WASM จริง เพราะพึ่งพา `web-sys`/DOM API ที่ไม่มี
+อยู่ใน target ปกติ — เครื่องมือสำหรับงานนี้คือ `wasm-bindgen-test` (มาจากตระกูล `wasm-bindgen` ที่ Part 87 สอน
+ตรง ๆ) ซึ่งให้ attribute macro `#[wasm_bindgen_test]` แทนที่ `#[test]` ปกติของ Part 32 แล้วรันผ่าน
+`wasm-bindgen-test-runner` ที่เปิด headless browser จริงขึ้นมา execute ทุก test case (แนวคิดเดียวกันกับที่บทนี้
+เองใช้ตรวจสอบทุกตัวอย่างที่เห็นมาทั้งบท — เพียงแต่บทนี้ใช้ Playwright ควบคุม browser จากภายนอก ในขณะที่
+`wasm-bindgen-test` ทำสิ่งเดียวกันแต่ผนวกเข้ากับ `cargo test` โดยตรง) — Yew เองมี crate เสริมชื่อ `yew::
+functional::test` (และ helper อื่นในบางเวอร์ชัน) สำหรับ render component ลง DOM จำลองแล้วตรวจสอบผลลัพธ์แบบ
+programmatic โดยไม่ต้องเปิด browser จริงทุกครั้งที่ CI รัน — เนื้อหาการเขียน test เต็มรูปแบบสำหรับเว็บแอปจะถูก
+รวบรวมให้ครบใน **Part 95 (Testing Web Applications แบบครบวงจร)** ซึ่งจะกลับมาที่ Yew (และ Leptos/Dioxus)
+อีกครั้งพร้อมกับเทคนิค unit/integration/e2e เต็มชุด บทนี้ขอให้แค่รู้จักชื่อเครื่องมือและตำแหน่งของมันไว้ก่อน
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

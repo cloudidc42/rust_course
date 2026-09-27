@@ -678,6 +678,30 @@ variable เข้า container โดยไม่ต้องมีไฟล์
 94.5, systemd unit file ธรรมดา, หรือ platform-as-a-service ที่มีหน้าตั้งค่า environment variable ผ่าน web
 UI) โค้ดแอปเองไม่ต้องแก้อะไรเลยแม้แต่บรรทัดเดียว
 
+**Fail-fast ตอน config ผิดพลาด — พฤติกรรมที่มีอยู่แล้วโดยไม่ต้องเขียนเพิ่ม**: `main.rs` ของบทนี้ (และของ
+Part 92 เดิม) ไม่มี logic ตรวจสอบความถูกต้องของ `DATABASE_URL` เองเลย แต่**ยังคง fail-fast ได้ถูกต้อง**เพราะ
+`PgPoolOptions::connect(&database_url).await?` (ที่มี `?` ต่อท้าย) ทำให้ error จากการ parse connection
+string ที่ผิดรูปแบบ (ไม่ใช่แค่ต่อไม่ติดเพราะ network เท่านั้น) กลายเป็น `anyhow::Error` ที่ทำให้ `main()` คืน
+`Err` และ process จบทันทีตั้งแต่ก่อนเปิด TCP listener ด้วยซ้ำ — ทดสอบด้วยค่าที่ผิดรูปแบบชัดเจน (ไม่ใช่แค่ต่อ
+ไม่ติด แต่ผิด syntax ของ URL เองตั้งแต่ต้น):
+
+```bash
+$ export DATABASE_URL="not-a-valid-url"
+$ ./target/release/library_api
+Error: error with configuration: relative URL without a base
+
+Caused by:
+    relative URL without a base
+```
+
+process จบทันทีด้วย exit code ที่ไม่ใช่ 0 (สังเกตจาก `anyhow::Result<()>` ที่ `main()` คืนค่า — ตาม
+convention ของ Rust `fn main() -> Result<...>` ที่ Part 12/30 อธิบายไว้ว่า `Err` ทำให้ process จบด้วย exit
+code `1` โดยอัตโนมัติ) — นี่คือพฤติกรรมที่ **ถูกต้องแล้ว**สำหรับ config ที่ผิดพลาดร้ายแรงระดับนี้: ดีกว่าการ
+ปล่อยให้ process เริ่มทำงานแล้วพังทีละendpoint ตอนมีคนเรียกจริง (ซึ่งจะทำให้เห็นปัญหาช้ากว่ามาก และอาจทำให้
+health check ผ่านชั่วครู่ก่อนพังจริงด้วยซ้ำถ้า route แรกที่ query database ไม่ใช่ `/health`) — แบบฝึกหัดข้อ 2
+ของบทนี้ขยายหลักการเดียวกันนี้ไปใช้กับ `JWT_SECRET` ที่ปัจจุบันยัง**ไม่** fail-fast (มันแค่ fallback ไปใช้ค่า
+default เงียบ ๆ ซึ่งเป็นความเสี่ยงด้านความปลอดภัยที่ต่างจากกรณี `DATABASE_URL` ข้างบนอย่างสิ้นเชิง)
+
 ### 94.5 Containerization: Multi-Stage Dockerfile
 
 หัวข้อนี้แพ็กทั้ง backend และ frontend ให้กลายเป็น **container image เดียว** ที่รัน combined server จาก
@@ -689,6 +713,23 @@ UI) โค้ดแอปเองไม่ต้องแก้อะไรเ�
 แล้ว copy เอาแค่ "ผลลัพธ์" (compiled binary + ไฟล์ static ที่ build แล้ว) ไปยัง image สุดท้ายที่**เล็กและไม่มี
 เครื่องมือ build ติดไปด้วย** — ตรงกับหลักการ "artifact สำหรับ deploy ควรมีแค่สิ่งที่จำเป็นต้องรันจริง" ที่
 หัวข้อ 94.2 อธิบายไว้ตอนเทียบขนาด dev/release build เพียงแต่ครั้งนี้ทำที่ระดับ image ทั้งก้อน
+
+**`.dockerignore` — กันไฟล์ที่ไม่ควรถูกส่งเข้า build context**: ก่อนดู Dockerfile เต็ม ต้องมีไฟล์นี้คู่กันเสมอ
+(อยู่ระดับเดียวกับ `Dockerfile`, ครอบคลุมทั้ง `library_api/` และ `library_frontend/`):
+
+```
+**/target
+**/dist
+**/*.log
+```
+
+**เหตุผล**: ทุกครั้งที่รัน `docker build .` (สังเกต `.` ท้ายคำสั่ง) Docker จะส่งไฟล์ทั้งหมดในโฟลเดอร์นั้น
+(รวม subfolder) ไปให้ Docker daemon ก่อนเริ่ม build — ถ้าไม่กัน `target/` (โฟลเดอร์ build cache ของ Cargo ที่
+อาจมีขนาดหลัก GB จากการพัฒนาบนเครื่อง dev) และ `dist/` (ผลลัพธ์ `trunk build` เก่าที่อาจหลงเหลืออยู่) ออกไป
+ก่อน จะทำให้ **ทุกครั้งที่ build ต้อง copy ไฟล์นับ GB ที่ไม่มีประโยชน์อะไรกับ build เข้า Docker daemon ก่อน**
+(ช้าลงมาก และเสี่ยงที่ `COPY src ./src` อาจดึงไฟล์ที่ไม่ต้องการเข้ามาถ้าเขียน pattern ไม่ระมัดระวัง) — ไม่มี
+ผลต่อความถูกต้องของ image สุดท้ายเลยถ้าลืมไฟล์นี้ (Dockerfile ของหัวข้อนี้ `COPY` แค่ path ที่ระบุตรง ๆ
+ไม่ได้ `COPY .` ทั้งโฟลเดอร์) แต่มีผลต่อ**ความเร็วของทุกครั้งที่ build** อย่างมีนัยสำคัญ
 
 ```dockerfile
 #### Stage 1: build the Leptos frontend into static files (trunk build --release) ####
@@ -1257,6 +1298,16 @@ $ docker build -t library_app:test .
 E: Failed to fetch http://deb.debian.org/debian/dists/bookworm/InRelease  403  Forbidden
 ```
 
+**หมายเหตุสำหรับผู้อ่านที่จะ build Dockerfile นี้ใน CI ของตัวเอง**: CI runner มาตรฐานทั่วไป (GitHub Actions
+runner ของ GitHub เอง, GitLab CI's shared runner, CircleCI ฯลฯ) **ไม่มีข้อจำกัดแบบนี้** — `apt-get install`
+ทำงานได้ตามปกติทุกประการในสภาพแวดล้อมเหล่านั้น เพราะไม่มี network policy ที่ปฏิเสธ `deb.debian.org` แบบที่
+สภาพแวดล้อม sandbox เฉพาะทางที่ใช้พัฒนาหลักสูตรนี้มี — ปัญหาที่เจอในหัวข้อนี้จึงเป็นเรื่องเฉพาะของสภาพแวดล้อม
+การเขียนบทเรียนนี้เท่านั้น (ที่มี egress policy ควบคุมไว้แน่นเป็นพิเศษด้วยเหตุผลด้านความปลอดภัยของระบบที่ใช้
+รันหลาย agent พร้อมกัน) — แต่**ถึงจะไม่มีข้อจำกัดนั้น** Dockerfile ฉบับสุดท้ายที่หลีกเลี่ยง `apt-get install`
+ก็ยังคงเป็นแนวทางที่ดีกว่าโดยทั่วไปอยู่ดี (image เล็กกว่า, build เร็วกว่าเพราะไม่ต้อง `apt-get update` ที่ดึง
+ข้อมูล index ของ package ทั้งหมด, และ attack surface น้อยกว่าตามที่อธิบายไว้ในหัวข้อ 94.5) — ข้อจำกัดของ
+สภาพแวดล้อมนี้บังเอิญผลักให้ไปสู่ทางออกที่ดีกว่าอยู่แล้วในกรณีนี้ ไม่ใช่ทางออกที่ต้องยอมแลกกับข้อเสียอะไร
+
 **นี่คือเหตุผลที่ Dockerfile ฉบับสุดท้ายของหัวข้อ 94.5 หลีกเลี่ยง `apt-get install` ในทุก stage โดยตั้งใจ**
 (ติดตั้ง `trunk` ผ่าน `cargo install` จาก crates.io แทนการดาวน์โหลด binary จาก GitHub Releases, และ runtime
 image ไม่ต้อง package เพิ่มเลยเพราะ binary ไม่มี dependency ต่อ `libssl`/`ca-certificates`) — เมื่อปรับตาม
@@ -1693,6 +1744,10 @@ branch ไปได้เลย (ผู้อ่านที่อยากล�
 
 ## แบบฝึกหัด (Exercises)
 
+แบบฝึกหัดทั้งสี่ข้อของบทนี้ต่อยอดจากโค้ดจริงที่ตรวจสอบไว้แล้วในหัวข้อ 94.4-94.7 โดยตรง — ควรมีโปรเจกต์ที่
+รันได้จริง (คัดลอกจาก Part 92 + แก้ตามหัวข้อ 94.3-94.8) พร้อม PostgreSQL จริงอยู่แล้วก่อนเริ่มทำ เพราะทุกข้อ
+ต้อง**ทดสอบด้วยการรันจริง** ไม่ใช่แค่เขียนโค้ดแล้วอ่านว่าน่าจะถูก:
+
 1. **[ง่าย]** เพิ่ม environment variable ใหม่ `APP_VERSION` ที่อ่านจาก `env!("CARGO_PKG_VERSION")` (macro
    ของ Rust ที่อ่านเวอร์ชันจาก `Cargo.toml` ตอน compile time) แล้วเพิ่ม key `version` เข้าไปใน JSON
    response ของ `GET /health` (หัวข้อ 94.7) ให้เป็น `{"status":"ok","database":"ok","version":"0.1.0"}` —
@@ -1739,8 +1794,11 @@ environment-variable-driven พร้อม `.env.example`, เขียน mult
 multi-instance deploy (ควบคุมได้ด้วย `RUN_MIGRATIONS_ON_STARTUP`), ขยาย `/health` ให้ตรวจสถานะ database
 จริงแทน "process ไม่ตาย" เฉย ๆ, และเปิดให้สลับ log format ระหว่าง pretty/JSON ได้ด้วย environment variable
 เดียว — ทุกอย่างพิสูจน์ด้วยการรัน combined application จริงเป็นหนึ่งหน่วยเดียว ทั้งระดับ API ผ่าน `curl` และ
-ระดับเบราว์เซอร์ผ่าน headless Chromium จริง โดยพูดตรง ๆ ถึงข้อจำกัดของสภาพแวดล้อมที่ใช้ตรวจสอบบทนี้เรื่อง
-network policy สำหรับการ build Docker image แบบเต็มรูปแบบ
+ระดับเบราว์เซอร์ผ่าน headless Chromium จริง ทั้งแบบรัน binary ตรง, แบบ `docker run` เดี่ยว, และแบบ `docker
+compose up` ที่มี PostgreSQL container ใหม่ล้วน ๆ — สภาพแวดล้อม sandbox ที่ใช้ตรวจสอบบทนี้มี network policy
+ที่จำกัดการเข้าถึง `deb.debian.org`/GitHub Releases ซึ่งบังคับให้ปรับ Dockerfile ให้ไม่พึ่ง `apt-get install`
+เลย (ผลลัพธ์ที่ได้กลับดีกว่าเดิม — image เล็กลง ปลอดภัยขึ้น) แต่หลังจากปรับแล้ว **ทั้ง `docker build` และ
+`docker run`/`docker compose up` ทำงานสำเร็จจริง 100%** ไม่ใช่แค่ทฤษฎี
 
 ทั้งสามบท (92, 93, 94) รวมกันคือ capstone ที่แสดงให้เห็นว่าเทคนิคทั้งหมดของ Module 4 (Axum backend) และ
 Module 5 (frontend framework, WASM, SSR) ประกอบกันเป็นระบบจริงที่ deploy ได้อย่างไร — **สิ่งถัดไปคือ Part

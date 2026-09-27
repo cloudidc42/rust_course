@@ -134,6 +134,13 @@ response ถูกกำหนดโดย server (ตาม resource) ไม่
 ผลกระทบนี้ทวีคูณขึ้นเรื่อย ๆ ตามจำนวน field ที่ไม่ได้ใช้และจำนวน request ที่ยิงบ่อย ๆ (เช่น รายการหนังสือที่
 scroll ได้เรื่อย ๆ)
 
+พอจะให้เห็นตัวเลขที่จับต้องได้ (ไม่ใช่แค่ "เยอะกว่า" แบบคลุมเครือ): JSON เต็มรูปแบบของ resource หนึ่งเล่มข้างบน
+มีขนาด **225 ไบต์** ในขณะที่ข้อมูลที่หน้าจอ card ต้องการจริง (`title` + `author.name`) มีขนาดแค่ **62 ไบต์**
+— คือประมาณ **3.6 เท่า** ของข้อมูลที่ใช้จริง สำหรับหนังสือเล่มเดียว ตัวเลขนี้ดูไม่มากนัก แต่ลองคูณด้วยจำนวนแถว
+ต่อหน้า (สมมติ 20 เล่มต่อหน้า scroll) และจำนวนหน้าที่ผู้ใช้ scroll ผ่านต่อวัน (สมมติผู้ใช้ 10,000 คน คนละ 5 หน้า
+ต่อวัน) ส่วนต่างของ bandwidth ที่ "เสียไปเปล่า ๆ" จะกลายเป็นตัวเลขระดับ GB ต่อวันได้ไม่ยากเลย — นี่คือเหตุผลที่
+over-fetching ไม่ใช่ปัญหาเชิงทฤษฎีล้วน ๆ แต่เป็นต้นทุนจริงที่วัดได้เป็นตัวเลขเมื่อระบบมีขนาดใหญ่ขึ้น
+
 #### Under-fetching และ N+1 ระดับ REST: ต้องยิงหลายรอบเพื่อประกอบข้อมูลที่ต้องการ
 
 ปัญหาตรงข้ามเกิดขึ้นเมื่อ client ต้องการข้อมูลที่ **กระจายอยู่คนละ resource** สมมติหน้าจอเดียวกัน (book list
@@ -293,6 +300,21 @@ resolver ของ field `author` อาจต้องไปยิง SQL query
 อิสระจากกัน** ไม่รู้ว่า field ข้างเคียงกำลังทำอะไรอยู่ (นี่คือรากของปัญหา N+1 ในหัวข้อ 79.6: ถ้า `author`
 resolver ถูกเรียกแยกกัน 5 ครั้งสำหรับหนังสือ 5 เล่ม มันจะยิง SQL 5 ครั้งแยกกันโดยไม่รู้ตัวว่ามีเล่มอื่นเรียกพร้อม
 กันอยู่ — เว้นแต่จะมีกลไกอย่าง DataLoader มาช่วยรวมมันเข้าด้วยกัน)
+
+**ตารางเทียบให้เห็นภาพรวมก่อนลงมือเขียนโค้ดจริงในหัวข้อ 79.3**: REST ใช้ endpoint คนละตัวต่อ resource/action
+ในขณะที่ GraphQL รวมทุกอย่างไว้ที่ query/mutation field คนละตัวภายใต้ endpoint เดียว:
+
+| การกระทำ | REST (Part 61-78) | GraphQL (บทนี้) |
+|---|---|---|
+| อ่านหนังสือเล่มเดียว | `GET /api/v1/books/3` | `POST /graphql` พร้อม `{ book(id: 3) { ... } }` |
+| อ่านรายการหนังสือแบบกรอง | `GET /api/v1/books?status=available&limit=5` | `POST /graphql` พร้อม `{ books(status: "available", limit: 5) { ... } }` |
+| สร้างการจอง/ยืมใหม่ | `POST /api/v1/bookings` | `POST /graphql` พร้อม `mutation { createBooking(...) { ... } }` |
+| รับข้อมูล real-time เมื่อสถานะเปลี่ยน | ไม่มีมาตรฐานตรง ๆ ใน REST เอง (ต้อง polling หรือเสริม WebSocket แยกวง — Part 77) | `subscription { bookStatusChanged(...) { ... } }` ผ่าน WebSocket connection เดียวกับ endpoint หลัก |
+
+สังเกตว่าคอลัมน์ REST มี**ทั้ง URL และ HTTP method ที่ต่างกัน**ในแต่ละแถว ในขณะที่คอลัมน์ GraphQL มี**URL/method
+เดียวกันเป๊ะทุกแถว** (`POST /graphql`) ความต่างอยู่ที่**เนื้อหาข้างในตัว body** เท่านั้น — นี่คือรูปธรรมของคำว่า
+"single endpoint" ที่อธิบายไปแล้วข้างบน และเป็นเหตุผลที่หัวข้อ 79.11 จะพูดถึงว่าทำไม HTTP-level caching/routing
+ที่ REST ใช้ URL เป็นตัวจำแนกไม่สามารถทำงานกับ GraphQL แบบเดิมได้เลย
 
 ในหัวข้อถัดไปเราจะเห็นว่า `async-graphql` ผูก resolver เข้ากับ schema ผ่าน **attribute macro** — `#[Object]`
 ที่ครอบ `impl` block ของ struct หนึ่งตัว จะแปลง**แต่ละ method** ข้างในให้กลายเป็น**แต่ละ field ของ GraphQL
@@ -679,12 +701,10 @@ type นั้นเริ่มมี field ที่ต้องคำนว�
 query ในหัวข้อก่อน ๆ (`apiVersion`, `book(id)`) ยังจำกัดอยู่แค่ไม่มี argument หรือมีแค่ 1 argument — ในหัวข้อนี้
 มาดู resolver ที่รับ**หลาย argument พร้อมกัน โดยบาง argument เป็น optional**:
 
-```rust
-use async_graphql::{Context, Object};
-use sqlx::PgPool;
+โครงสร้าง `Book`/`Query` เหมือนกับที่นิยามไว้ในหัวข้อ 79.3-79.4 ทุกประการ — ตัดมาแสดงเฉพาะ signature ของ
+resolver `books` เพื่อโฟกัสที่ argument:
 
-# struct Book(());
-# struct Query;
+```rust
 #[Object]
 impl Query {
     /// สอง argument, ทั้งคู่ optional ในความหมายที่ client ไม่ใส่ก็ได้ -- ฝั่ง Rust ให้
@@ -697,9 +717,9 @@ impl Query {
     ) -> async_graphql::Result<Vec<Book>> {
         let pool = ctx.data::<PgPool>()?;
         let limit = limit.unwrap_or(50).clamp(1, 100);
-        // (โค้ด query จริงดูเต็มในหัวข้อ 79.3/79.6 -- ตัดมาแสดงเฉพาะ signature ตรงนี้)
-        # let _ = (pool, status, limit);
-        # Ok(vec![])
+        // (โค้ด query จริงที่ยิง SQL ดูเต็มในหัวข้อ 79.3/79.6 -- ตัดมาแสดงเฉพาะ signature
+        // และการจัดการ default ของ argument ตรงนี้)
+        // ...
     }
 }
 ```
@@ -777,16 +797,14 @@ query สำหรับ list หนังสือเอง รวมเป็�
 โค้ด resolver แบบ naive (ทดสอบจริง คอมไพล์และรันจริงกับฐานข้อมูล PostgreSQL จริง — มีการเพิ่ม counter
 `Arc<AtomicUsize>` เข้าไปนับจำนวน query แบบตรงไปตรงมา เพื่อให้เห็นตัวเลขที่แน่นอน ไม่ต้องเดาจาก log):
 
+`Author` (`SimpleObject`) และ `BookRow` (แถวดิบจาก `sqlx::FromRow`) นิยามเหมือนหัวข้อ 79.3-79.4 ทุกประการ:
+
 ```rust
 use async_graphql::{Context, Object};
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-# #[derive(Debug, Clone, sqlx::FromRow, async_graphql::SimpleObject)]
-# struct Author { id: i64, name: String, country: Option<String> }
-# #[derive(Debug, Clone, sqlx::FromRow)]
-# struct BookRow { id: i64, title: String, author_id: i64 }
 struct Book(BookRow);
 
 #[Object]
@@ -899,6 +917,8 @@ cargo add async-graphql --features dataloader
 โค้ดที่แก้แล้ว (ทดสอบจริง คอมไพล์และรันจริง — โครงสร้าง schema เหมือนเดิมทุกอย่าง เปลี่ยนแค่วิธี resolve
 `author`):
 
+`Author`/`BookRow` เหมือนหัวข้อก่อนหน้าอีกครั้ง (ไม่เปลี่ยนแปลง) — สิ่งที่เปลี่ยนมีแค่วิธี resolve `author`:
+
 ```rust
 use async_graphql::dataloader::{DataLoader, Loader};
 use async_graphql::{Context, Object};
@@ -907,10 +927,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-# #[derive(Debug, Clone, async_graphql::SimpleObject, sqlx::FromRow)]
-# struct Author { id: i64, name: String, country: Option<String> }
-# #[derive(Debug, Clone, sqlx::FromRow)]
-# struct BookRow { id: i64, title: String, author_id: i64 }
 struct Book(BookRow);
 
 // ตัว loader เก็บสิ่งที่จำเป็นสำหรับ "ยิง query แบบ batch" ไว้ข้างใน -- ในที่นี้คือ
@@ -976,12 +992,6 @@ impl Book {
 ตอน setup schema ต้องสร้าง `DataLoader` แล้วส่งเข้าไปเป็น context data (เหมือน `PgPool` ทุกประการ):
 
 ```rust
-# use async_graphql::dataloader::DataLoader;
-# use sqlx::PgPool;
-# use std::sync::atomic::AtomicUsize;
-# use std::sync::Arc;
-# struct AuthorLoader { pool: PgPool, query_count: Arc<AtomicUsize> }
-# async fn setup(pool: PgPool, query_count: Arc<AtomicUsize>) {
 let author_loader = DataLoader::new(
     AuthorLoader {
         pool: pool.clone(),
@@ -990,8 +1000,11 @@ let author_loader = DataLoader::new(
     tokio::spawn, // DataLoader ต้องรู้วิธี spawn task ของ runtime ที่ใช้ (Tokio ในบทนี้)
 );
 // จากนั้น .data(author_loader) เข้า schema เหมือนกับ .data(pool) ปกติ
-# let _ = author_loader;
-# }
+let schema = Schema::build(Query, async_graphql::EmptyMutation, EmptySubscription)
+    .data(pool)
+    .data(query_count)
+    .data(author_loader)
+    .finish();
 ```
 
 **รันจริงซ้ำด้วย query เดิมเป๊ะ** (`{ books { title author { name } } }`) กับ server เวอร์ชันที่ใช้ DataLoader:
@@ -1046,6 +1059,72 @@ query/เรียก service ข้ามระบบ ให้ถามตั�
 — ถ้าคำตอบคือ "ขึ้นกับจำนวนแถวใน list ที่ล้อมมันอยู่" (แปลว่ามันคือ field ของ type ที่ปรากฏอยู่ใน list) แทบจะ
 เดาได้ทันทีว่าต้องใช้ DataLoader ไม่ใช่การยิง query ตรง ๆ — field ที่ไม่ได้อยู่ใน list (เช่น `book(id)` เดี่ยว ๆ
 ในหัวข้อ 79.3) ไม่มีปัญหานี้ เพราะถูก resolve แค่ครั้งเดียวอยู่แล้วโดยธรรมชาติ
+
+#### DataLoader Lifecycle: ต้องเป็น Per-Request ไม่ใช่ Per-Server
+
+ตัวอย่างในหัวข้อก่อนหน้าสร้าง `DataLoader` **ครั้งเดียวตอน startup** แล้วผูกเข้ากับ schema ผ่าน
+`Schema::build(...).data(author_loader).finish()` — วิธีนี้ใช้ได้ในตัวอย่างสั้น ๆ ของบทนี้ แต่มี **ข้อเสียที่
+สำคัญมากในระบบจริง**: `DataLoader` มี **cache ภายในตัวมันเอง** (เก็บผลลัพธ์ของ key ที่เคย `.load_one()` ไปแล้ว
+เพื่อไม่ต้อง query ซ้ำถ้ามีการขอ key เดิมอีกภายในคำขอเดียวกัน) — ถ้าสร้าง `DataLoader` ตัวเดียวแล้วใช้ร่วมกัน
+**ข้าม HTTP request หลาย ๆ ครั้ง** (แบบที่ทำไว้ในหัวข้อก่อนหน้า) cache นั้นจะ**อยู่ยาวข้าม request ตลอดชีวิตของ
+เซิร์ฟเวอร์** — ถ้าข้อมูล author เปลี่ยนไป (เช่น มีการแก้ชื่อ author ผ่าน mutation อื่น) request ที่มาทีหลังอาจ
+ได้ค่า author **เก่าที่ cache ไว้** ไม่ใช่ค่าล่าสุดจากฐานข้อมูล
+
+**แนวทางที่ถูกต้องสำหรับ production**: สร้าง `DataLoader` ตัว**ใหม่**สำหรับ**ทุก HTTP request** (cache เริ่ม
+ต้นเป็นค่าว่างเสมอในแต่ละ request — คงประโยชน์ของการ batch/deduplicate ภายในคำขอเดียวไว้ครบ แต่ไม่มีข้อมูลเก่า
+รั่วข้าม request) ทำได้โดยสร้าง loader ข้างใน `graphql_handler` เอง แล้วแนบเข้ากับ **`Request` ของตัว query
+นั้น** (ไม่ใช่ `Schema`) ผ่าน `async_graphql::Request::data()`:
+
+`AuthorLoader`/`ApiSchema` นิยามเหมือนหัวข้อก่อนหน้า — จุดที่เปลี่ยนคือตัว handler เอง:
+
+```rust
+use async_graphql::dataloader::DataLoader;
+use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
+use axum::Extension;
+use sqlx::PgPool;
+
+async fn graphql_handler(
+    schema: Extension<ApiSchema>,
+    pool: Extension<PgPool>,
+    req: GraphQLRequest,
+) -> GraphQLResponse {
+    // สร้าง DataLoader ใหม่ทุกครั้งที่ handler นี้ถูกเรียก -- แปลว่า "ใหม่ทุก HTTP
+    // request" เพราะ Axum เรียก handler function นี้ครั้งใหม่ทุกครั้งที่มี request
+    // เข้ามา (คนละ invocation กันเสมอ ไม่มีการแชร์ stack frame ข้าม request)
+    let loader = DataLoader::new(
+        AuthorLoader { pool: pool.0.clone() },
+        tokio::spawn,
+    );
+    // .data(loader) ผูก loader ตัวนี้เข้ากับ "คำขอนี้คำขอเดียว" ผ่าน Request::data()
+    // -- คนละ method กับ SchemaBuilder::data() ที่ผูกไว้ตลอดชีพของ schema
+    let request = req.into_inner().data(loader);
+    schema.execute(request).await.into()
+}
+```
+
+**ทดสอบจริง**: ยิง 2 request แยกกัน (คนละ `curl` call) ขอ `author(id: 1)` เหมือนกันเป๊ะทั้งคู่ พร้อม print
+log ทุกครั้งที่ `AuthorLoader::load` ถูกเรียกจริง:
+
+```bash
+curl -s -X POST http://127.0.0.1:8084/graphql -H 'Content-Type: application/json' \
+  -d '{"query":"{ author(id: 1) { name } }"}'
+curl -s -X POST http://127.0.0.1:8084/graphql -H 'Content-Type: application/json' \
+  -d '{"query":"{ author(id: 1) { name } }"}'
+```
+
+log จริงที่ได้จากฝั่ง server:
+
+```text
+AuthorLoader::load called with keys = [1]
+AuthorLoader::load called with keys = [1]
+```
+
+`load` ถูกเรียก **สองครั้งจริง** (ครั้งละหนึ่ง request) แม้จะขอ `id: 1` เหมือนกันเป๊ะทั้งสองครั้ง — ยืนยันว่า
+ไม่มี cache รั่วข้าม request เลย (ถ้า `DataLoader` ถูกแชร์ข้าม request แบบหัวข้อก่อนหน้า การเรียกครั้งที่สองจะ
+**ไม่มี log ใหม่เลย** เพราะมันจะตอบจาก cache เดิมที่มีอยู่แล้วทันที) — trade-off ที่ต้องยอมรับคือเสีย query
+ซ้ำข้าม request ไปเล็กน้อย (จาก request ที่ 2 เป็นต้นไปที่ขอ key เดิม) แต่ได้ความถูกต้องของข้อมูลกลับมาแทน ซึ่ง
+เป็นข้อแลกเปลี่ยนที่คุ้มค่าเสมอสำหรับ production — **cache ของ DataLoader ควรมีอายุสั้นเท่ากับ 1 คำขอ ไม่ใช่ยาว
+เท่าอายุของเซิร์ฟเวอร์**
 
 ### 79.7 Mutations: `createBooking` พร้อม Validation และ Error Mapping
 
@@ -1281,12 +1360,50 @@ type ไหนจาก context บ้าง (ต่างจาก Axum ที�
 เสี่ยงจะเกิดขึ้นก็ตอนที่**ลืมลงทะเบียน** type ใด type หนึ่งเข้า schema เท่านั้น (ซึ่งกับดักข้อ 3 จะพิสูจน์ error
 จริงให้เห็น)
 
+#### ทำไม `async-graphql-axum` เลือกใช้ `Extension` แทน `State<T>` ในตัวอย่างของบทนี้
+
+Part 64 สอนว่า `State<T>` เป็นตัวเลือกที่แนะนำสำหรับ Axum handler ทั่วไป เพราะได้ compile-time check เต็มรูปแบบ
+— แล้วทำไมตัวอย่างของบทนี้ (79.3 เป็นต้นมา) ถึงใช้ `Extension<ApiSchema>` แทน `State<ApiSchema>`? เหตุผลคือ
+`ApiSchema` (ที่ผูก `Query`, `Mutation`, `Subscription` เข้าด้วยกัน) เป็น type ที่ `async-graphql-axum` ออกแบบมา
+ให้ทำงานร่วมกับ `Extension` โดยตรงในเอกสารและตัวอย่างของมันเอง (ทั้งสองกลไกทำงานคล้ายกันมาก — เก็บค่าไว้ใน
+`Arc` แล้วดึงออกมาผ่าน `Request` extension map) — ในโปรเจกต์จริงที่ต้องแชร์ทั้ง `ApiSchema` และ dependency อื่น
+ที่ไม่เกี่ยวกับ GraphQL เลย (เช่น config หรือ metrics client ที่ REST handler ธรรมดาต้องใช้ด้วย) นิยมผสมทั้งสอง
+กลไกเข้าด้วยกันได้ตามสถานการณ์: ใช้ `State<AppState>` สำหรับ handler REST ปกติตาม Part 64 และ
+`Extension<ApiSchema>` เฉพาะจุดที่เป็น GraphQL handler — ทั้งสองอยู่ในแอป Axum ตัวเดียวกันได้โดยไม่ขัดแย้งกันเลย
+
 ### 79.9 GraphiQL: เครื่องมือ Explore แบบ Interactive
 
 การพัฒนา REST API (Part 61-78) มักใช้ `curl` หรือ Postman ยิงทดสอบทีละ endpoint — สำหรับ GraphQL มีเครื่องมือ
 เฉพาะทางที่ช่วยได้มากกว่านั้นมาก เพราะ schema ของ GraphQL **บอกตัวเองได้ว่ามันมี field อะไรบ้าง** ผ่านกลไกที่
 เรียกว่า **introspection** (schema ตอบคำถามเกี่ยวกับตัวเองได้ผ่าน query พิเศษที่ engine สร้างให้อัตโนมัติ ไม่
-ต้องเขียนเอง) — **GraphiQL** คือหน้าเว็บ interactive ที่ใช้ introspection นี้มาสร้างประสบการณ์คล้าย IDE:
+ต้องเขียนเอง)
+
+#### พิสูจน์ Introspection ด้วย Query จริง
+
+ก่อนพูดถึง GraphiQL มาดูว่า introspection ทำงานยังไงในระดับ raw query ก่อน (นี่คือกลไกเบื้องหลังที่ GraphiQL
+เรียกให้เราโดยอัตโนมัติทุกครั้งที่เปิดหน้าเว็บ — ตัวมันเองก็เป็นแค่ client ตัวหนึ่งที่ยิง query แบบนี้เข้ามา)
+`async-graphql` เปิด field พิเศษชื่อ `__type` (และ `__schema` สำหรับข้อมูลทั้ง schema) ให้ query ได้เสมอ โดยไม่
+ต้องเขียน resolver อะไรเพิ่มเลย — engine generate ให้อัตโนมัติจาก schema ที่มีอยู่:
+
+```bash
+curl -s -X POST http://127.0.0.1:8079/graphql -H 'Content-Type: application/json' \
+  -d '{"query":"{ __type(name: \"Book\") { name fields { name } } }"}'
+```
+
+output จริง — รายชื่อ field ทั้งหมดของ type `Book` ที่ query ตรงกับ resolver ที่เขียนไว้ในหัวข้อ 79.4 เป๊ะ
+(รวมถึง `isAvailable` ที่เป็น computed field และ `author` ที่ต้องยิง query เพิ่ม — introspection ไม่สนใจว่า
+field ไหน "แพง" หรือ "ถูก" ในการ resolve มันบอกแค่ว่า field นั้น**มีอยู่จริง** type อะไร):
+
+```json
+{"data":{"__type":{"name":"Book","fields":[{"name":"id"},{"name":"isbn"},{"name":"title"},{"name":"status"},{"name":"publishedYear"},{"name":"isAvailable"},{"name":"author"}]}}}
+```
+
+นี่คือ query แบบเดียวกันเป๊ะกับที่ GraphiQL ยิงเบื้องหลังตอนสร้าง autocomplete list ในหน้า editor — เพียงแต่
+ของจริง GraphiQL จะขอละเอียดกว่านี้มาก (ขอ type ของแต่ละ field, description, argument ของแต่ละ field ด้วย
+ทั้งหมดในคำขอ `__schema` เดียว) แล้วเอาผลลัพธ์มาสร้าง UI แบบ interactive ให้ — **GraphiQL คือหน้าเว็บที่ห่อ
+introspection query ธรรมดา ๆ แบบนี้ไว้อีกชั้นเท่านั้น ไม่มีเวทมนตร์อะไรซ่อนอยู่มากกว่านี้**
+
+**GraphiQL** คือหน้าเว็บ interactive ที่ใช้ introspection นี้มาสร้างประสบการณ์คล้าย IDE:
 
 - **Schema explorer แบบ sidebar**: เห็นทุก type, ทุก field, ทุก argument พร้อม description (ถ้ามีการเขียนไว้ใน
   โค้ด Rust ผ่าน doc comment — `async-graphql` อ่าน `///` เหนือ resolver แล้วใส่เป็น description ของ field นั้น
@@ -1318,11 +1435,14 @@ HTTP method: `GET /graphql` คืนหน้า GraphiQL (สำหรับ�
 ทั้ง browser ที่คลิกจาก GraphiQL และ client อื่น ๆ เช่น `curl`, mobile app):
 
 ```rust
-# use axum::routing::get;
-# use axum::Router;
-# fn app() -> Router {
-Router::new().route("/graphql", get(/* graphiql handler */ async || "").post(/* graphql handler */ async || ""))
-# }
+use axum::routing::get;
+use axum::Router;
+
+fn app(schema: ApiSchema) -> Router {
+    Router::new()
+        .route("/graphql", get(graphiql).post(graphql_handler))
+        .layer(Extension(schema))
+}
 ```
 
 **ทดสอบจริง**: ยิง `GET /graphql` ด้วย `curl` แล้วดู header ของ response (ไม่ดึงตัว HTML เต็มมาแสดงในบทนี้
@@ -1440,6 +1560,26 @@ resolver ของ `internal_cost_price` ต้องอ่าน role จาก
 schema และการพลาดเช็คสิทธิ์ที่ field เดียวก็รั่วข้อมูลได้ทันที (ต่างจาก REST ที่พลาด middleware ที่ endpoint
 เดียวก็ยังจำกัดความเสียหายอยู่ที่ endpoint นั้นเท่านั้น)
 
+#### ต้นทุนที่มักถูกมองข้าม: Query Complexity และการโจมตีผ่าน Query ที่ลึกเกินไป
+
+มีต้นทุนอีกข้อของ GraphQL ที่ทีมที่เพิ่งเริ่มใช้มักไม่ทันคิดถึงจนกว่าจะเจอในทางปฏิบัติ: เพราะ client เขียน query
+ได้เองอย่างอิสระ (ตามที่หัวข้อ 79.1-79.2 อธิบายไว้ว่าเป็นข้อดี) **ไม่มีอะไรห้าม client (หรือผู้โจมตี) จากการ
+เขียน query ที่ซ้อนกันลึกมาก ๆ** เช่น `book { author { books { author { books { ... } } } } } }` วนกลับไปกลับ
+มาระหว่าง `Book` กับ `Author` ซ้ำ ๆ หลายสิบชั้น — แต่ละชั้นที่ลึกขึ้นอาจทำให้จำนวน resolver ที่ต้องเรียกโตแบบ
+exponential (ยิ่งลึก ยิ่งมี node ให้ resolve มากขึ้นเรื่อย ๆ ตามจำนวนแถวที่ query ในแต่ละชั้นได้กลับมา) แม้จะมี
+DataLoader ช่วยลดจำนวน query ต่อชั้นแล้วก็ตาม จำนวน**ชั้น**ที่ลึกเกินไปก็ยังกิน CPU/memory ของเซิร์ฟเวอร์ได้มาก
+อยู่ดี — สิ่งนี้ไม่มีคู่เทียบตรง ๆ ใน REST เพราะ REST endpoint แต่ละตัวมี "ความลึกของข้อมูลที่คืนได้" ถูกจำกัดไว้
+ตายตัวโดยคนออกแบบ endpoint เองอยู่แล้ว (ไม่มีทางให้ client ขอ "ลึกกว่านั้น" ได้เลยไม่ว่าจะพยายามแค่ไหน)
+
+แนวทางป้องกันที่ทีม production ใช้กันจริงมีสองสามแบบ (บทนี้แค่แนะนำให้รู้จัก ไม่ลงรายละเอียด implementation
+เต็มรูปแบบ): จำกัด **ความลึกสูงสุดของ query** (query depth limiting — ปฏิเสธ query ที่ซ้อนเกิน N ชั้น),
+จำกัด **query complexity แบบให้คะแนน** (แต่ละ field มีคะแนน "ราคา" ของตัวเอง รวมคะแนนทั้ง query แล้วปฏิเสธถ้า
+เกินเพดาน — ซับซ้อนกว่า depth limiting เฉย ๆ เพราะคำนึงถึง argument เช่น `limit` ด้วย), และ **persisted
+queries** (client ส่งแค่ hash ของ query ที่เคยลงทะเบียนไว้ล่วงหน้ากับ server แทนตัว query string เต็ม — ได้
+ประโยชน์พ่วงคือแก้ปัญหา HTTP-level caching ในตารางข้างบนไปในตัวด้วย เพราะ hash คงที่ใช้เป็น cache key ได้เหมือน
+URL ของ REST) — `async-graphql` มี extension สำหรับ depth/complexity limiting ให้ใช้ได้ตรง ๆ ผ่าน
+`Schema::build(...).limit_depth(n).limit_complexity(n)` โดยไม่ต้องเขียนกลไกตรวจสอบเอง
+
 #### จุดยืนของหลักสูตรนี้: REST/Axum ยังคงเป็นตัวเลือกหลัก
 
 ตามแนวทางเดียวกับที่ Part 69 (เทียบ web framework), Part 72-73 (เทียบ ORM/database library) วางไว้ — บทนี้
@@ -1508,10 +1648,34 @@ content-length: 154
 response นี้**เป็น error เต็มรูปแบบ** (field ชื่อผิด) แต่ status line คือ `HTTP/1.1 200 OK` ตรง ๆ — เหตุผลคือ
 GraphQL มองว่า "การประมวลผล GraphQL request สำเร็จแล้ว" (HTTP layer ทำงานถูกต้องสมบูรณ์) แม้ผลลัพธ์ทาง
 **ธุรกิจ**ของมันจะเป็น error ก็ตาม — สอง concept นี้ (HTTP transport สำเร็จ vs GraphQL operation สำเร็จ) แยก
-จากกันโดยสิ้นเชิงใน GraphQL **วิธีแก้ที่ถูกต้อง**: โค้ดฝั่ง client (หรือ integration test) **ต้องเช็ค field
-`errors` ใน body เสมอ** ไม่ใช่เช็คแค่ HTTP status code แบบที่ทำกับ REST — ถ้าใครในทีมยังเขียนโค้ดเช็ค
-`if response.status() == 200 { /* สำเร็จ */ }` กับ GraphQL client จะมี bug ที่มองไม่เห็นทันที เพราะ error จริง
-ก็ผ่านเงื่อนไขนี้ไปด้วย
+จากกันโดยสิ้นเชิงใน GraphQL
+
+**ข้อยกเว้นที่ยังได้ status code อื่นจริง**: ถ้า body ที่ส่งมา**ไม่ใช่ JSON ที่ถูก syntax เลย** (พังตั้งแต่ระดับ
+transport ก่อนที่ GraphQL engine จะได้เริ่มทำงานด้วยซ้ำ) จะได้ `400 Bad Request` จริง — ทดสอบด้วยการส่ง body
+ที่ไม่ใช่ JSON ที่ถูกต้อง:
+
+```bash
+curl -s -i -X POST http://127.0.0.1:8079/graphql -H 'Content-Type: application/json' -d '{not valid json'
+```
+
+```text
+HTTP/1.1 400 Bad Request
+content-length: 65
+
+InvalidRequest(Error("key must be a string", line: 1, column: 2))
+```
+
+เปรียบเทียบสองกรณีนี้ให้เห็นชัด: **`{ book(id: 3) { is_available } }` เป็น GraphQL query ที่ syntax ถูกต้อง
+สมบูรณ์ (parse เป็น JSON ได้ และเป็น GraphQL query ที่ valid) แต่ field ที่ขอไม่มีอยู่จริงใน schema — นี่คือ
+"business-level error" จึงได้ `200 OK` พร้อม `errors`** ในขณะที่ `{not valid json` **parse เป็น JSON ไม่ได้เลย
+ตั้งแต่ต้น — นี่คือ "transport-level error" จึงได้ `400 Bad Request` จริง** ความแตกต่างนี้คือกฎที่ต้องจำ:
+**`400`/`5xx` สงวนไว้สำหรับตอนที่ HTTP layer หรือการ parse ตัว request เองมีปัญหา ส่วน error ทุกชนิดที่เกิดจาก
+เนื้อหาของ GraphQL query/mutation เอง (field ไม่มีจริง, argument ผิด type, resolver คืน error ทางธุรกิจ) จะ
+ยังคงเป็น `200 OK` เสมอ**
+
+**วิธีแก้ที่ถูกต้อง**: โค้ดฝั่ง client (หรือ integration test) **ต้องเช็ค field `errors` ใน body เสมอ** ไม่ใช่
+เช็คแค่ HTTP status code แบบที่ทำกับ REST — ถ้าใครในทีมยังเขียนโค้ดเช็ค `if response.status() == 200 { /*
+สำเร็จ */ }` กับ GraphQL client จะมี bug ที่มองไม่เห็นทันที เพราะ error ทางธุรกิจส่วนใหญ่ก็ผ่านเงื่อนไขนี้ไปด้วย
 
 ### 4. `ctx.data::<T>()` หา Type ไม่เจอ เพราะลืมลงทะเบียนด้วย `.data(...)`
 
@@ -1552,11 +1716,25 @@ curl -s -X POST http://127.0.0.1:8079/graphql -H 'Content-Type: application/json
 ที่ "เห็นชัด ๆ ว่ามีอยู่ในโค้ด Rust" กลับหาไม่เจอ — จำหลักไว้ว่า: **เขียน resolver ด้วย snake_case ตาม Rust
 convention ตามปกติ แต่เขียน query ด้วย camelCase ตาม GraphQL convention เสมอ**
 
+### 6. ผูก `DataLoader` เข้ากับ `Schema` แทน `Request` แล้วได้ข้อมูล Author เก่าค้าง
+
+ต่อเนื่องจากหัวข้อ 79.6: ถ้าสร้าง `DataLoader` ครั้งเดียวตอน `Schema::build(...).data(loader).finish()` (แทนที่
+จะสร้างใหม่ทุก request ผ่าน `req.data(loader)`) — โค้ด**คอมไพล์ผ่านและทำงานถูกต้องในการทดสอบครั้งแรก** เพราะ
+cache ยังว่างอยู่ ปัญหาจะปรากฏก็ตอนมี mutation อื่นเปลี่ยนข้อมูลของ entity ที่ loader นั้นดูแล แล้ว query
+เดิมที่เคยถูก resolve ไปแล้ว (มี key อยู่ใน cache แล้ว) ถูกเรียกซ้ำอีกครั้งภายในอายุของเซิร์ฟเวอร์เดียวกัน —
+`DataLoader` จะ**ตอบค่าจาก cache เดิมทันที ไม่ยิง query ใหม่ไปเช็คฐานข้อมูลเลย** ทำให้ client เห็นข้อมูลที่ไม่
+sync กับฐานข้อมูลจริง ๆ โดยไม่มี error หรือ warning อะไรเตือนเลย (เพราะในสายตาของ `DataLoader` มันทำงานถูกต้อง
+ตามที่ออกแบบมา 100% — "cache" คือ feature ไม่ใช่ bug ปัญหาอยู่ที่ **อายุของ cache ที่ยาวเกินไป** ต่างหาก)
+**วิธีแก้**: สร้าง `DataLoader` ใหม่ทุกครั้งใน `graphql_handler` แล้วผูกผ่าน `Request::data()` ตามที่หัวข้อ 79.6
+สาธิตไว้ — cache จะมีอายุสั้นเท่ากับ 1 HTTP request เท่านั้น ไม่มีวันเก่าค้างข้าม request ได้เลย
+
 ## แบบฝึกหัด (Exercises)
 
 1. **(ง่าย)** เพิ่ม query ใหม่ชื่อ `authorCount` ใน `Query` root ที่คืนจำนวน author ทั้งหมดในตาราง `authors`
    เป็น `i64` (ใช้ `SELECT COUNT(*) FROM authors` ผ่าน `sqlx::query_scalar`) — ทดสอบด้วย `curl` ยิง
-   `{ authorCount }` แล้วเทียบผลลัพธ์กับ `SELECT COUNT(*) FROM authors;` ที่รันตรงผ่าน `psql`
+   `{ authorCount }` แล้วเทียบผลลัพธ์กับ `SELECT COUNT(*) FROM authors;` ที่รันตรงผ่าน `psql` จากนั้นลองเพิ่ม
+   `Schema::build(...).limit_depth(5)` เข้าไปในการ build schema (ตามที่หัวข้อ 79.11 แนะนำไว้) แล้วยิง query ที่
+   ซ้อนลึกเกิน 5 ชั้นดู ควรได้ error กลับมาแทนที่จะ resolve จนจบ
    *Hint*: `query_scalar` คืน `Result<i64, sqlx::Error>` ตรง ๆ ไม่ต้องมี struct ห่อ เหมือนที่ใช้ใน
    `create_booking` ตอนอ่าน `available_copies`
 

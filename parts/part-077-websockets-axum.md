@@ -318,7 +318,9 @@ handshake response status: 101 Switching Protocols
 
 ### 77.4 Message Enum: `Text`, `Binary`, `Ping`, `Pong`, `Close`
 
-`axum::extract::ws::Message` เป็น enum ที่มี 5 variant ครอบคลุมทุกประเภทของ WebSocket frame ตาม RFC 6455:
+`axum::extract::ws::Message` เป็น enum ที่มี 5 variant ครอบคลุมทุกประเภทของ WebSocket frame ตาม RFC 6455
+(นี่คือนิยามจริงจาก source ของ Axum ที่ยกมาเพื่ออธิบายโครงสร้าง ไม่ต้อง copy ไปวางเองเพราะ `axum::extract::ws`
+export type นี้ให้ใช้ตรง ๆ อยู่แล้ว):
 
 ```rust
 pub enum Message {
@@ -924,9 +926,15 @@ trait — สร้าง struct guard ตัวหนึ่งที่ตอ�
 
 ```rust
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::AtomicU64, Arc, Mutex};
 
 type ClientId = u64;
+
+#[derive(Clone)]
+struct AppState {
+    next_id: Arc<AtomicU64>,
+    connected: Arc<Mutex<HashSet<ClientId>>>,
+}
 
 // RAII guard: ตราบใดที่ struct นี้ยังไม่ถูก drop แปลว่า client ตัวนี้ยัง "นับว่าเชื่อมต่ออยู่"
 // Drop::drop ของมันถูกเรียกเสมอไม่ว่า task ของ connection นี้จะจบด้วย return ปกติ, break, หรือ panic
@@ -1020,6 +1028,8 @@ task ของตัวเองแยกจาก connection อื่นสม
 เขียน server ที่ **ตั้งใจ panic** เมื่อได้รับข้อความ `"boom"` (จำลองบั๊กจริงในระบบ production):
 
 ```rust
+use axum::extract::ws::{Message, WebSocket};
+
 async fn handle_socket(mut socket: WebSocket) {
     while let Some(Ok(msg)) = socket.recv().await {
         if let Message::Text(text) = msg {
@@ -1342,6 +1352,59 @@ broadcast ไปยัง WebSocket client โดยที่ REST endpoint น�
 update ตรงกันทั้งคู่ พร้อมกัน แบบ real-time จริง (77.6) **(4)** ระบบยังรองรับการ broadcast ซ้ำได้หลายรอบ
 ต่อเนื่อง (การซื้อครั้งที่สอง) **(5)** connect/disconnect ของแต่ละ client ถูก track อย่างถูกต้องด้วย RAII
 guard (77.7/77.9) ตลอดวงจรชีวิตของการทดสอบทั้งหมด
+
+### 77.12 WebSocket เทียบกับ Server-Sent Events (SSE) และข้อจำกัดเรื่อง Scaling หลาย Instance
+
+ก่อนปิดบท มาวางภาพรวมให้ชัดว่า WebSocket ไม่ใช่เครื่องมือเดียวที่มีสำหรับข้อมูลแบบ real-time และมีข้อจำกัด
+อะไรที่ต้องรู้ก่อนเอาไปใช้งานจริงในระบบที่ scale ใหญ่กว่า server เครื่องเดียว
+
+#### WebSocket vs Server-Sent Events (SSE)
+
+**Server-Sent Events** เป็นอีกทางเลือกหนึ่งที่ standard ของ browser รองรับ (ผ่าน `EventSource` API) — มันคือ
+HTTP response ธรรมดาที่ **ไม่ปิด connection** แล้วส่ง event ใหม่ ๆ ออกมาเรื่อย ๆ ในรูปแบบ text stream พิเศษ
+(`text/event-stream`) ต่างจาก WebSocket ตรงจุดสำคัญที่สุด: **SSE เป็นทางเดียว (server → client เท่านั้น)**
+ไม่มีทางที่ client จะส่งข้อมูลกลับไปในสาย connection เดียวกันได้เลย (ถ้า client ต้องส่งอะไรกลับ ต้องเปิด HTTP
+request แยกต่างหาก เช่น REST endpoint ธรรมดา — เหมือนกับที่ capstone ของบทนี้ทำ `POST /events/1/purchase`
+แยกจาก WebSocket endpoint)
+
+| | WebSocket | Server-Sent Events (SSE) |
+|---|---|---|
+| ทิศทางข้อมูล | full-duplex (ทั้งสองทาง) | ทางเดียว (server → client) |
+| Protocol | อัปเกรดจาก HTTP เป็น WS frame (RFC 6455) | HTTP response ธรรมดาที่ไม่ปิด (`text/event-stream`) |
+| Browser API | `WebSocket` (ตั้ง custom header ไม่ได้ — 77.8) | `EventSource` (ตั้ง custom header ไม่ได้เหมือนกัน) |
+| Auto-reconnect | ต้องเขียนเอง | มีในตัว browser ให้อัตโนมัติ |
+| ผ่าน HTTP/2 ธรรมดา | ต้องอัปเกรดเป็นโพรโทคอลใหม่ (หรือใช้ CONNECT method ใน HTTP/2) | เป็น HTTP response ปกติ ผ่านง่ายกว่า |
+| เหมาะกับ | แชท, เกม, collaborative editing (ต้องส่งกลับบ่อย) | feed ข่าว, dashboard, notification (ส่งทางเดียวพอ) |
+
+**กฎการเลือกที่ใช้ได้จริง**: ถ้า client **ไม่จำเป็นต้องส่งข้อมูลกลับผ่าน connection เดียวกันเลย** (แค่รับ
+update อย่างเดียว แบบ capstone ของบทนี้ที่ REST endpoint แยกต่างหากทำหน้าที่ "เขียน") **SSE มักง่ายกว่าและ
+ทนทานกว่า** (auto-reconnect ในตัว, ผ่าน HTTP infrastructure เดิมได้ง่ายกว่าเพราะเป็น HTTP response ปกติ) —
+เลือก WebSocket จริง ๆ เมื่อ **จำเป็นต้องมีการสนทนาสองทางในสาย connection เดียวกัน** เช่นห้องแชทในหัวข้อ 77.6
+ที่ client ต้องส่งข้อความและรับข้อความในสายเดียวกันตลอดเวลา — capstone ของบทนี้ (77.11) ที่จริงแล้วก็ทำงานได้
+ดีพอ ๆ กันถ้าเปลี่ยนฝั่ง push เป็น SSE แทน (เพราะ client แค่รับอัปเดต ไม่ต้องส่งอะไรกลับผ่านสายนั้นเลย) — เลือก
+ใช้ WebSocket ในบทนี้เพื่อให้เห็นภาพเต็มรูปแบบของทั้ง full-duplex pattern (77.6-77.7) ที่ SSE ทำไม่ได้
+
+#### ข้อจำกัดสำคัญเมื่อ Scale เป็นหลาย Server Instance
+
+ทุกตัวอย่างในบทนี้เก็บ `broadcast::Sender` และ `HashMap<ClientId, ...>` ไว้ใน **memory ของ process เดียว**
+(`Arc<Mutex<...>>` ธรรมดา) — นี่ใช้ได้ดีสมบูรณ์ตราบใดที่แอปรันบน **server instance เดียว** แต่ทันทีที่ต้อง
+scale ออกไปหลาย instance (เช่นรันหลาย container พร้อมกันหลัง load balancer เพื่อรับ traffic มากขึ้น หรือเพื่อ
+ความทนทานถ้า instance หนึ่งล้ม) จะเกิดปัญหาทันที: **client A ที่เชื่อมต่อกับ instance 1 และ client B ที่เชื่อม
+ต่อกับ instance 2 จะไม่เห็น broadcast ของกันและกันเลย** เพราะ `broadcast::Sender` ของแต่ละ instance เป็นคนละ
+ตัวกันโดยสิ้นเชิง อยู่ใน memory คนละ process — REST endpoint `POST /events/1/purchase` ที่ไปโดนที่ instance 1
+จะ broadcast ได้แค่กับ WebSocket client ที่เชื่อมต่อกับ instance 1 เท่านั้น ส่วน client ที่ต่ออยู่กับ instance
+2 จะไม่รู้เรื่องอะไรเลยว่ามีการซื้อตั๋วเกิดขึ้น
+
+ทางแก้มาตรฐานของอุตสาหกรรมคือใช้ **message broker กลางที่ทุก instance เชื่อมต่อร่วมกัน** (เช่น Redis
+pub/sub, NATS, หรือ message queue อื่น ๆ) แทนที่จะพึ่ง `tokio::sync::broadcast` ในหน่วยความจำเพียงอย่างเดียว
+— แต่ละ instance ยังใช้ `tokio::sync::broadcast` เหมือนเดิมสำหรับกระจายข้อความ**ภายใน**ตัวเอง (ไปยัง
+WebSocket connection ที่ instance นั้นดูแลอยู่) แต่เพิ่มชั้นหนึ่ง: เมื่อ REST endpoint ต้องการ broadcast
+มันจะส่งข้อความไปที่ message broker กลางก่อน แล้ว**ทุก instance**ที่ subscribe อยู่กับ broker นั้นจะได้รับ
+ข้อความแล้วส่งต่อเข้า `broadcast::Sender` ของตัวเองอีกที (fan-out สองชั้น: broker → ทุก instance → ทุก
+WebSocket connection ของ instance นั้น) — สถาปัตยกรรมนี้เป็นเนื้อหาของหลักสูตรส่วน **Scaling และ
+Distributed Systems** ในภาคหลัง ๆ ของหลักสูตร ไม่ใช่ของบทนี้ แต่จำเป็นต้องรู้ไว้ก่อนว่าโค้ดในบทนี้เหมาะกับ
+**single-instance deployment** เท่านั้น เพื่อไม่ให้เข้าใจผิดว่า pattern นี้ scale ได้เองอัตโนมัติโดยไม่ต้องทำ
+อะไรเพิ่มเลย
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

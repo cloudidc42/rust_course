@@ -105,7 +105,7 @@
 | 73 | SeaORM เบื้องต้น | ✅ |
 | 74 | Authentication: JWT | ✅ |
 | 75 | Authentication: Session-based และ OAuth2 | ✅ |
-| 76 | Authorization และ RBAC | ⏳ |
+| 76 | Authorization และ RBAC | ✅ |
 | 77 | WebSockets ด้วย Axum | ✅ |
 | 78 | RESTful API Design Best Practices | ✅ |
 | 79 | GraphQL ด้วย async-graphql | ✅ |

@@ -268,6 +268,58 @@ message AvailabilityUpdate {
 - **`service BookService { ... }`**: นิยาม RPC ทั้งหมดที่ service นี้มี — สังเกต keyword `stream` หน้า type parameter ว่าคือจุดที่กำหนดว่า RPC ตัวนั้นเป็นแบบ streaming ฝั่งไหน (ไม่มี `stream` เลย = unary, มีแค่ request = client streaming, มีแค่ response = server streaming, มีทั้งคู่ = bidirectional)
 - **field number (`= 1`, `= 2`, ...)**: **นี่คือส่วนที่สำคัญที่สุดและพลาดบ่อยที่สุดสำหรับคนมาจาก JSON** — เลขเหล่านี้ไม่ใช่แค่ลำดับสวย ๆ แต่คือ **wire tag** ที่ใช้จริงตอนเข้ารหัสข้อมูล (ตามที่อธิบายไว้ในหัวข้อ 80.1) เปลี่ยนเลขนี้ทีหลัง = breaking change ทันที (client เก่าจะอ่านค่าผิด field) ในขณะที่เปลี่ยนชื่อ field (`title` → `book_title`) ไม่กระทบ wire format เลยเพราะชื่อไม่ได้ถูกส่งไปด้วย — นี่คือความต่างที่สำคัญมากจาก JSON ที่ **ชื่อ key คือสิ่งที่มีผลจริง ไม่ใช่ลำดับ**
 
+#### พิสูจน์ Schema Evolution จริง: เพิ่ม Field ใหม่โดยไม่พัง Client เก่า
+
+ตารางเปรียบเทียบในหัวข้อ 80.1 อ้างว่า Protobuf ออกแบบมาให้ backward/forward compatible โดยธรรมชาติ — มาพิสูจน์ข้ออ้างนี้ด้วยโค้ดจริง จำลองสถานการณ์ **rolling deployment** ที่พบได้ทั่วไปในระบบ microservices (ซึ่ง Part 81 จะพูดถึงเพิ่ม): ระหว่าง deploy service เวอร์ชันใหม่ มักมี "เวอร์ชันเก่า" และ "เวอร์ชันใหม่" รันคู่กันชั่วคราว (rolling update ทีละ instance) — สร้าง message สองรุ่นเทียบกัน คือ `BookV1` (มีแค่ `id`, `title`) และ `BookV2` (มี `id`, `title`, และ `isbn` field ใหม่ที่ tag `= 3`):
+
+```rust
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct BookV1 {
+    #[prost(int64, tag = "1")]
+    id: i64,
+    #[prost(string, tag = "2")]
+    title: String,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct BookV2 {
+    #[prost(int64, tag = "1")]
+    id: i64,
+    #[prost(string, tag = "2")]
+    title: String,
+    #[prost(string, tag = "3")]
+    isbn: String, // field ใหม่ที่ v1 ไม่รู้จัก
+}
+```
+
+ทดสอบสองทิศทาง: (1) client เก่า (v1) ส่งไปยัง server ใหม่ (v2) — server ใหม่ควรอ่านได้ปกติ ได้ `isbn` เป็นค่า default และ (2) client ใหม่ (v2) ส่งไปยัง server เก่า (v1) ที่ยังไม่รู้จัก field `isbn` — server เก่าควรอ่านได้ปกติ แค่ "มองไม่เห็น" field ที่ไม่รู้จัก:
+
+```rust
+// v1 -> v2 (backward compatibility)
+let old_client_msg = BookV1 { id: 1, title: "Rust".to_string() };
+let mut buf = Vec::new();
+old_client_msg.encode(&mut buf).unwrap();
+let decoded_by_new_server = BookV2::decode(&buf[..]).unwrap();
+
+// v2 -> v1 (forward compatibility)
+let new_client_msg = BookV2 { id: 2, title: "Programming Rust".to_string(), isbn: "978-1492052593".to_string() };
+let mut buf2 = Vec::new();
+new_client_msg.encode(&mut buf2).unwrap();
+let decoded_by_old_server = BookV1::decode(&buf2[..]).unwrap();
+```
+
+**ผลลัพธ์จริงจากการรัน (ไม่มี error เกิดขึ้นเลยแม้แต่ทิศทางเดียว):**
+
+```text
+[backward compat] v1 bytes decoded เป็น v2: BookV2 { id: 1, title: "Rust", isbn: "" }
+[forward compat]  v2 bytes decoded เป็น v1: BookV1 { id: 2, title: "Programming Rust" }
+  (isbn ที่ v2 ส่งมาถูกข้ามไปเงียบ ๆ เพราะ v1 struct ไม่มี field นี้เลย)
+
+สรุป: ทั้งสองทิศทางไม่ error แม้ schema ไม่ตรงกันเป๊ะ — ตราบใดที่ tag number เดิมไม่ถูกเปลี่ยน/ใช้ซ้ำ
+```
+
+นี่คือคุณสมบัติที่ทำให้ Protobuf เหมาะกับระบบ microservices ที่ deploy service หลายตัวแยกจากกัน (Part 81): **เพิ่ม field ใหม่ได้อย่างปลอดภัยโดยไม่ต้อง deploy ทุก service ที่เกี่ยวข้องพร้อมกันในเวลาเดียวกันเป๊ะ** — ตราบใดที่ทำตามกฎง่าย ๆ สองข้อ: (1) ห้ามเปลี่ยนความหมายหรือ type ของ tag number ที่มีอยู่แล้ว และ (2) ห้ามนำ tag number ที่เคยถูกลบไปแล้วกลับมาใช้ใหม่กับความหมายที่ต่างออกไป (ถ้าต้อง "เลิกใช้" field ควรใช้ keyword `reserved` ใน `.proto` เพื่อบอก `protoc` ว่าห้ามใครเผลอใช้ tag number นั้นซ้ำในอนาคต)
+
 ### 80.3 ติดตั้งและ Setup: `tonic`, `prost`, และ Build-Time Code Generation
 
 #### เวอร์ชันที่ใช้จริงในบทนี้ (ตรวจสอบแล้วจาก crates.io ณ ปัจจุบัน)
@@ -390,6 +442,37 @@ pub struct Book {
 ```
 
 สังเกตว่าโค้ดนี้ยังใช้ `#[derive(::prost::Message)]` อยู่ — นี่**คือ**derive macro ตัวจริงตามความหมายของ Part 44 (มาจาก crate `prost-derive`) เพียงแต่**ตัวไฟล์ที่มี `#[derive(...)]` นี้เขียนอยู่**ถูกสร้างขึ้นโดย build script ก่อนหน้านี้แล้ว — พูดให้ชัดคือ: build script (`tonic-prost-build`) ทำหน้าที่ "เขียน struct + แนบ `#[derive(...)]` ให้อัตโนมัติ" แล้ว derive macro (`prost-derive`) ค่อยทำงานตอน compile struct นั้นตามปกติอีกต่อหนึ่ง — สองกลไกซ้อนกันอยู่ในระบบเดียวกัน คนละหน้าที่กัน
+
+ต่อด้วยฝั่ง client — คัดมาเฉพาะ 3 เมธอดที่แสดงรูปแบบการเรียกทั้ง 4 แบบ (unary, server streaming, client streaming, bidirectional) ให้เห็นครบในที่เดียว (จาก `book_service_client` module):
+
+```rust
+pub async fn list_books(
+    &mut self,
+    request: impl tonic::IntoRequest<super::ListBooksRequest>,
+) -> std::result::Result<tonic::Response<tonic::codec::Streaming<super::Book>>, tonic::Status> {
+    // ... (self.inner.server_streaming(...) ด้านใน)
+}
+
+pub async fn upload_books(
+    &mut self,
+    request: impl tonic::IntoStreamingRequest<Message = super::CreateBookRequest>,
+) -> std::result::Result<tonic::Response<super::UploadSummary>, tonic::Status> {
+    // ... (self.inner.client_streaming(...) ด้านใน)
+}
+
+pub async fn watch_availability(
+    &mut self,
+    request: impl tonic::IntoStreamingRequest<Message = super::AvailabilityUpdate>,
+) -> std::result::Result<
+    tonic::Response<tonic::codec::Streaming<super::AvailabilityUpdate>>,
+    tonic::Status,
+> {
+    // ... (self.inner.streaming(...) ด้านใน — ใช้เมธอดคนละชื่อกับ server_streaming/client_streaming
+    //     เพราะเป็น bidirectional โดยเฉพาะ)
+}
+```
+
+สังเกตว่า**ชนิดของ parameter/return แต่ละเมธอดสะท้อนรูปแบบการเรียกตรง ๆ** ตามที่หัวข้อ 80.6 จะอธิบายละเอียด: `get_book`/`create_book` (unary จากโค้ดก่อนหน้า) รับ `impl IntoRequest<T>` คืน `Response<T>` เดี่ยว ๆ, `list_books` (server streaming) รับ request เดี่ยวแต่คืน `Response<Streaming<T>>`, `upload_books` (client streaming) รับ `impl IntoStreamingRequest<...>` แต่คืน response เดี่ยว, และ `watch_availability` (bidirectional) รับ stream คืน stream ทั้งสองด้าน — Tonic เลือกเรียก internal method คนละชื่อ (`unary`, `server_streaming`, `client_streaming`, `streaming`) ตามรูปแบบที่ตรงกัน ทั้งหมดนี้ compiler ตรวจสอบให้ตอน compile time เต็มรูปแบบ ผิดรูปแบบการเรียก (เช่น พยายามส่ง stream ให้ RPC ที่เป็น unary) จะเจอ compile error ทันที ไม่ใช่ runtime error
 
 ต่อด้วย trait ฝั่ง server ที่คุณต้อง implement (จะใช้จริงในหัวข้อ 80.4):
 
@@ -613,6 +696,42 @@ BookService gRPC server listening on 127.0.0.1:50051
 ```
 
 server จะค้างรออยู่ตรงนี้ (เพราะ `.serve(addr).await` เป็น future ที่ไม่จบจนกว่าจะถูก interrupt) พร้อมรับ connection — หัวข้อถัดไปจะเขียน client มาคุยกับมันจริง
+
+#### เชื่อมกับ Part 39-40: ทำไม Trait ต้องมี Bound `Send + Sync + 'static`
+
+สังเกตกลับไปที่ trait `BookService` ที่ generate มา (หัวข้อ 80.3): `pub trait BookService: std::marker::Send + std::marker::Sync + 'static` — bound นี้ไม่ได้ใส่มาเล่น ๆ แต่จำเป็นโดยตรงเพราะ Tonic server รับ**หลาย connection พร้อมกัน**และแต่ละ connection อาจยิงหลาย RPC พร้อมกันด้วย (ตามที่หัวข้อ 80.1 พิสูจน์เรื่อง multiplexing ไปแล้ว) — ทุก request handler ที่ทำงานพร้อมกันเหล่านี้ต้องแชร์ `&self` (คือ `MyBookService` ตัวเดียวกัน) ข้าม thread ของ Tokio runtime ได้อย่างปลอดภัย ตรงตามที่ **Part 39-40** สอนไว้ว่า type ที่แชร์ข้าม thread ต้องเป็น `Sync` (เข้าถึงพร้อมกันจากหลาย thread ได้อย่างปลอดภัย) และค่าที่ถูกส่งเข้า thread อื่นต้องเป็น `Send`
+
+`MyBookService { store: Arc<BookStore> }` ผ่านเงื่อนไขนี้ได้เพราะ `Arc<T>` เป็น `Send + Sync` เมื่อ `T: Send + Sync` (`BookStore` มีแค่ `Mutex<HashMap<...>>` ซึ่งเป็น `Send + Sync` ทั้งคู่ตามกฎที่ Part 39-40 อธิบายไว้ว่า `Mutex<T>` ทำให้ `T` ที่ไม่ใช่ `Sync` กลายเป็น `Sync` ได้ผ่านการล็อก) — พิสูจน์ให้เห็นภาพจริงด้วยการยิง `GetBook` **พร้อมกัน 20 ครั้ง** จาก 20 `tokio::spawn` task บน connection เดียวกัน:
+
+```rust
+let mut handles = Vec::new();
+for i in 0..20 {
+    let channel = channel.clone();
+    handles.push(tokio::spawn(async move {
+        let mut client = BookServiceClient::new(channel);
+        let req = with_auth(GetBookRequest { id: (i % 3) + 1 });
+        let resp = client.get_book(req).await.unwrap().into_inner();
+        (i, resp.id, resp.title)
+    }));
+}
+for h in handles {
+    results.push(h.await.unwrap());
+}
+```
+
+**ผลลัพธ์จริงจากการรัน** (ตัดมาบางส่วน — ครบทั้ง 20 อันไม่มี error/panic เลยแม้แต่ตัวเดียว):
+
+```text
+ยิง GetBook พร้อมกัน 20 request สำเร็จทั้งหมด:
+  task#00 -> book id=1 title=The Rust Programming Language
+  task#01 -> book id=2 title=Programming Rust
+  task#02 -> book id=3 title=Zero To Production In Rust
+  ...
+  task#19 -> book id=2 title=Programming Rust
+รวม 20 response ครบทุกอัน ไม่มี error/panic แม้แต่ตัวเดียว
+```
+
+ทั้ง 20 task เข้าถึง `self.store.get(id)` (ซึ่งข้างในคือ `self.books.lock().unwrap()`) พร้อมกันได้อย่างปลอดภัยเพราะ `std::sync::Mutex` การันตี **mutual exclusion** ตามที่ Part 39-40 สอนไว้ — ต่อให้สอง request มาถึงจังหวะเดียวกันเป๊ะ ตัวหนึ่งจะรอ (block เฉพาะ thread นั้น ไม่ใช่ทั้ง runtime เพราะ critical section เร็วมากและไม่มี `.await` อยู่ข้างใน) จนกว่าตัวแรกปลดล็อก ไม่มีทางที่ `HashMap` จะถูกอ่าน/เขียนพร้อมกันแบบ data race ได้เลยแม้แต่ทางทฤษฎี — คุณสมบัตินี้ borrow checker และ trait bound (`Send`/`Sync`) การันตีให้**ตั้งแต่ตอน compile** ไม่ต้องรอไป crash ตอน production เหมือนภาษาที่ไม่มีการตรวจสอบนี้
 
 ### 80.5 Implementing Client: Round Trip จริงพร้อม Output จริง
 
@@ -1177,6 +1296,20 @@ server (ที่สร้างด้วย Tonic ซึ่งพูด HTTP/2 
 
 สรุปให้ชัดเจนที่สุด: **REST ด้วย Axum ยังคงเป็นแนวทางหลักของหลักสูตรนี้สำหรับ API ที่ client ภายนอก (เว็บ/มือถือ) เรียกใช้** — GraphQL (Part 79) เป็นตัวเลือกเสริมเมื่อความยืดหยุ่นของ client สำคัญกว่าความเรียบง่าย ส่วน **gRPC (บทนี้) คือเครื่องมือสำหรับการสื่อสารระหว่าง service ภายในระบบเดียวกัน** — สถานการณ์ที่จะกลายเป็นหัวใจของ **Part 81 (Microservices Architecture)**: เมื่อระบบถูกแตกเป็นหลาย service (เช่น `order-service`, `inventory-service`, `notification-service`) การสื่อสารระหว่างพวกมันเองคือจุดที่ gRPC (schema strict, ประสิทธิภาพสูง, ทั้งสองฝั่งควบคุมได้) เข้ามาแทนที่ REST ได้อย่างเป็นธรรมชาติ ในขณะที่ REST ยังคงทำหน้าที่เป็น "หน้าบ้าน" (API gateway) ที่ client ภายนอกเรียกเข้ามาเหมือนเดิม
 
+### 80.11 ข้อพิจารณาสำหรับ Production (เกริ่นไว้ก่อน Part 81)
+
+หัวข้อนี้เกริ่นสั้น ๆ ถึงสิ่งที่โปรเจกต์จริงต้องตั้งค่าเพิ่มเติมนอกเหนือจากที่บทนี้สาธิต — บางส่วนตรวจสอบได้จาก source code ของ `tonic` จริง (API มีอยู่จริงตามที่อ้าง) แต่**ไม่ได้ setup TLS/certificate จริงเพื่อรันทดสอบในบทนี้** (ต้องมีการสร้าง certificate ซึ่งอยู่นอกขอบเขตของบทที่โฟกัสกลไกของ gRPC เอง) — ระบุไว้ตรง ๆ เพื่อไม่ให้สับสนกับส่วนอื่นของบทที่รันจริงและ capture output จริงทั้งหมด
+
+**TLS และ mutual TLS (mTLS)**: `tonic::transport::Server` มีเมธอด `.tls_config(ServerTlsConfig)` และ `Channel` (ฝั่ง client) มี `.tls_config(ClientTlsConfig)` — ตั้งค่า certificate ของ server ผ่าน `ServerTlsConfig::new().identity(Identity::from_pem(cert, key))` เพื่อเปิด TLS ธรรมดา (client ตรวจสอบ identity ของ server แต่ server ไม่ตรวจ client) หรือเพิ่ม `.client_ca_root(Certificate::from_pem(ca_cert))` เพื่อเปิด **mutual TLS** ที่ server ตรวจสอบ certificate ของ client ด้วย — mTLS เป็นแนวทางที่นิยมมากในระบบ microservices ภายใน (Part 81) สำหรับพิสูจน์ตัวตนระหว่าง service โดยไม่ต้องพึ่ง JWT ผ่าน metadata แบบที่หัวข้อ 80.8 สาธิตไว้เลย (เป็นอีกวิธีหนึ่งที่ทำหน้าที่คล้ายกัน แต่ยืนยันตัวตนที่ระดับ TLS handshake ก่อนจะมีข้อมูล gRPC ไหนวิ่งเลยด้วยซ้ำ) หลายระบบเลือกใช้ทั้งสองแบบพร้อมกัน (mTLS ยืนยันว่า "service ไหน" กำลังเรียก ส่วน JWT/metadata ยืนยันว่า "ผู้ใช้คนไหน" อยู่เบื้องหลัง request นั้น)
+
+**Keepalive**: ทั้งฝั่ง server (`.tcp_keepalive(Some(duration))`, `.http2_keepalive_interval(...)`, `.http2_keepalive_timeout(...)`) และฝั่ง client (`Channel::tcp_keepalive(...)`, `.keep_alive_timeout(...)`, `.keep_alive_while_idle(true)`) มีการตั้งค่าเพื่อส่ง HTTP/2 ping frame เป็นระยะ ป้องกัน connection ที่ดูเหมือนยังเปิดอยู่แต่จริง ๆ ตายไปแล้ว (เช่น load balancer/firewall ตัดการเชื่อมต่อเงียบ ๆ โดยไม่ส่ง TCP FIN ที่ถูกต้อง) — สำคัญมากสำหรับ connection ระยะยาวแบบที่ streaming RPC (หัวข้อ 80.6) มักใช้งาน
+
+**ขนาด Message สูงสุด**: สังเกตจากโค้ดที่ generate จริงในหัวข้อ 80.3 ว่าทั้ง client และ server struct มีเมธอด `.max_decoding_message_size(limit)` / `.max_encoding_message_size(limit)` ให้ปรับ (ค่า default ของการ decode คือ 4MB ตามที่ doc comment ในโค้อดที่ generate บอกไว้ตรง ๆ) — ควรตั้งค่านี้ให้เหมาะกับโดเมนจริงเสมอ เพราะ message ที่ไม่จำกัดขนาดเป็นช่องโหว่ DoS ที่ชัดเจน (client ส่ง message ขนาดยักษ์มาเพื่อให้ server ใช้ memory จนล้ม)
+
+**Compression**: `tonic` มี feature flag `gzip` และ `deflate` (ปิดโดย default ต้องเปิดเองใน `Cargo.toml`) ที่เปิดใช้ผ่าน `.send_compressed(CompressionEncoding::Gzip)` / `.accept_compressed(CompressionEncoding::Gzip)` ทั้งฝั่ง client และ server — มีประโยชน์เมื่อ message มีข้อมูลซ้ำ ๆ มาก (เช่น text ยาว ๆ) แม้ Protobuf จะแน่นกว่า JSON อยู่แล้วตามหัวข้อ 80.1 ก็ตาม แลกกับ CPU time ที่ต้อง compress/decompress เพิ่ม (tradeoff แบบเดียวกับที่ Part 61 กล่าวถึง `Accept-Encoding`/`Content-Encoding` สำหรับ REST)
+
+**Load Balancing**: ในระบบ microservices จริง (Part 81) มักมี service instance เดียวกันหลายตัวรันพร้อมกัน (สำหรับ scale และ fault tolerance) — Tonic รองรับ client-side load balancing แบบพื้นฐานผ่าน feature `channel` ที่ดึง `tower::balance` เข้ามา (สังเกตได้จาก `Cargo.toml` ของ `tonic` ที่ประกาศ `"tower?/balance"` ไว้ในนิยามของ feature `channel`) แต่ในระบบจริงขนาดใหญ่ทีมส่วนมากเลือกใช้ **service mesh** (เช่น Istio/Linkerd ที่ทำงานร่วมกับ Envoy proxy) จัดการเรื่อง load balancing, retry, circuit breaking ที่ระดับ infrastructure แทนที่จะทำในโค้ด Rust เอง — Part 81 จะพูดถึงแนวคิดนี้ต่อในบริบทของการออกแบบระบบ microservices แบบเต็มรูปแบบ
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### 1. ลืมติดตั้ง `protoc` — build script fail ทันที
@@ -1270,7 +1403,28 @@ curl: (1) Received HTTP/0.9 when not allowed
 gRPC error: code=Unauthenticated message="ไม่พบ authorization metadata"
 ```
 
-**วิธีแก้**: ตรวจสอบเสมอว่า `Request::metadata_mut().insert(...)` ถูกเรียกก่อนส่ง request ทุกครั้งที่ RPC นั้นต้องผ่าน interceptor ที่ตรวจ auth — และจำไว้ว่า metadata key ต้องเป็นตัวพิมพ์เล็กเสมอ (`"authorization"` ไม่ใช่ `"Authorization"`) เพราะ `MetadataMap` ของ Tonic (ต่างจาก `http::HeaderMap` ที่ case-insensitive โดยธรรมชาติในการค้นหา) จะ panic ตอน `.insert()` ถ้า key มีตัวพิมพ์ใหญ่ปนอยู่ (ข้อจำกัดที่มาจาก gRPC metadata spec เอง ไม่ใช่ Tonic กำหนดขึ้นเอง)
+**วิธีแก้**: ตรวจสอบเสมอว่า `Request::metadata_mut().insert(...)` ถูกเรียกก่อนส่ง request ทุกครั้งที่ RPC นั้นต้องผ่าน interceptor ที่ตรวจ auth — และจำไว้ว่า metadata key ต้องเป็นตัวพิมพ์เล็กเสมอ (`"authorization"` ไม่ใช่ `"Authorization"`) เพราะ metadata key ของ gRPC (ต่างจาก HTTP header name ที่ case-insensitive) ตาม spec ต้องเป็นตัวพิมพ์เล็กล้วนเท่านั้น พิสูจน์จริงด้วยการลองใส่ตัวพิมพ์ใหญ่ปนดู:
+
+```rust
+req.metadata_mut().insert("Authorization", "Bearer x".parse().unwrap());
+```
+
+```text
+thread 'main' panicked at .../http-1.5.0/src/header/name.rs:1254:13:
+HeaderName::from_static with invalid bytes
+```
+
+`MetadataMap::insert` เมื่อรับ key เป็น `&'static str` ตรง ๆ จะเรียก `MetadataKey::from_static` ซึ่ง**panic ทันทีตอน runtime** ถ้า key มีตัวอักษรที่ไม่ใช่ตัวพิมพ์เล็ก/ตัวเลข/`-`/`_` (ไม่ใช่ compile-time error เพราะ Rust ตรวจสอบเนื้อหาของ string literal ไม่ได้ตอน compile) — นี่คือกับดักที่อันตรายเป็นพิเศษเพราะโค้ดจะ compile ผ่านสนิท แล้วไป panic ตอนรันจริงเท่านั้น (มักเจอตอน copy-paste header name จาก REST API เดิมที่ใช้ตัวพิมพ์ใหญ่แบบ `Authorization` ตามธรรมเนียม HTTP)
+
+### 6. ตั้ง Deadline ฝั่ง Client แล้วคาดหวัง `DeadlineExceeded` แต่ได้ `Cancelled` แทน
+
+`tonic::Request` มีเมธอด `set_timeout(Duration)` ให้กำหนดเวลาสูงสุดที่ client จะรอ RPC นั้น — พิสูจน์จริงด้วยการเรียก RPC ที่ server จำลอง delay 500ms แต่ client ตั้ง `set_timeout(Duration::from_millis(100))`:
+
+```text
+gRPC error หลังจาก 101.519893ms: code=Cancelled message="Timeout expired"
+```
+
+สังเกตว่า `code` ที่ได้คือ **`Cancelled`** (เลข 1) **ไม่ใช่ `DeadlineExceeded`** (เลข 4) ตามที่อาจคาดไว้ตามสัญชาตญาณ — เหตุผลคือ `set_timeout` ของ Tonic ฝั่ง client เป็นกลไก**local timeout ที่ client บังคับยกเลิกเองฝั่งตัวเอง**เมื่อรอเกินเวลาที่กำหนด (ยกเลิก request โดยไม่รอ server เลย) ต่างจาก `DeadlineExceeded` ที่มักหมายถึง**server เองตรวจพบว่าเกิน deadline ที่ client ส่งมาให้ผ่าน `grpc-timeout` header แล้ว server ตัดสินใจปฏิเสธเอง** — สองสถานการณ์นี้ต่างกันในรายละเอียด (ใครเป็นคนตัดสินใจเลิกรอ) แต่ให้ผลลัพธ์ที่ผู้ใช้เห็นคล้ายกันมาก **วิธีแก้**: ในโค้ดที่ต้อง handle timeout ให้ครอบคลุมทั้งสองกรณี ควร match ทั้ง `Code::Cancelled` และ `Code::DeadlineExceeded` แทนที่จะเช็คแค่ตัวเดียว ถ้าความหมายทางธุรกิจของทั้งสองกรณีคือ "ต้อง retry หรือแจ้งผู้ใช้ว่าช้าเกินไป" เหมือนกัน
 
 ## แบบฝึกหัด (Exercises)
 

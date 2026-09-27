@@ -197,7 +197,100 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-cron-scheduler = "0.13"
 ```
 
-### 84.5 นิยาม Job และ Enqueue จาก Handler
+### 84.5 ตัวอย่างจริงด้วย `apalis`: หน้าตาของทางเลือกที่มี Framework ให้พร้อม
+
+เพื่อให้เห็นภาพว่า `apalis` (เวอร์ชัน 0.7.4 ณ ตอนที่เขียนบทนี้ พร้อม `apalis-redis` 0.7.4 เป็น backend) ต่างจาก Redis primitive ที่เราจะใช้เป็นหลักตลอดบทนี้อย่างไร มาดูตัวอย่างที่ compile และรันได้จริงสั้น ๆ ก่อน — ฝั่ง enqueue:
+
+```rust
+use apalis::prelude::*;
+use apalis_redis::RedisStorage;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SendBookingConfirmationEmail {
+    booking_id: String,
+    email: String,
+}
+
+#[tokio::main]
+async fn main() {
+    let redis_url = "redis://127.0.0.1:6379/".to_string();
+    let conn = apalis_redis::connect(redis_url).await.expect("Could not connect");
+    let mut storage: RedisStorage<SendBookingConfirmationEmail> = RedisStorage::new(conn);
+
+    let job = SendBookingConfirmationEmail {
+        booking_id: "BK-APALIS-1".to_string(),
+        email: "customer@example.com".to_string(),
+    };
+    storage.push(job).await.expect("push job failed");
+    println!("enqueue job ผ่าน apalis-redis สำเร็จ");
+}
+```
+
+และฝั่ง worker — สังเกตว่าไม่ต้องเขียนลูป `BRPOP` เองเลย แค่เขียนฟังก์ชันที่รับ job แล้วให้ `WorkerBuilder` จัดการ polling/dispatch ให้ทั้งหมด:
+
+```rust
+use apalis::prelude::*;
+use apalis_redis::RedisStorage;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SendBookingConfirmationEmail {
+    booking_id: String,
+    email: String,
+}
+
+async fn send_email(job: SendBookingConfirmationEmail) -> Result<(), Error> {
+    println!("ประมวลผล job booking_id={} email={}", job.booking_id, job.email);
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() {
+    let redis_url = "redis://127.0.0.1:6379/".to_string();
+    let conn = apalis_redis::connect(redis_url).await.expect("Could not connect");
+    let storage: RedisStorage<SendBookingConfirmationEmail> = RedisStorage::new(conn);
+
+    let worker = WorkerBuilder::new("booking-confirmation-worker")
+        .backend(storage.clone())
+        .build_fn(send_email);
+
+    worker.run().await;
+}
+```
+
+โค้ดทั้งสองไฟล์นี้รันจริงแล้วพบเรื่องน่าสนใจที่ควรรู้ก่อนนำไปใช้: ถ้า enqueue กับ worker อยู่ใน **binary คนละตัวกัน** (เช่น `src/bin/enqueue.rs` และ `src/bin/worker.rs` ตามธรรมเนียมที่บทนี้ใช้มาตลอด) แม้จะนิยาม struct `SendBookingConfirmationEmail` เหมือนกันเป๊ะ ๆ ทั้งสองไฟล์ ผลลัพธ์จริงที่ได้คือ **worker ไม่เห็น job ที่ enqueue ไว้เลย**:
+
+```
+[02:11:58.490] [apalis worker] เริ่มทำงาน
+[02:11:59.492] [handler] client ส่ง POST /bookings เข้ามา
+[02:11:59.493] [handler] enqueue job ผ่าน apalis-redis สำเร็จ -> ตอบ 201 กลับ client
+[02:12:03.493] [apalis worker] จบการสาธิต
+```
+
+สาเหตุคือ `RedisStorage::new(conn)` เรียก `Config::default().set_namespace(type_name::<T>())` ภายใน ซึ่ง `std::any::type_name::<T>()` คืนค่าเป็น **fully-qualified path ของ type รวมชื่อ crate/module ด้วย** — เมื่อ struct ชื่อเดียวกันถูกนิยามอยู่ใน binary crate คนละตัว (`enqueue` กับ `worker`) `type_name` ของมันจะกลายเป็น `"enqueue::SendBookingConfirmationEmail"` กับ `"worker::SendBookingConfirmationEmail"` ซึ่ง**ต่างกัน** ทำให้ namespace ที่ใช้สร้าง Redis key ต่างกันไปด้วย (ตรวจสอบได้จริงด้วย `redis-cli keys '*'` จะเห็น key อย่าง `enqueue::SendBookingConfirmationEmail:data` แยกจาก `worker::SendBookingConfirmationEmail:consumers`) worker กับ enqueue จึงมองไม่เห็นคิวเดียวกันเลยทั้งที่ต่อ Redis instance เดียวกัน
+
+วิธีแก้คือกำหนด namespace ให้ตรงกันอย่างชัดเจนทั้งสองฝั่งด้วย `Config::set_namespace`:
+
+```rust
+let config = apalis_redis::Config::default().set_namespace("booking_confirmation_email");
+let storage: RedisStorage<SendBookingConfirmationEmail> =
+    RedisStorage::new_with_config(conn, config);
+```
+
+ทำแบบเดียวกันทั้งฝั่ง enqueue และฝั่ง worker แล้วรันใหม่ ได้ผลลัพธ์ที่ถูกต้อง:
+
+```
+[02:13:13.506] [apalis worker] เริ่มทำงาน
+[02:13:14.509] [handler] client ส่ง POST /bookings เข้ามา
+[02:13:14.510] [handler] enqueue job ผ่าน apalis-redis สำเร็จ -> ตอบ 201 กลับ client
+[02:13:14.525] [apalis worker] ประมวลผล job booking_id=BK-APALIS-1 email=customer@example.com
+[02:13:18.507] [apalis worker] จบการสาธิต
+```
+
+ครั้งนี้ worker ดึง job ออกมาประมวลผลได้จริงภายใน 15ms หลัง enqueue — เห็นได้ชัดว่า `apalis` ให้ abstraction ระดับสูงกว่า Redis primitive มาก (`WorkerBuilder`, `Storage` trait, polling loop ที่ไม่ต้องเขียนเอง, รองรับ retry/concurrency layer ผ่าน `tower`-style middleware) แต่ก็แลกมาด้วยพฤติกรรมที่ไม่ชัดเจนในตอนแรก (namespace ที่มาจาก `type_name` แบบอัตโนมัติ) ซึ่งเป็นตัวอย่างที่ดีว่าทำไมบทนี้เลือกสอนด้วย Redis primitive ตรง ๆ เป็นหลัก: เมื่อเราเขียน `LPUSH`/`BRPOP` เองพร้อมกำหนดชื่อ key เป็น constant ที่ share กันตรง ๆ (`QUEUE_KEY`) แบบหัวข้อ 84.6-84.7 ปัญหาแบบนี้จะไม่มีทางเกิดขึ้นได้เลยเพราะไม่มี "การเดา key ให้อัตโนมัติ" ซ่อนอยู่เบื้องหลัง — ถ้าเลือกใช้ `apalis` ในโปรเจกต์จริง ควรตั้ง namespace ด้วยมือเสมอโดยไม่พึ่ง default และควรทำเหมือนกันทุกครั้งที่มีมากกว่าหนึ่ง binary ที่ต้องแบ่งกันใช้คิวเดียว รวมถึงถ้าเลือก backend เป็น PostgreSQL แทน Redis ก็ทำได้ผ่าน crate `apalis-sql` ซึ่งต่อยอดจากตาราง Postgres ที่ Part 70-71 สอนไว้ได้ทันที โดยหลักการเรื่อง namespace/table naming ก็ยังต้องระวังแบบเดียวกัน
+
+### 84.6 นิยาม Job และ Enqueue จาก Handler
 
 เริ่มจากนิยาม struct ของ job ที่เป็น `Serialize`/`Deserialize` ตามที่เรียนมาจาก Part 57:
 
@@ -311,7 +404,7 @@ async fn main() {
 
 เทียบกับ 1207ms ในหัวข้อ 84.1 ตอนนี้ handler ตอบกลับใน **7.5ms** — เร็วขึ้นกว่า 160 เท่า และไม่ว่า email provider จะล่มหรือช้าแค่ไหน ก็ไม่มีทางกระทบ latency ของ request นี้อีกต่อไป เพราะ handler ทำแค่ `LPUSH` ข้อมูลเข้า Redis เท่านั้น (ซึ่งเร็วมากเพราะเป็น in-memory operation) ไม่ได้เรียก email provider เลยด้วยซ้ำ
 
-### 84.6 Worker Process: ดึงงานด้วย `BRPOP`
+### 84.7 Worker Process: ดึงงานด้วย `BRPOP`
 
 ทีนี้ต้องมีอีกฝั่งที่ดึงงานจาก queue ไปประมวลผลจริง นั่นคือ **worker** — โดยหลักการแล้วควรเป็น **process แยกต่างหาก** จาก web server (รันด้วย `cargo run --bin worker` เป็นอีก binary หรือ deploy เป็นอีก container/pod ก็ได้) เพื่อให้การประมวลผล job ไม่แย่ง CPU/memory กับการรับ HTTP request และเพื่อให้ scale แต่ละส่วนแยกกันได้ (เช่น ถ้ามี booking เข้ามาถี่มากในบางช่วงเวลา ก็เพิ่มจำนวน worker process ได้โดยไม่ต้องแตะ web server เลย)
 
@@ -378,7 +471,47 @@ $ ./worker
 
 ดู timestamp ให้ดี: handler จบงานไปตั้งแต่ `01:58:53.280` — process ของมันปิดตัวลงสมบูรณ์แล้ว ไม่มี memory หรือ task ใด ๆ ค้างอยู่ในนั้นเลย แล้ว **4 วินาทีต่อมา** worker (binary คนละตัว, process คนละตัว, เริ่มที่ `01:58:57.284`) มาดึง job ตัวเดียวกัน (`job_id=74ef2479-...`) ออกจาก Redis ได้ และประมวลผลจนสำเร็จที่ `01:58:58.088` — นี่คือหลักฐานที่ชัดเจนว่า **job ถูกเก็บไว้ใน Redis อย่างทนทาน (persistent) ไม่ได้ผูกติดกับ process หรือ memory ของ handler เลย** ต่างจาก `tokio::spawn` ในหัวข้อ 84.3 อย่างสิ้นเชิง ที่ต่อให้ process เดิมยังไม่ทันปิดตัว งานก็หายไปได้ตั้งแต่ runtime ถูก drop
 
-### 84.7 Retry พร้อม Exponential Backoff
+### 84.8 คำเตือนสำคัญ: Redis เองก็ต้องตั้ง Persistence ด้วย ไม่ใช่ "ปลอดภัยโดยอัตโนมัติ"
+
+ก่อนไปหัวข้อถัดไป ต้องพูดตรง ๆ ถึงสมมติฐานที่ซ่อนอยู่ในหัวข้อที่แล้ว: ที่บอกว่า "job ถูกเก็บไว้ใน Redis อย่างทนทาน" นั้น**เป็นจริงก็ต่อเมื่อ Redis instance นั้นถูกตั้งค่า persistence ไว้จริง ๆ** เท่านั้น — Redis โดยพื้นฐานเก็บข้อมูลทั้งหมดไว้ใน **หน่วยความจำ (in-memory)** การที่ข้อมูลจะรอดจากการ restart ของ Redis เองได้หรือไม่ ขึ้นอยู่กับว่าตั้งค่า **RDB snapshot** (`save` directive กำหนดว่าจะ snapshot ลงดิสก์ทุกกี่วินาที/กี่การเปลี่ยนแปลง) หรือ **AOF (Append Only File)** (`appendonly yes` — log ทุกคำสั่งเขียนลงไฟล์ก่อน แล้ว replay ตอน restart) ไว้หรือไม่
+
+ถ้า Redis instance ที่ใช้เป็น job queue **ถูกตั้งมาเพื่อใช้เป็น cache อย่างเดียว** (ตามที่ Part 83 สอนไว้ — cache มักตั้งใจปิด persistence เพื่อความเร็วสูงสุด เพราะข้อมูล cache หายแล้ว regenerate ใหม่ได้ ไม่ใช่ปัญหา) แล้วเอามาใช้เป็น job queue ต่อโดยไม่เช็คการตั้งค่านี้ก่อน **ปัญหาเดียวกับ `tokio::spawn` ในหัวข้อ 84.3 จะย้อนกลับมาอีก** เพียงแค่ย้ายจุดที่ข้อมูลหายจาก "process ของแอป" ไปเป็น "process ของ Redis" เท่านั้นเอง มาดูให้เห็นจริง — instance ที่ใช้สาธิตในบทนี้ตั้งค่าไว้แบบนี้:
+
+```
+$ redis-cli CONFIG GET appendonly
+appendonly
+no
+$ redis-cli CONFIG GET save
+save
+
+```
+
+`appendonly no` และ `save` เป็นค่าว่าง (ไม่มี snapshot rule เลย) หมายความว่า **ไม่มี persistence ใด ๆ ทำงานอยู่เลย** ลอง enqueue 3 jobs แล้วสั่งปิด Redis แบบไม่ save (`SHUTDOWN NOSAVE` ซึ่งจำลองอาการเดียวกับ container ถูก kill กะทันหันโดยไม่มีเวลา flush อะไรลงดิสก์) แล้วเปิดขึ้นมาใหม่:
+
+```
+$ redis-cli LPUSH jobs:booking_confirmation job1 job2 job3
+(integer) 3
+$ redis-cli LLEN jobs:booking_confirmation
+(integer) 3
+$ redis-cli SHUTDOWN NOSAVE
+$ # (เริ่ม redis-server ใหม่ด้วย config เดิม)
+$ redis-cli PING
+PONG
+$ redis-cli LLEN jobs:booking_confirmation
+(integer) 0
+```
+
+**job ทั้ง 3 ใบหายไปหมดจริง ๆ** ทั้งที่ก่อน restart `LLEN` ยืนยันว่ามี 3 รายการอยู่แน่ ๆ นี่คือหลักฐานที่ชัดเจนว่า "ใช้ Redis เป็น queue" ไม่ได้แปลว่า "ทนทานต่อการ restart โดยอัตโนมัติ" — ความทนทานเป็นสิ่งที่ต้อง**ตั้งค่าเอาไว้เอง**เสมอ
+
+สิ่งที่ต้องทำเมื่อจะใช้ Redis เป็น job queue จริงในระบบ production:
+
+1. **เปิด AOF เสมอสำหรับ Redis instance ที่ใช้เป็น queue** (`appendonly yes` พร้อม `appendfsync everysec` เป็นค่าที่สมดุลระหว่าง durability กับ performance ที่ยอมรับความเสี่ยงสูญข้อมูลได้ไม่เกิน ~1 วินาทีล่าสุด หรือ `appendfsync always` ถ้าทนสูญข้อมูลแม้แต่วินาทีเดียวไม่ได้ แลกกับ throughput ที่ลดลง)
+2. **แยก Redis instance ของ queue ออกจาก Redis instance ของ cache** ให้เป็นสองตัวคนละกัน (คนละ process, คนละพอร์ต, หรือคนละเครื่องไปเลยถ้าจำเป็น) เพื่อไม่ให้การตั้งค่าที่เหมาะกับ cache (ปิด persistence เพื่อความเร็ว, ตั้ง `maxmemory-policy` แบบ evict ข้อมูลเก่าทิ้งได้เมื่อ memory เต็ม) ไปกระทบกับ queue ที่ต้องการ durability เต็มร้อยและ**ห้าม evict ข้อมูลทิ้งเด็ดขาด** (ตั้ง `maxmemory-policy noeviction` สำหรับ Redis instance ของ queue)
+3. ถ้าระบบต้องการ durability ระดับสูงกว่าที่ Redis เดี่ยว ๆ ให้ได้ (เช่น ทนต่อการที่เครื่อง Redis พังไปเลยทั้งเครื่อง ไม่ใช่แค่ process restart) ให้พิจารณา Redis replication/Sentinel หรือย้ายไปใช้ backend ที่ทนทานกว่าอย่าง PostgreSQL (ผ่าน `apalis-sql` ตามที่กล่าวถึงในหัวข้อ 84.5 ซึ่งต่อยอดจาก Part 70-71 ได้ตรง เพราะ PostgreSQL commit ข้อมูลลงดิสก์ก่อน acknowledge เสมอโดยธรรมชาติ — WAL ของ PostgreSQL ให้ durability guarantee ที่เข้มกว่า Redis's AOF โดย default)
+
+ข้อคิดสำคัญที่สุดจากหัวข้อนี้: **การเลือกใช้เครื่องมือที่ "ดูน่าเชื่อถือ" (Redis, database, message queue) ไม่ได้แปลว่าได้ durability มาโดยอัตโนมัติ** ต้องตรวจสอบและตั้งค่าการันตีที่ต้องการเสมอ ไม่ว่าจะเป็น Redis persistence, database transaction isolation level, หรือ replication factor ของ message queue — เป็นความรับผิดชอบของ engineer ที่ต้องเข้าใจเครื่องมือที่ตัวเองใช้ ไม่ใช่แค่เชื่อชื่อยี่ห้อ
+
+### 84.9 Retry พร้อม Exponential Backoff
 
 Email provider ในโลกจริงไม่ได้ทำงานสำเร็จ 100% เสมอไป — บางครั้ง timeout, บางครั้ง rate limit ชั่วคราว การ retry ทันทีซ้ำ ๆ ติดกันอาจทำให้ปัญหาแย่ลง (ยิ่ง provider โอเวอร์โหลดหนักขึ้น) จึงต้องเว้นระยะเวลาให้นานขึ้นในแต่ละครั้งที่ retry ซึ่งเรียกว่า **exponential backoff**
 
@@ -442,7 +575,7 @@ async fn main() {
 
 สังเกตว่าโค้ดนี้ **ไม่ได้เอา job ออกจากคิวแล้วใส่กลับเข้าไปใหม่ทุกครั้งที่ retry** — เป็นการ retry แบบ in-process loop ภายใน worker ตัวเดียวกัน ข้อดีคือเรียบง่ายและเห็น backoff ตรงไปตรงมา ข้อเสียคือ worker ตัวนั้นจะถูก "จอง" ไว้กับ job นี้ตลอดช่วง backoff ทำให้ไม่ไปหยิบ job อื่นมาทำระหว่างนั้น ถ้าต้องรองรับ throughput สูงมาก การออกแบบที่ดีกว่าคือใช้ Redis sorted set (`ZADD`) เก็บ job ที่รอ retry พร้อม timestamp ที่ "พร้อมจะ retry" เป็น score แล้วมี process แยกที่คอยเช็คและย้ายกลับเข้า `LPUSH` เมื่อถึงเวลา (คล้ายกับ delayed queue) วิธีนี้ทำให้ worker ตัวอื่นยังหยิบ job ใหม่ ๆ ไปทำได้ระหว่างที่ job หนึ่งกำลังรอ backoff อยู่ — เป็นการต่อยอดที่ผู้อ่านที่สนใจงานปริมาณสูงสามารถทำเพิ่มได้ แต่นอกเหนือขอบเขตของบทนี้
 
-### 84.8 Dead-Letter: เมื่อ Retry ครบแล้วยังไม่สำเร็จ
+### 84.10 Dead-Letter: เมื่อ Retry ครบแล้วยังไม่สำเร็จ
 
 ถ้า retry ไปเรื่อย ๆ ไม่มีที่สิ้นสุดสำหรับ job ที่ล้มเหลวอย่างถาวร (เช่น อีเมลผิด, provider ปิดบริการถาวร) จะทำให้ worker ติดอยู่กับ job นั้นตลอดไปและ resource รั่วไหล คำตอบคือกำหนด `max_attempts` และเมื่อครบจำนวนแล้วยังไม่สำเร็จ ให้ย้าย job นั้นไปเก็บไว้ใน **dead-letter list** แยกต่างหาก เพื่อให้ทีมตรวจสอบด้วยมือทีหลัง (แนวคิดเดียวกับ dead-letter queue ของ Part 82 แต่ใช้กับ job ในแอปเดียว ไม่ใช่ message ข้ามระบบ):
 
@@ -536,7 +669,7 @@ async fn main() {
 
 ข้อมูลนี้เพียงพอสำหรับทีม support หรือ engineer ที่ตรวจสอบทีหลัง: รู้ว่า booking ไหนได้รับผลกระทบ (`BK-9003`), error สุดท้ายคืออะไร, พยายามไปกี่ครั้ง, และล้มเหลวเมื่อไหร่ — สามารถเขียน admin endpoint หรือ CLI tool ที่อ่านจาก `FAILED_KEY` แล้วให้เลือก "ลอง enqueue ใหม่" (`LPUSH` กลับเข้า `QUEUE_KEY` พร้อม reset `attempts` เป็น 0) หรือ "ปิด case ทิ้ง" (`LREM` ออกจาก dead-letter list) ได้ตามความเหมาะสม จุดสำคัญคือ **job ที่ล้มเหลวถาวรไม่หายไปเงียบ ๆ เหมือนตอนใช้ `tokio::spawn`** แต่ถูกเก็บไว้ให้ตรวจสอบได้เสมอ
 
-### 84.9 Job Idempotency: ป้องกันผลข้างเคียงจากการประมวลผลซ้ำ
+### 84.11 Job Idempotency: ป้องกันผลข้างเคียงจากการประมวลผลซ้ำ
 
 Queue ที่เราสร้างด้วย `BRPOP` มีคุณสมบัติ **at-least-once delivery** เหมือนกับ message queue ใน Part 82 — หมายความว่า **job อาจถูกประมวลผลมากกว่าหนึ่งครั้งได้** ตัวอย่างสถานการณ์จริง: worker `BRPOP` ดึง job ออกมาจากคิวสำเร็จ (job หายจากคิวแล้ว ณ จุดนี้) แล้วเริ่มเรียก email provider จนส่งอีเมลสำเร็จ แต่**ก่อน**ที่ worker จะบันทึกผลหรือทำ cleanup ใด ๆ ต่อ — worker process ดันแครช (OOM, container ถูก kill, network partition) ถ้าเรามีระบบ monitoring ที่คอย re-enqueue job ที่ "ดูเหมือนไม่มีคนทำต่อ" (เช่น pattern "reliable queue" ที่ย้าย job ไปไว้ใน "processing list" ชั่วคราวระหว่างทำงาน แล้วถ้า worker ไม่ ack ภายในเวลาที่กำหนดก็ย้ายกลับเข้า queue หลัก) job ตัวเดิมก็จะถูกส่งไปให้ worker ตัวใหม่ประมวลผล**ซ้ำ**
 
@@ -614,7 +747,7 @@ async fn send_with_idempotency_check(conn: &mut redis::aio::MultiplexedConnectio
 
 ข้อสังเกตเชิงปฏิบัติสองข้อ: (1) ในตัวอย่างนี้ตั้งค่า key แบบไม่มี TTL (permanent) ซึ่งในระบบจริงมักตั้ง `EX` (expire) ไว้ด้วย เช่น 7 วัน เพื่อไม่ให้ Redis เก็บ key เหล่านี้ค้างอยู่ตลอดไปโดยไม่จำเป็น (booking ที่เก่ากว่านั้นไม่มีทางถูก retry ซ้ำอีกแล้ว) — คำสั่งจริงจะเป็น `SET key val NX EX 604800`, (2) ทางเลือกอื่นแทน Redis คือบันทึกสถานะ `email_sent_at: Option<DateTime<Utc>>` เป็นคอลัมน์ในตาราง `bookings` เองผ่าน SQLx (Part 70) แล้วใช้ `UPDATE bookings SET email_sent_at = now() WHERE id = $1 AND email_sent_at IS NULL` (ใช้ `WHERE ... IS NULL` เป็นตัวเช็ค-แล้ว-ตั้งค่าแบบ atomic เหมือนกับ `SET NX` ของ Redis) วิธีนี้เหมาะกับกรณีที่อยากให้สถานะนี้อยู่ในฐานข้อมูลหลักเพื่อ query ร่วมกับข้อมูล booking ได้ง่ายกว่า ขึ้นอยู่กับว่าระบบมี Redis อยู่แล้วหรือไม่และต้องการ query สถานะนี้รวมกับข้อมูลอื่นแค่ไหน
 
-### 84.10 Scheduled และ Recurring Jobs: `tokio-cron-scheduler`
+### 84.12 Scheduled และ Recurring Jobs: `tokio-cron-scheduler`
 
 จนถึงตอนนี้ job ทุกตัวถูก enqueue จาก event ที่เกิดขึ้น (booking ถูกสร้าง) แต่มีงานอีกประเภทที่ไม่ได้ผูกกับ event ใด ๆ เลย ต้องรันตามตารางเวลาซ้ำ ๆ เช่น **งานตอนกลางคืนที่ release booking ที่ยังไม่จ่ายเงินและเลย expiry มาแล้ว** (คืน seat ให้คนอื่นจองได้) หรือ **อีเมลสรุปประจำวัน** งานแบบนี้ไม่ได้มาจากการ enqueue โดยตรง แต่ต้องมีตัวจับเวลาคอยสั่งงานตามรอบ
 
@@ -672,18 +805,208 @@ async fn main() {
 
 จะเห็นว่างานถูกยิงซ้ำทุกประมาณ 2.5 วินาที (`1/3 * * * * *` หมายถึง "ทุกวินาทีที่หารด้วย 3 ลงตัว" ซึ่ง scheduler จะ align ตาม wall-clock second จริง ไม่ใช่นับ 3 วินาทีจากตอนที่ `start()` ถูกเรียก — จึงเห็นรอบแรกยิงหลัง start แค่ ~0.5 วินาที เพราะตอน start เป็นวินาทีที่ 22 ซึ่งใกล้กับวินาทีถัดไปที่หารด้วย 3 ลงตัว) ในการใช้งานจริงสำหรับ cleanup ตอนกลางคืน จะเปลี่ยน cron expression เป็น `"0 0 3 * * *"` (วินาที 0, นาที 0, ชั่วโมง 3 ของทุกวัน คือตีสามตรง)
 
-**ข้อจำกัดที่ต้องพูดตรง ๆ**: in-process scheduler แบบนี้มีจุดอ่อนสำคัญคือ **มันผูกอยู่กับ lifecycle ของ process** ถ้า process ของแอปพลิเคชัน restart พอดีในช่วงเวลาที่ควรจะรัน (เช่น deploy ใหม่ตอนตี 2:59 แล้ว container ใหม่ยังไม่ทันขึ้นตอนตี 3:00) งาน cleanup ของคืนนั้นจะไม่ถูกรันเลย และไม่มีใครรู้ด้วยว่ามันไม่ถูกรัน (ไม่มี error, ไม่มี log ใด ๆ เพราะ process ที่ควรจะรันมันไม่ได้อยู่ในสถานะที่จะรันได้) ยิ่งไปกว่านั้น ถ้าแอปพลิเคชัน deploy เป็นหลาย instance (เพื่อ load balancing) **ทุก instance จะรัน cron job ของตัวเองพร้อมกัน** ทำให้งาน cleanup ถูกรันซ้ำหลายครั้งในเวลาเดียวกันโดยไม่ได้ตั้งใจ (ในตัวอย่างนี้ผลจะไม่ร้ายแรงเพราะ `UPDATE ... WHERE status = 'unpaid' AND expiry < now()` เป็น idempotent อยู่แล้ว แต่ถ้าเป็นงานอย่าง "ส่งอีเมลสรุปประจำวัน" การรันซ้ำหลาย instance จะทำให้ลูกค้าได้รับอีเมลซ้ำเหมือนปัญหาในหัวข้อ 84.9)
+**ข้อจำกัดที่ต้องพูดตรง ๆ**: in-process scheduler แบบนี้มีจุดอ่อนสำคัญคือ **มันผูกอยู่กับ lifecycle ของ process** ถ้า process ของแอปพลิเคชัน restart พอดีในช่วงเวลาที่ควรจะรัน (เช่น deploy ใหม่ตอนตี 2:59 แล้ว container ใหม่ยังไม่ทันขึ้นตอนตี 3:00) งาน cleanup ของคืนนั้นจะไม่ถูกรันเลย และไม่มีใครรู้ด้วยว่ามันไม่ถูกรัน (ไม่มี error, ไม่มี log ใด ๆ เพราะ process ที่ควรจะรันมันไม่ได้อยู่ในสถานะที่จะรันได้) ยิ่งไปกว่านั้น ถ้าแอปพลิเคชัน deploy เป็นหลาย instance (เพื่อ load balancing) **ทุก instance จะรัน cron job ของตัวเองพร้อมกัน** ทำให้งาน cleanup ถูกรันซ้ำหลายครั้งในเวลาเดียวกันโดยไม่ได้ตั้งใจ (ในตัวอย่างนี้ผลจะไม่ร้ายแรงเพราะ `UPDATE ... WHERE status = 'unpaid' AND expiry < now()` เป็น idempotent อยู่แล้ว แต่ถ้าเป็นงานอย่าง "ส่งอีเมลสรุปประจำวัน" การรันซ้ำหลาย instance จะทำให้ลูกค้าได้รับอีเมลซ้ำเหมือนปัญหาในหัวข้อ 84.11)
 
 ทางเลือกที่ทนทานกว่าสำหรับ production:
 
 1. **OS-level cron หรือ Kubernetes CronJob**: ให้ orchestrator ที่อยู่ "นอก" lifecycle ของแอปเป็นคนสั่งงานตามตาราง แล้วรันเป็น one-shot process/container แยก วิธีนี้ไม่มีปัญหาเรื่อง process restart พอดีเวลา เพราะ cron/CronJob จะรันใหม่ตามรอบถัดไปเสมอไม่ว่า container ก่อนหน้าจะเป็นอย่างไร และแยก concern ระหว่าง "แอปที่รับ request" กับ "งานตามตาราง" ออกจากกันชัดเจน
-2. **Dedicated scheduler service ตัวเดียว + distributed lock**: ถ้าจำเป็นต้องมี in-process scheduler จริง ๆ (เช่นต้องการ logic ที่ผูกกับ state ในหน่วยความจำของแอป) ให้ใช้ distributed lock (เช่น Redis `SET key val NX EX <ttl>` แบบเดียวกับหัวข้อ 84.9) เพื่อให้แน่ใจว่ามีแค่ instance เดียวที่ "ชนะ" การรันงานในรอบนั้น ๆ instance อื่นเช็คแล้วเจอ lock ก็ข้ามไป
+2. **Dedicated scheduler service ตัวเดียว + distributed lock**: ถ้าจำเป็นต้องมี in-process scheduler จริง ๆ (เช่นต้องการ logic ที่ผูกกับ state ในหน่วยความจำของแอป) ให้ใช้ distributed lock (เช่น Redis `SET key val NX EX <ttl>` แบบเดียวกับหัวข้อ 84.11) เพื่อให้แน่ใจว่ามีแค่ instance เดียวที่ "ชนะ" การรันงานในรอบนั้น ๆ instance อื่นเช็คแล้วเจอ lock ก็ข้ามไป
 
 บทนี้แสดง `tokio-cron-scheduler` เพื่อให้เห็นว่าการ schedule งานใน Rust ทำได้อย่างไรในทางเทคนิค และเหมาะกับสถานการณ์ที่แอปมี instance เดียว หรือกรณีที่ผลของการรันซ้ำไม่ร้ายแรง (idempotent อยู่แล้ว) — แต่สำหรับงานที่สำคัญและรันในระบบที่มีหลาย instance ควรพิจารณาสองทางเลือกข้างต้นแทน
 
-### 84.11 Capstone: ระบบ Booking-Confirmation-Email แบบ End-to-End
+### 84.13 Scale Worker หลายตัวพร้อมกัน: Competing Consumers
 
-ตอนนี้รวมทุกส่วนเข้าด้วยกันเป็นระบบเดียว: handler ที่ enqueue job, worker ที่ retry พร้อม backoff และเช็ค idempotency, และ scheduled cleanup job — ทั้งหมดรันพร้อมกันจริงในโปรแกรมเดียว (จำลองการแยก process ด้วย `tokio::spawn` หลาย task เพื่อให้สาธิตในบทเดียวได้ ในระบบจริงส่วน handler กับ worker ควรเป็น binary/deployment แยกกันตามที่อธิบายไว้ในหัวข้อ 84.6):
+ระบบจองตั๋วจริงมักมี booking เข้ามาถี่กว่าที่ worker ตัวเดียวจะประมวลผลตามได้ทัน (โดยเฉพาะถ้าแต่ละ job ใช้เวลาหลายร้อย ms เพราะรอ email provider) วิธีแก้ที่ตรงไปตรงมาคือรัน worker หลาย process/instance พร้อมกัน ให้ทุกตัวแข่งกันดึงงานจากคิวเดียวกัน (เรียกว่า **competing consumers pattern**) คำถามสำคัญคือ: จะมีสอง worker แย่งกันได้ job เดียวกันไปประมวลผลซ้ำหรือไม่?
+
+คำตอบคือ **ไม่มีทางเกิดขึ้น** ตราบใดที่ยังใช้ `BRPOP` เพราะ Redis เป็น single-threaded ในการประมวลผลคำสั่ง (command execution เป็น atomic ทีละคำสั่งเสมอ) — เมื่อมี client หลายตัวรอ `BRPOP` บน list เดียวกันพร้อมกัน ทันทีที่มีการ `LPUSH` ข้อมูลเข้ามา Redis จะเลือก client ที่รออยู่ **แค่หนึ่งตัวเท่านั้น** ให้ได้รับข้อมูลนั้นไป (ตาม FIFO ของคิวที่รออยู่) ไม่มีทางที่สอง client จะได้ค่าเดียวกันพร้อมกันได้ มาดูให้เห็นจริงด้วยการรัน worker 3 ตัวพร้อมกันแย่งดึงงานจาก queue ที่มี 5 jobs:
+
+```rust
+use redis::AsyncCommands;
+
+// สาธิตว่ารัน worker หลายตัวพร้อมกัน (competing consumers) แล้ว BRPOP การันตีว่า
+// job แต่ละใบถูกส่งให้ worker แค่ตัวเดียวเท่านั้น ไม่มีสอง worker แย่งกันได้ job เดียวกัน
+async fn worker_loop(worker_name: &'static str) {
+    let mut conn = get_conn().await;
+    loop {
+        let result: Option<(String, String)> = conn.brpop(QUEUE_KEY, 3.0).await.expect("BRPOP failed");
+        match result {
+            Some((_key, raw)) => {
+                let job: EnqueuedJob = serde_json::from_str(&raw).unwrap();
+                println!("[{}] [{worker_name}] ได้รับ job booking_id={}", ts(), job.payload.booking_id);
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            }
+            None => {
+                println!("[{}] [{worker_name}] ไม่มีงานใหม่ -> หยุดทำงาน", ts());
+                break;
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let mut conn = get_conn().await;
+    let _: i64 = conn.del(QUEUE_KEY).await.unwrap_or(0);
+
+    // enqueue 5 jobs ก่อนที่ worker จะเริ่มแย่งกันดึง
+    for i in 1..=5 {
+        let job = EnqueuedJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            job_type: "send_booking_confirmation_email".to_string(),
+            payload: SendBookingConfirmationEmail {
+                booking_id: format!("BK-MULTI-{i}"),
+                email: "customer@example.com".to_string(),
+            },
+            attempts: 0,
+            max_attempts: 3,
+            enqueued_at: ts(),
+        };
+        let payload = serde_json::to_string(&job).unwrap();
+        let _: i64 = conn.lpush(QUEUE_KEY, payload).await.unwrap();
+    }
+    println!("[{}] enqueue ครบ 5 job แล้ว เริ่ม worker 3 ตัวพร้อมกัน", ts());
+
+    let w1 = tokio::spawn(worker_loop("worker-A"));
+    let w2 = tokio::spawn(worker_loop("worker-B"));
+    let w3 = tokio::spawn(worker_loop("worker-C"));
+    let _ = tokio::join!(w1, w2, w3);
+    println!("[{}] worker ทั้งหมดหยุดทำงานแล้ว", ts());
+}
+```
+
+ผลลัพธ์จริงจากการรัน (ในโปรแกรมเดียว จำลอง worker 3 ตัวด้วย `tokio::spawn` — ในระบบจริงจะเป็น 3 process/container แยกกันเลยก็ได้ ผลลัพธ์เชิง Redis จะเหมือนกัน เพราะ `BRPOP` ไม่รู้ด้วยซ้ำว่า client ที่มาขอเป็น task หรือ process):
+
+```
+[02:14:10.325] enqueue ครบ 5 job แล้ว เริ่ม worker 3 ตัวพร้อมกัน
+[02:14:10.326] [worker-A] ได้รับ job booking_id=BK-MULTI-1
+[02:14:10.326] [worker-B] ได้รับ job booking_id=BK-MULTI-3
+[02:14:10.326] [worker-C] ได้รับ job booking_id=BK-MULTI-2
+[02:14:10.408] [worker-C] ได้รับ job booking_id=BK-MULTI-4
+[02:14:10.408] [worker-B] ได้รับ job booking_id=BK-MULTI-5
+[02:14:13.446] [worker-A] ไม่มีงานใหม่ -> หยุดทำงาน
+[02:14:13.546] [worker-C] ไม่มีงานใหม่ -> หยุดทำงาน
+[02:14:13.546] [worker-B] ไม่มีงานใหม่ -> หยุดทำงาน
+[02:14:13.547] worker ทั้งหมดหยุดทำงานแล้ว
+```
+
+ตรวจสอบผลลัพธ์ให้ดี: booking_id ที่ปรากฏคือ `BK-MULTI-1` ถึง `BK-MULTI-5` **ครบทั้ง 5 รายการ และปรากฏแค่ครั้งเดียวต่อรายการ** ไม่มีตัวไหนซ้ำ และไม่มีตัวไหนหายไป แม้จะมี worker ถึง 3 ตัวพยายามดึงพร้อมกันตลอดเวลาก็ตาม (`worker-A` ได้ไปแค่ 1 งาน เพราะช้ากว่าเล็กน้อยตอนรอบสอง ส่วน `worker-C` กับ `worker-B` ได้ไปคนละ 2 งาน) นี่คือเหตุผลที่การ scale จำนวน worker ในระบบที่ใช้ Redis list เป็น queue ทำได้ง่ายมาก — แค่รัน binary worker เพิ่มอีก instance โดยไม่ต้องเปลี่ยนโค้ดหรือประสานงานกันเองระหว่าง worker เลย ปล่อยให้ Redis เป็นผู้จัดสรรงานให้เอง
+
+### 84.14 Graceful Shutdown ของ Worker
+
+จาก **Part 48 และ Part 50** เราเรียนมาแล้วว่าการยกเลิก task ด้วย `.abort()` หรือปล่อยให้ `select!`/`timeout` ตัด future ทิ้งกลางคันจะทริกเกอร์ `Drop` ของค่าที่ค้างอยู่ทันที — สำหรับ worker ที่กำลังประมวลผล job อยู่ (เช่น กำลังเรียก email provider ที่ใช้เวลาหลายร้อย ms) การถูก kill กลางคันแบบนี้เป็นปัญหา: ถ้า worker process ถูก orchestrator สั่ง `SIGTERM` ระหว่างที่กำลังเรียก email provider อยู่พอดี อาจทำให้ไม่รู้ผลลัพธ์ที่แน่ชัดว่าอีเมลถูกส่งไปแล้วหรือยัง (เข้า scenario เดียวกับหัวข้อ 84.11 เรื่อง idempotency)
+
+แนวทางที่ดีกว่าคือ **graceful shutdown**: เมื่อได้รับสัญญาณ shutdown ให้ worker **ปล่อยให้ job ที่กำลังทำอยู่ทำจนจบก่อน** แล้วค่อยหยุดรับ job ใหม่ — ไม่ตัดจบงานที่ทำอยู่กลางคัน สาธิตด้วย `tokio::select!` ระหว่าง `BRPOP` กับสัญญาณ shutdown ที่ส่งผ่าน channel (ในระบบจริงจะรับสัญญาณจาก `tokio::signal::ctrl_c()` หรือ `SIGTERM` handler แทน):
+
+```rust
+use tokio::sync::mpsc;
+
+// สาธิต graceful shutdown: เมื่อได้รับสัญญาณ shutdown (จำลองแทน SIGTERM จริง)
+// worker จะไม่ตัดจบ job ที่กำลังประมวลผลอยู่ทันที แต่จะรอให้ job นั้นจบก่อน
+// แล้วค่อยไม่รับ job ใหม่เพิ่ม -- ต่างจากการ .abort() task ทิ้งกลางคัน (Part 48/50)
+async fn worker_loop(mut shutdown_rx: mpsc::Receiver<()>) {
+    let mut conn = get_conn().await;
+    let mut shutting_down = false;
+    loop {
+        if shutting_down {
+            println!("[{}] [worker] กำลัง shutdown -> ไม่รับ job ใหม่อีก", ts());
+            break;
+        }
+        tokio::select! {
+            result = conn.brpop::<_, Option<(String, String)>>(QUEUE_KEY, 5.0) => {
+                match result.expect("BRPOP failed") {
+                    Some((_key, raw)) => {
+                        let job: EnqueuedJob = serde_json::from_str(&raw).unwrap();
+                        println!(
+                            "[{}] [worker] กำลังประมวลผล job booking_id={} (ห้ามตัดจบตรงนี้)",
+                            ts(), job.payload.booking_id
+                        );
+                        call_email_provider(false, 400).await.unwrap();
+                        println!("[{}] [worker] ประมวลผล job booking_id={} เสร็จสมบูรณ์", ts(), job.payload.booking_id);
+                    }
+                    None => println!("[{}] [worker] ไม่มีงานใหม่ภายใน timeout", ts()),
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                println!("[{}] [worker] ได้รับสัญญาณ shutdown ระหว่างรอ job ใหม่ -> ออกทันที", ts());
+                shutting_down = true;
+            }
+        }
+    }
+    println!("[{}] [worker] ปิดตัวแบบ graceful เรียบร้อย", ts());
+}
+```
+
+จุดสำคัญของโค้ดนี้คือ `shutdown_rx.recv()` อยู่ใน branch เดียวกันของ `select!` ที่แข่งกับ `BRPOP` เท่านั้น — **ไม่ได้แข่งกับ `call_email_provider(...)` ที่อยู่ข้างในของแต่ละ branch** ดังนั้นถ้าสัญญาณ shutdown มาถึงระหว่างที่ job กำลังประมวลผลอยู่ (อยู่ตรงกลางของการเรียก `call_email_provider`) สัญญาณนั้นจะ**ไม่มีทางตัด task ปัจจุบันทิ้ง** แต่จะถูกรับไว้ในลูปถัดไปหลังจาก job ปัจจุบันเสร็จสมบูรณ์แล้วเท่านั้น ทดสอบโดยส่งสัญญาณ shutdown ระหว่างที่ job กำลัง sleep 400ms อยู่พอดี (ที่ 150ms หลังเริ่ม):
+
+```rust
+#[tokio::main]
+async fn main() {
+    // enqueue 1 job เข้าคิว (ละไว้ในที่นี้ เหมือนหัวข้อ 84.6)
+    let (tx, rx) = mpsc::channel(1);
+    let worker = tokio::spawn(worker_loop(rx));
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    println!("[{}] main: ส่งสัญญาณ shutdown (จำลอง SIGTERM)", ts());
+    let _ = tx.send(()).await;
+
+    let _ = worker.await;
+    println!("[{}] main: worker จบการทำงานแล้ว", ts());
+}
+```
+
+ผลลัพธ์จริงจากการรัน:
+
+```
+[02:14:56.230] enqueue job booking_id=BK-SHUTDOWN-1 แล้ว
+[02:14:56.231] [worker] กำลังประมวลผล job booking_id=BK-SHUTDOWN-1 (ห้ามตัดจบตรงนี้)
+[02:14:56.382] main: ส่งสัญญาณ shutdown (จำลอง SIGTERM)
+[02:14:56.632] [worker] ประมวลผล job booking_id=BK-SHUTDOWN-1 เสร็จสมบูรณ์
+[02:14:56.633] [worker] ได้รับสัญญาณ shutdown ระหว่างรอ job ใหม่ -> ออกทันที
+[02:14:56.633] [worker] กำลัง shutdown -> ไม่รับ job ใหม่อีก
+[02:14:56.633] [worker] ปิดตัวแบบ graceful เรียบร้อย
+[02:14:56.633] main: worker จบการทำงานแล้ว
+```
+
+ดู timestamp ให้ชัด: สัญญาณ shutdown ถูกส่งที่ `56.382` **ระหว่างที่ job กำลังประมวลผลอยู่** (เริ่มที่ `56.231` และจะจบที่ประมาณ `56.631` เพราะ sleep 400ms) และ job นั้นก็ทำงานจนจบสมบูรณ์จริงที่ `56.632` — **หลัง**จากสัญญาณ shutdown มาถึงแล้ว พิสูจน์ว่า in-flight job ไม่ได้ถูกตัดทิ้งกลางคัน หลังจากนั้น worker จึงตรวจพบสัญญาณ shutdown ที่รอค้างอยู่ในลูปถัดไปทันที (`56.633`) แล้วปิดตัวแบบ graceful โดยไม่ไปแย่ง job ใหม่จากคิวอีก — combo ของ `select!` + flag `shutting_down` แบบนี้เป็นรูปแบบมาตรฐานสำหรับเขียน worker ที่ปิดตัวอย่างปลอดภัยเมื่อ deploy ใหม่หรือ scale down
+
+### 84.15 Observability: ผูก Tracing Span เข้ากับแต่ละ Job
+
+Worker ที่รันอยู่ตลอดเวลาและประมวลผล job หลายพันใบต่อวันจะมี log พันกันยุ่งเหยิงมากถ้าแค่ `println!` เฉย ๆ โดยไม่มีการแท็กว่าบรรทัดไหนเป็นของ job ใบไหน เมื่อลูกค้าร้องเรียนว่า "booking BK-12345 ไม่ได้รับอีเมล" ทีม support ต้องหา log ทั้งหมดที่เกี่ยวกับ job นั้นท่ามกลาง log นับหมื่นบรรทัดต่อวัน จาก **Part 60 (Logging และ Tracing พื้นฐาน)** เราเรียนมาแล้วว่า `tracing` ให้แนวคิด **span** ที่ครอบช่วงเวลาการทำงานหนึ่ง ๆ พร้อม field ที่ติดไปกับทุก event ที่เกิดขึ้น "ภายใน" span นั้นโดยอัตโนมัติ ทำให้ log ทุกบรรทัดของ job หนึ่งใบมี `job_id`/`booking_id` ติดตัวเสมอโดยไม่ต้องพิมพ์ id ซ้ำเองทุกที่ที่เรียก `info!`/`error!`:
+
+```rust
+use tracing::{error, info, info_span, Instrument};
+
+// สาธิตการผูก tracing span ต่อ job แต่ละใบ เพื่อให้ log ทุกบรรทัดที่เกิดขึ้นระหว่าง
+// ประมวลผล job หนึ่ง ๆ ถูก "แท็ก" ด้วย job_id/booking_id เดียวกันเสมอ
+async fn process_job_with_tracing(job: EnqueuedJob) {
+    let span = info_span!("process_job", job_id = %job.id, booking_id = %job.payload.booking_id);
+    async {
+        info!("เริ่มประมวลผล job");
+        match call_email_provider(false, 200).await {
+            Ok(()) => info!("ส่งอีเมลสำเร็จ"),
+            Err(e) => error!(error = %e, "ส่งอีเมลล้มเหลว"),
+        }
+        info!("จบการประมวลผล job");
+    }
+    .instrument(span)
+    .await;
+}
+```
+
+`info_span!` สร้าง span พร้อม field สองตัว (`job_id`, `booking_id` — `%` หมายถึงใช้ `Display` ของค่านั้นแทน `Debug`) จากนั้น `.instrument(span)` ครอบ future ของ block `async { ... }` ทั้งก้อนไว้ ทำให้ทุก `info!`/`error!` ที่เรียกข้างในนั้น (ไม่ว่าจะอยู่กี่ชั้นของฟังก์ชันที่เรียกต่อกันไปก็ตาม ตราบใดที่ยังอยู่ใน call stack ของ future นี้) ถูกแนบด้วย field ของ span นี้โดยอัตโนมัติ ตั้งค่า subscriber ด้วย `tracing_subscriber::fmt()` แล้วรันจริง (ผ่าน environment variable `RUST_LOG=info`) ได้ผลลัพธ์:
+
+```
+ INFO enqueue job สำเร็จ
+ INFO process_job{job_id=ef742710-4b56-4232-af18-951a3d72aa62 booking_id=BK-TRACE-1}: เริ่มประมวลผล job
+ INFO process_job{job_id=ef742710-4b56-4232-af18-951a3d72aa62 booking_id=BK-TRACE-1}: ส่งอีเมลสำเร็จ
+ INFO process_job{job_id=ef742710-4b56-4232-af18-951a3d72aa62 booking_id=BK-TRACE-1}: จบการประมวลผล job
+```
+
+สังเกตว่าบรรทัดแรก ("enqueue job สำเร็จ") ไม่มี `process_job{...}` นำหน้า เพราะเกิดขึ้น**ก่อน**ที่จะเข้า span (ตอน enqueue ยังไม่มี job ให้ผูก) ส่วนสามบรรทัดถัดมาทั้งหมดมี `job_id` และ `booking_id` เดียวกันติดอยู่โดยอัตโนมัติ ถ้าใช้ log aggregator จริง (เช่น Loki, Elasticsearch, CloudWatch Logs Insights) ที่ parse field แบบ structured ได้ ทีม support สามารถ filter ด้วย `booking_id="BK-12345"` แล้วเห็น log ทุกบรรทัดของ job นั้นเรียงตามลำดับเวลาได้ทันที ไม่ต้องมานั่งไล่ grep ข้อความอิสระ — ยิ่งมีประโยชน์มากขึ้นเมื่อรวมกับ retry (หัวข้อ 84.9) เพราะจะเห็นทุกครั้งที่ retry ของ job เดียวกันอยู่ใน context เดียวกันหมด แม้จะเกิดคนละเวลากันหลายนาทีก็ตาม
+
+### 84.16 Capstone: ระบบ Booking-Confirmation-Email แบบ End-to-End
+
+ตอนนี้รวมทุกส่วนเข้าด้วยกันเป็นระบบเดียว: handler ที่ enqueue job, worker ที่ retry พร้อม backoff และเช็ค idempotency, และ scheduled cleanup job — ทั้งหมดรันพร้อมกันจริงในโปรแกรมเดียว (จำลองการแยก process ด้วย `tokio::spawn` หลาย task เพื่อให้สาธิตในบทเดียวได้ ในระบบจริงส่วน handler กับ worker ควรเป็น binary/deployment แยกกันตามที่อธิบายไว้ในหัวข้อ 84.7):
 
 ```rust
 use redis::AsyncCommands;
@@ -730,7 +1053,7 @@ async fn run_worker() {
             ts(), job.id, job.payload.booking_id
         );
 
-        // เช็ค idempotency ก่อนส่งอีเมลทุกครั้ง (หัวข้อ 84.9)
+        // เช็ค idempotency ก่อนส่งอีเมลทุกครั้ง (หัวข้อ 84.11)
         let idem_key = format!("email_sent:{}", job.payload.booking_id);
         let acquired: bool = redis::cmd("SET")
             .arg(&idem_key).arg("1").arg("NX")
@@ -744,7 +1067,7 @@ async fn run_worker() {
             continue;
         }
 
-        // retry พร้อม exponential backoff (หัวข้อ 84.7-84.8)
+        // retry พร้อม exponential backoff (หัวข้อ 84.9-84.10)
         let mut attempt = 0u32;
         loop {
             attempt += 1;
@@ -858,7 +1181,7 @@ Job queue ที่ backed ด้วย Redis list เก็บ job เป็น
 Err(Error("missing field `email`", line: 1, column: 90))
 ```
 
-นี่ไม่ใช่ compiler error แต่เป็น runtime error จาก `serde_json::from_str` ที่พังตอน deserialize เพราะ JSON เก่าไม่มี field `email` ที่ struct เวอร์ชันใหม่ต้องการ วิธีป้องกัน: (1) เพิ่ม field ใหม่เป็น `Option<T>` พร้อม `#[serde(default)]` เสมอเมื่อจะแก้ schema ของ job ที่อาจมีของเก่าค้างอยู่ในคิว ไม่ใช่เพิ่มเป็น field บังคับตรง ๆ, (2) ทำ "drain queue ก่อน deploy" เป็นขั้นตอนมาตรฐานสำหรับ breaking change (ปล่อยให้ worker เคลียร์คิวจนหมดก่อนแล้วค่อย deploy โค้ดใหม่), หรือ (3) จับ error การ deserialize แล้วย้าย job ที่ deserialize ไม่ผ่านไปเข้า dead-letter list ทันที (เหมือนหัวข้อ 84.8) แทนที่จะให้ worker panic และตายไปทั้ง process
+นี่ไม่ใช่ compiler error แต่เป็น runtime error จาก `serde_json::from_str` ที่พังตอน deserialize เพราะ JSON เก่าไม่มี field `email` ที่ struct เวอร์ชันใหม่ต้องการ วิธีป้องกัน: (1) เพิ่ม field ใหม่เป็น `Option<T>` พร้อม `#[serde(default)]` เสมอเมื่อจะแก้ schema ของ job ที่อาจมีของเก่าค้างอยู่ในคิว ไม่ใช่เพิ่มเป็น field บังคับตรง ๆ, (2) ทำ "drain queue ก่อน deploy" เป็นขั้นตอนมาตรฐานสำหรับ breaking change (ปล่อยให้ worker เคลียร์คิวจนหมดก่อนแล้วค่อย deploy โค้ดใหม่), หรือ (3) จับ error การ deserialize แล้วย้าย job ที่ deserialize ไม่ผ่านไปเข้า dead-letter list ทันที (เหมือนหัวข้อ 84.10) แทนที่จะให้ worker panic และตายไปทั้ง process
 
 **3. Worker เชื่อมต่อ Redis คนละ endpoint กับ handler (หรือ Redis ยังไม่ขึ้น)**
 
@@ -878,15 +1201,19 @@ Err(Error("missing field `email`", line: 1, column: 90))
 
 ถ้าลืมเช็ค `attempt >= max_attempts` ก่อน retry loop จะวนไม่มีที่สิ้นสุดสำหรับ job ที่ล้มเหลวถาวร (เช่น อีเมลผิดฟอร์แมต) ทำให้ worker ติดอยู่กับ job นั้นตลอดไปและ job อื่นในคิวไม่ได้ถูกประมวลผล อีกกรณีที่พบบ่อยคือคำนวณ backoff ผิด เช่น เขียน `base_ms * attempt` (linear) ทั้งที่ตั้งใจจะทำ exponential (`base_ms * 2u64.pow(attempt - 1)`) ทำให้ backoff โตช้าเกินไปเมื่อ provider มีปัญหาต่อเนื่องยาวนาน หรือลืม cap ค่าสูงสุดของ backoff (เช่น "ไม่ควรรอเกิน 5 นาทีต่อครั้งไม่ว่า attempt จะเยอะแค่ไหน") จนกรณี `attempt` สูงมาก ๆ ทำให้ `2u64.pow(attempt - 1)` overflow หรือรอนานเกินสมควร ควรเขียนแบบมี cap เสมอ เช่น `let backoff_ms = (base_ms * 2u64.pow(attempt.min(10) - 1)).min(300_000);`
 
+**6. ใช้ `apalis`/`apalis-redis` แล้ว worker มองไม่เห็น job ที่ enqueue ไว้เลย เพราะ namespace ไม่ตรงกัน**
+
+ตามที่พิสูจน์ไว้จริงในหัวข้อ 84.5: `RedisStorage::new(conn)` ของ `apalis-redis` กำหนด namespace ให้อัตโนมัติจาก `std::any::type_name::<T>()` ซึ่งรวม module path ของ crate ที่ compile เข้ามาด้วย ถ้า struct job ประเภทเดียวกันถูกนิยามอยู่ใน binary crate คนละตัวระหว่างฝั่ง enqueue กับฝั่ง worker (ซึ่งเป็นรูปแบบปกติของการแยก handler/worker ตามที่บทนี้สอน) namespace ที่ได้จะไม่ตรงกัน worker จะไม่มีทาง `BRPOP`-เทียบเท่าเจอ job ที่ enqueue ไว้เลย โดยไม่มี error หรือ warning ใด ๆ แจ้งเตือน (ไม่ compile error เพราะโค้ดถูกต้องตาม type ทุกอย่าง เป็นแค่ runtime behavior ที่ไม่ตรงกับที่คาดไว้) วิธีแก้คือกำหนด `Config::default().set_namespace("ชื่อคงที่")` ให้เหมือนกันทุกฝั่งเสมอ อย่าพึ่ง default ที่มาจาก type name โดยเด็ดขาดเมื่อ enqueue กับ worker อยู่ใน binary คนละตัว — บทเรียนทั่วไปจากกรณีนี้คือ **framework ที่ให้ default อัตโนมัติอย่างชาญฉลาดเกินไป บางครั้งซ่อนพฤติกรรมที่ตรวจสอบยากไว้** ซึ่งเป็นเหตุผลหนึ่งที่บทนี้เลือกสอนด้วย Redis primitive ตรง ๆ ที่ชื่อ key ต้องระบุเองชัดเจนทุกครั้งเป็นแนวทางหลัก
+
 ## แบบฝึกหัด (Exercises)
 
-1. **(ง่าย)** แก้ไขตัวอย่าง `worker.rs` ในหัวข้อ 84.6 ให้วนลูป `BRPOP` ไม่มีที่สิ้นสุด (ลบเงื่อนไข timeout ออก ใช้ `brpop` กับ timeout เป็น `0.0` ซึ่งหมายถึง "รอตลอดไป" ตาม semantic ของ Redis) แล้วเพิ่ม `println!` นับจำนวน job ที่ประมวลผลสำเร็จสะสมตั้งแต่ worker เริ่มทำงาน — hint: เก็บตัวแปร `let mut processed_count = 0u64;` ไว้นอกลูป แล้วเพิ่มค่าทุกครั้งที่ประมวลผลสำเร็จ
+1. **(ง่าย)** แก้ไขตัวอย่าง `worker.rs` ในหัวข้อ 84.7 ให้วนลูป `BRPOP` ไม่มีที่สิ้นสุด (ลบเงื่อนไข timeout ออก ใช้ `brpop` กับ timeout เป็น `0.0` ซึ่งหมายถึง "รอตลอดไป" ตาม semantic ของ Redis) แล้วเพิ่ม `println!` นับจำนวน job ที่ประมวลผลสำเร็จสะสมตั้งแต่ worker เริ่มทำงาน — hint: เก็บตัวแปร `let mut processed_count = 0u64;` ไว้นอกลูป แล้วเพิ่มค่าทุกครั้งที่ประมวลผลสำเร็จ
 
-2. **(กลาง)** เพิ่ม field `last_error: Option<String>` และ `next_retry_at: Option<String>` เข้าไปใน struct `EnqueuedJob` แล้วแก้ worker ให้บันทึกค่าเหล่านี้ (ผ่าน `serde_json::to_string` แล้ว `LPUSH` กลับเข้า queue เป็น job ตัวใหม่ที่มี `attempts` เพิ่มขึ้น 1) แทนการ retry แบบ in-process loop เหมือนหัวข้อ 84.7 — วิธีนี้ทำให้ worker หยิบ job อื่นไปทำระหว่างที่ job นี้รอ backoff ได้ hint: ต้องมีอีก process/task ที่คอยเช็คว่า job ที่ `LPUSH` กลับมาถึงเวลา `next_retry_at` แล้วหรือยัง ก่อนจะให้ worker ตัวใดหยิบไปประมวลผลจริง (หรือจะทำง่าย ๆ ก่อนคือ worker เช็คเองตอนหยิบ job มาว่ายังไม่ถึงเวลาก็ `LPUSH` กลับเข้าไปท้ายคิวเฉย ๆ แล้ว `continue` ก็ได้)
+2. **(กลาง)** เพิ่ม field `last_error: Option<String>` และ `next_retry_at: Option<String>` เข้าไปใน struct `EnqueuedJob` แล้วแก้ worker ให้บันทึกค่าเหล่านี้ (ผ่าน `serde_json::to_string` แล้ว `LPUSH` กลับเข้า queue เป็น job ตัวใหม่ที่มี `attempts` เพิ่มขึ้น 1) แทนการ retry แบบ in-process loop เหมือนหัวข้อ 84.9 — วิธีนี้ทำให้ worker หยิบ job อื่นไปทำระหว่างที่ job นี้รอ backoff ได้ hint: ต้องมีอีก process/task ที่คอยเช็คว่า job ที่ `LPUSH` กลับมาถึงเวลา `next_retry_at` แล้วหรือยัง ก่อนจะให้ worker ตัวใดหยิบไปประมวลผลจริง (หรือจะทำง่าย ๆ ก่อนคือ worker เช็คเองตอนหยิบ job มาว่ายังไม่ถึงเวลาก็ `LPUSH` กลับเข้าไปท้ายคิวเฉย ๆ แล้ว `continue` ก็ได้)
 
-3. **(ยาก)** เขียน integration test (อ้างอิงแนวทางจาก Part 33) ที่ยืนยันว่าระบบ idempotency ในหัวข้อ 84.9 ทำงานถูกต้องจริง: spawn worker เป็น `tokio::spawn`, enqueue job เดียวกัน (`booking_id` เดิม) สองครั้งติดกันเข้า queue, รอให้ worker ประมวลผลทั้งสอง job เสร็จ, แล้ว assert ว่า counter ที่จำลอง "จำนวนครั้งที่เรียก email provider จริง" (ใช้ `Arc<AtomicU64>` แบบที่เรียนจาก Part 51) มีค่าเท่ากับ 1 ไม่ใช่ 2 — hint: ต้อง `.await` ให้ worker มีเวลาประมวลผลทั้งสอง job ก่อน assert (เช่นด้วย `tokio::time::sleep` สั้น ๆ หรือ poll ค่า counter จนกว่าจะนิ่ง) และต้อง `redis-cli DEL email_sent:<booking_id>` ก่อนเริ่ม test ทุกครั้งเพื่อไม่ให้ state จาก test รอบก่อนรั่วไหลมา
+3. **(ยาก)** เขียน integration test (อ้างอิงแนวทางจาก Part 33) ที่ยืนยันว่าระบบ idempotency ในหัวข้อ 84.11 ทำงานถูกต้องจริง: spawn worker เป็น `tokio::spawn`, enqueue job เดียวกัน (`booking_id` เดิม) สองครั้งติดกันเข้า queue, รอให้ worker ประมวลผลทั้งสอง job เสร็จ, แล้ว assert ว่า counter ที่จำลอง "จำนวนครั้งที่เรียก email provider จริง" (ใช้ `Arc<AtomicU64>` แบบที่เรียนจาก Part 51) มีค่าเท่ากับ 1 ไม่ใช่ 2 — hint: ต้อง `.await` ให้ worker มีเวลาประมวลผลทั้งสอง job ก่อน assert (เช่นด้วย `tokio::time::sleep` สั้น ๆ หรือ poll ค่า counter จนกว่าจะนิ่ง) และต้อง `redis-cli DEL email_sent:<booking_id>` ก่อนเริ่ม test ทุกครั้งเพื่อไม่ให้ state จาก test รอบก่อนรั่วไหลมา
 
-4. **(ยาก/ประยุกต์)** ขยาย capstone ในหัวข้อ 84.11 ให้ dead-letter job (จากหัวข้อ 84.8) ถูกนำกลับมา retry ใหม่โดยอัตโนมัติได้ผ่าน scheduled job อีกตัว: เขียน cron job ที่รันทุก 1 นาที (ในตัวอย่างสาธิตใช้ทุก 5 วินาทีเพื่อดูผลเร็ว) คอยเช็ค `jobs:booking_confirmation:failed`, ถ้ามี entry ที่ `failed_at` เก่ากว่า threshold ที่กำหนด (เช่น 10 วินาทีในตัวอย่างสาธิต) ให้ deserialize กลับเป็น `EnqueuedJob`, reset `attempts` เป็น 0, แล้ว `LPUSH` กลับเข้า `jobs:booking_confirmation` อีกครั้ง พร้อมลบ entry นั้นออกจาก dead-letter list ด้วย `LREM` — hint: ต้องระวังไม่ให้ retry job เดิมซ้ำไม่มีที่สิ้นสุดถ้า provider ยังล่มอยู่ ควรมี field เพิ่ม เช่น `dlq_retry_count` เพื่อจำกัดจำนวนครั้งที่จะดึงจาก dead-letter กลับมา retry อัตโนมัติ ก่อนต้องให้คนตรวจสอบด้วยมือจริง ๆ
+4. **(ยาก/ประยุกต์)** ขยาย capstone ในหัวข้อ 84.16 ให้ dead-letter job (จากหัวข้อ 84.10) ถูกนำกลับมา retry ใหม่โดยอัตโนมัติได้ผ่าน scheduled job อีกตัว: เขียน cron job ที่รันทุก 1 นาที (ในตัวอย่างสาธิตใช้ทุก 5 วินาทีเพื่อดูผลเร็ว) คอยเช็ค `jobs:booking_confirmation:failed`, ถ้ามี entry ที่ `failed_at` เก่ากว่า threshold ที่กำหนด (เช่น 10 วินาทีในตัวอย่างสาธิต) ให้ deserialize กลับเป็น `EnqueuedJob`, reset `attempts` เป็น 0, แล้ว `LPUSH` กลับเข้า `jobs:booking_confirmation` อีกครั้ง พร้อมลบ entry นั้นออกจาก dead-letter list ด้วย `LREM` — hint: ต้องระวังไม่ให้ retry job เดิมซ้ำไม่มีที่สิ้นสุดถ้า provider ยังล่มอยู่ ควรมี field เพิ่ม เช่น `dlq_retry_count` เพื่อจำกัดจำนวนครั้งที่จะดึงจาก dead-letter กลับมา retry อัตโนมัติ ก่อนต้องให้คนตรวจสอบด้วยมือจริง ๆ
 
 ## สรุป
 

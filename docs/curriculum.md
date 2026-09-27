@@ -110,9 +110,9 @@
 | 78 | RESTful API Design Best Practices | ✅ |
 | 79 | GraphQL ด้วย async-graphql | ✅ |
 | 80 | gRPC ด้วย Tonic | ✅ |
-| 81 | Microservices Architecture ด้วย Rust | ⏳ |
-| 82 | Message Queues: RabbitMQ/Kafka Integration | ⏳ |
-| 83 | Caching ด้วย Redis | ⏳ |
+| 81 | Microservices Architecture ด้วย Rust | ✅ |
+| 82 | Message Queues: RabbitMQ/Kafka Integration | ✅ |
+| 83 | Caching ด้วย Redis | ✅ |
 | 84 | Background Jobs และ Task Queues | ✅ |
 | 85 | API Documentation ด้วย OpenAPI/Swagger (utoipa) | ✅ |
 

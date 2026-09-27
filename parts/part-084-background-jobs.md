@@ -87,7 +87,54 @@ async fn main() {
 ปัญหานี้มีสองมุม:
 
 1. **Latency ที่ผู้ใช้ไม่ควรต้องรับผล**: การจองตั๋วสำเร็จแล้วจริง ๆ ตั้งแต่ DB commit เสร็จ (~6ms) ส่วนที่เหลือ (~1200ms) คือการรออีเมลที่ไม่ได้เปลี่ยนผลลัพธ์ของการจองเลย
-2. **Failure domain ที่ผสานกันโดยไม่จำเป็น**: ถ้า email provider ล่มหรือ timeout (ลองเปลี่ยน `should_fail` เป็น `true` แล้วจะเห็นว่าโปรแกรมพิมพ์ "ส่งอีเมลล้มเหลว" แต่ยังตอบ 201 ต่อไปได้เพราะเราไม่ได้ `?` ค่า error — แต่ถ้าโค้ดจริงเขียนแบบ `call_email_provider(...).await?` ใน handler ที่คืน `Result<StatusCode, AppError>` ตามที่ Part 66 สอนไว้ การจองที่**สำเร็จแล้วจริงในฐานข้อมูล**จะถูกตอบเป็น error กลับไปให้ลูกค้า หรือแย่กว่านั้นคือ request timeout ทั้งที่การจองสำเร็จไปแล้ว)
+2. **Failure domain ที่ผสานกันโดยไม่จำเป็น**: ถ้า email provider ล่มหรือ timeout การจองที่**สำเร็จแล้วจริงในฐานข้อมูล**อาจถูกตอบเป็น error กลับไปให้ลูกค้าอย่างผิด ๆ
+
+มุมที่สองนี้สำคัญพอที่จะต้องพิสูจน์ให้เห็นด้วยโค้ดจริง เพราะเป็นบั๊กเชิง logic ที่แฝงตัวมาได้ง่ายมาก ลองเขียน handler สไตล์ที่ Part 66 สอนไว้ — คืน `Result<T, AppError>` แล้วใช้ `?` กับทุก step รวมถึงการส่งอีเมลด้วย (ซึ่งเป็นวิธีเขียนที่ "ดูปกติ" มากในสายตาคนเขียน Rust เพราะ `?` คือ idiom มาตรฐานสำหรับ propagate error):
+
+```rust
+#[derive(Debug)]
+struct AppError(String);
+
+impl From<String> for AppError {
+    fn from(s: String) -> Self {
+        AppError(s)
+    }
+}
+
+async fn create_booking_handler(email_provider_is_down: bool) -> Result<&'static str, AppError> {
+    println!("[{}] client ส่ง POST /bookings เข้ามา", ts());
+
+    // 1) บันทึก booking ลงฐานข้อมูล -- สำเร็จเสมอในตัวอย่างนี้
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    println!("[{}] บันทึก booking ลง DB สำเร็จ (COMMIT แล้ว ย้อนกลับไม่ได้)", ts());
+
+    // 2) ส่งอีเมลยืนยัน "แบบ synchronous" ด้วย ? เหมือน error อื่น ๆ ทั้งหมดใน handler นี้
+    println!("[{}] เรียก email provider (synchronous, ใช้ ? เหมือน error อื่น ๆ)...", ts());
+    call_email_provider(email_provider_is_down, 300).await?;
+    println!("[{}] ส่งอีเมลสำเร็จ", ts());
+
+    Ok("201 Created")
+}
+```
+
+รันจริงทั้งสองกรณี (provider ปกติ vs provider ล่ม) ได้ผลลัพธ์:
+
+```
+=== กรณีที่ 1: email provider ทำงานปกติ ===
+[02:24:11.356] client ส่ง POST /bookings เข้ามา
+[02:24:11.362] บันทึก booking ลง DB สำเร็จ (COMMIT แล้ว ย้อนกลับไม่ได้)
+[02:24:11.362] เรียก email provider (synchronous, ใช้ ? เหมือน error อื่น ๆ)...
+[02:24:11.663] ส่งอีเมลสำเร็จ
+[02:24:11.663] ตอบกลับ client: 201 Created
+
+=== กรณีที่ 2: email provider ล่ม (แต่ booking ถูกบันทึกลง DB ไปแล้วจริง!) ===
+[02:24:11.663] client ส่ง POST /bookings เข้ามา
+[02:24:11.669] บันทึก booking ลง DB สำเร็จ (COMMIT แล้ว ย้อนกลับไม่ได้)
+[02:24:11.670] เรียก email provider (synchronous, ใช้ ? เหมือน error อื่น ๆ)...
+[02:24:11.970] ตอบกลับ client: 500 Internal Server Error (AppError("email provider timeout: connection reset after 30s")) <-- ลูกค้าคิดว่าจองไม่สำเร็จ แต่จริง ๆ สำเร็จแล้ว!
+```
+
+ดูกรณีที่ 2 ให้ชัด: `บันทึก booking ลง DB สำเร็จ (COMMIT แล้ว ย้อนกลับไม่ได้)` ถูกพิมพ์ออกมาจริง — แปลว่าที่ `02:24:11.669` การจองตั๋วใบนี้**สำเร็จสมบูรณ์แล้วในฐานข้อมูล** ไม่มีทาง rollback ได้อีก (สมมติว่าไม่ได้ทำทั้งสอง step ในธุรกรรมเดียวกัน ซึ่งก็ไม่ควรทำอยู่แล้วเพราะการส่งอีเมลไม่ใช่ database operation) แต่เพราะ `?` ที่ตัวถัดมาทำให้ error จาก `call_email_provider` กลาย เป็น error ของทั้ง handler ไปด้วย ผลคือ client จะได้รับ **`500 Internal Server Error`** กลับไป ทั้งที่การจองของเขาสำเร็จแล้วจริง ๆ — ลูกค้าเห็น error บนหน้าจอ อาจกดจองใหม่อีกรอบ (ทำให้เกิด booking ซ้ำ) หรือโทรมาต่อว่าทีม support ทั้งที่ระบบทำงานถูกต้องทุกอย่างในแง่ข้อมูล นี่คือสิ่งที่เกิดขึ้นจริงได้ง่ายถ้าไม่ระวังเรื่องนี้ตั้งแต่การออกแบบ ไม่ใช่ปัญหาทางทฤษฎีลอย ๆ เลย
 
 นี่คือประเด็นสำคัญที่สุดของบทนี้: **งานที่ไม่ใช่ส่วนสำคัญของ transaction หลัก (ส่งอีเมล, สร้าง PDF ใบเสร็จ, sync ข้อมูลไปยัง analytics, resize รูปภาพ) ไม่ควรอยู่ใน critical path ของ request** ทั้งในมุม latency และในมุม failure isolation คำตอบคือต้อง **defer** งานเหล่านี้ให้ไปทำงาน "เบื้องหลัง" (background) แทน
 
@@ -176,6 +223,15 @@ async fn main() {
 1. **โปร่งใสสมบูรณ์**: `LPUSH`/`BRPOP` เป็น primitive ของ Redis ที่เข้าใจง่ายมาก — `LPUSH` ดันค่าเข้าหัว list, `BRPOP` ดึงค่าจากท้าย list แบบบล็อกรอถ้า list ว่าง (First-In-First-Out พอดี) ไม่มี abstraction ซ่อนอยู่ ทำให้เห็นตรง ๆ ว่า "job queue" ที่จริงแล้วก็คือ data structure ง่าย ๆ ตัวหนึ่งที่ครอบด้วย logic การ retry/tracking ที่เราเขียนเอง ซึ่งเหมาะกับเป้าหมายการสอนของบทนี้มากกว่าอาศัย framework ที่ซ่อน mechanism ไว้
 2. **ต่อยอดจาก Part 83 ได้ทันที**: ถ้าระบบมี Redis อยู่แล้วสำหรับ caching (Part 83) ก็ใช้ instance เดียวกันเป็น job queue ได้เลยโดยไม่ต้องเพิ่ม infrastructure ใหม่ (แต่ในระบบจริงที่มี load สูง ควรแยก Redis instance ของ cache กับ queue ออกจากกัน เพราะพฤติกรรมการใช้หน่วยความจำและ eviction policy ต่างกันมาก — cache ต้องการ eviction แบบ LRU ได้ ส่วน queue ห้าม evict ข้อมูลทิ้งเด็ดขาด)
 3. **ไม่ผูกกับ API ของ framework ที่เปลี่ยนเวอร์ชันบ่อย**: `LPUSH`/`BRPOP` เป็น command ของ Redis ที่คงที่มาหลายสิบปี ไม่มีความเสี่ยงเรื่อง breaking change ของ framework
+
+สรุปเป็นตารางเทียบทั้งสามแนวทางที่เกี่ยวข้องกับบทนี้และ Part 82 ให้เห็นภาพรวม:
+
+| แนวทาง | ใครดูแล retry/serialization | เหมาะกับ | ข้อเสีย |
+|---|---|---|---|
+| `tokio::spawn` (84.3) | ไม่มีเลย ต้องเขียนเองทั้งหมด (และมักไม่ทำ) | งาน fire-and-forget ที่หายได้ไม่เป็นไร | ไม่ persistent, ไม่มี retry, ไม่มี visibility |
+| Redis เอง (`LPUSH`/`BRPOP`, บทนี้ใช้เป็นหลัก) | เราเขียน logic เอง เห็นทุกจุดตรง ๆ | ต้องการความโปร่งใสสูง, ทีมขนาดเล็ก-กลาง, ต่อยอด Redis ที่มีอยู่แล้ว | ต้องเขียน retry/backoff/DLQ เองทุกอย่าง |
+| `apalis` (84.5) | Framework จัดการให้ผ่าน `Storage`/`WorkerBuilder` | โปรเจกต์ที่มี job หลายประเภท, ต้องการ middleware/metrics สำเร็จรูป | มี "มายากล" ซ่อนอยู่ (เช่น namespace อัตโนมัติ) ที่ต้องเข้าใจก่อนใช้ |
+| Message Queue เต็มรูปแบบ (Part 82) | Broker (Kafka/RabbitMQ/SQS) จัดการ delivery guarantee | สื่อสารข้ามหลาย service/ทีม | ซับซ้อนเกินความจำเป็นสำหรับงานภายในแอปเดียว |
 
 โครงสร้างพื้นฐานของ Redis-based queue ที่เราจะสร้าง:
 
@@ -745,7 +801,30 @@ async fn send_with_idempotency_check(conn: &mut redis::aio::MultiplexedConnectio
 
 สังเกตว่ารอบที่ 2 ไม่ได้เรียก `call_email_provider` เลย (ไม่มี latency 150ms เกิดขึ้น สังเกตจาก timestamp ที่ห่างกันแค่ ~0ms) — worker "ประมวลผล" job ซ้ำจริง แต่ **ผลข้างเคียงที่มองเห็นได้ (ลูกค้าได้รับอีเมล) เกิดขึ้นแค่ครั้งเดียว** ซึ่งคือเป้าหมายของ idempotency: ไม่ได้ห้ามการประมวลผลซ้ำ (บางครั้งห้ามไม่ได้จริง ๆ ในระบบแบบ distributed) แต่ทำให้ **ผลลัพธ์สุดท้ายเหมือนกับประมวลผลครั้งเดียว**
 
-ข้อสังเกตเชิงปฏิบัติสองข้อ: (1) ในตัวอย่างนี้ตั้งค่า key แบบไม่มี TTL (permanent) ซึ่งในระบบจริงมักตั้ง `EX` (expire) ไว้ด้วย เช่น 7 วัน เพื่อไม่ให้ Redis เก็บ key เหล่านี้ค้างอยู่ตลอดไปโดยไม่จำเป็น (booking ที่เก่ากว่านั้นไม่มีทางถูก retry ซ้ำอีกแล้ว) — คำสั่งจริงจะเป็น `SET key val NX EX 604800`, (2) ทางเลือกอื่นแทน Redis คือบันทึกสถานะ `email_sent_at: Option<DateTime<Utc>>` เป็นคอลัมน์ในตาราง `bookings` เองผ่าน SQLx (Part 70) แล้วใช้ `UPDATE bookings SET email_sent_at = now() WHERE id = $1 AND email_sent_at IS NULL` (ใช้ `WHERE ... IS NULL` เป็นตัวเช็ค-แล้ว-ตั้งค่าแบบ atomic เหมือนกับ `SET NX` ของ Redis) วิธีนี้เหมาะกับกรณีที่อยากให้สถานะนี้อยู่ในฐานข้อมูลหลักเพื่อ query ร่วมกับข้อมูล booking ได้ง่ายกว่า ขึ้นอยู่กับว่าระบบมี Redis อยู่แล้วหรือไม่และต้องการ query สถานะนี้รวมกับข้อมูลอื่นแค่ไหน
+ข้อสังเกตเชิงปฏิบัติสองข้อ: (1) ในตัวอย่างนี้ตั้งค่า key แบบไม่มี TTL (permanent) ซึ่งในระบบจริงมักตั้ง `EX` (expire) ไว้ด้วย เช่น 7 วัน เพื่อไม่ให้ Redis เก็บ key เหล่านี้ค้างอยู่ตลอดไปโดยไม่จำเป็น (booking ที่เก่ากว่านั้นไม่มีทางถูก retry ซ้ำอีกแล้ว) — คำสั่งจริงจะเป็น `SET key val NX EX 604800`, (2) ทางเลือกอื่นแทน Redis คือบันทึกสถานะ `email_sent_at: Option<DateTime<Utc>>` เป็นคอลัมน์ในตาราง `bookings` เองผ่าน SQLx (Part 70) วิธีนี้เหมาะกับกรณีที่อยากให้สถานะนี้อยู่ในฐานข้อมูลหลักเพื่อ query ร่วมกับข้อมูล booking ได้ง่ายกว่า ขึ้นอยู่กับว่าระบบมี Redis อยู่แล้วหรือไม่และต้องการ query สถานะนี้รวมกับข้อมูลอื่นแค่ไหน
+
+การเช็ค-แล้ว-ตั้งค่าแบบ atomic ด้วย SQLx ทำได้โดยใช้เงื่อนไข `WHERE ... IS NULL` ในตัว `UPDATE` เดียวกัน แทนการ `SELECT` เช็คก่อนแล้วค่อย `UPDATE` แยกกันสองคำสั่ง (ซึ่งจะมี race condition ระหว่างสองคำสั่งได้ถ้ามีสอง worker ทำงานพร้อมกัน):
+
+```rust
+// เทียบเท่ากับ SET key val NX ของ Redis แต่ทำผ่าน SQL UPDATE เดียว
+// สังเกตว่าเช็คและตั้งค่าเป็น atomic operation เดียวกันในระดับ database เอง
+let result = sqlx::query(
+    "UPDATE bookings SET email_sent_at = now() WHERE id = $1 AND email_sent_at IS NULL",
+)
+.bind(booking_id)
+.execute(&pool)
+.await?;
+
+if result.rows_affected() == 0 {
+    // ไม่มีแถวไหนถูกอัปเดต แปลว่า email_sent_at ถูกตั้งไปแล้วก่อนหน้านี้ (job นี้เป็น redelivery)
+    println!("booking {booking_id} ถูกส่งอีเมลไปแล้ว -> ข้าม");
+} else {
+    // แถวถูกอัปเดตสำเร็จ แปลว่าเราเป็นคนแรกที่ผ่านเงื่อนไขนี้ -> ส่งอีเมลได้
+    call_email_provider(false, 300).await?;
+}
+```
+
+`rows_affected() == 0` บอกได้ทันทีว่า `UPDATE` ไม่ได้แก้ไขแถวไหนเลย เพราะเงื่อนไข `email_sent_at IS NULL` ไม่จริงอีกต่อไป (มีคนตั้งค่าไปแล้ว) กลไกนี้ปลอดภัยจาก race condition เพราะ PostgreSQL รับประกันว่า `UPDATE` แต่ละคำสั่งเป็น atomic ในระดับแถวเสมอ ไม่ต่างจากที่ `SET NX` ของ Redis รับประกัน atomicity ของคำสั่งเดียว
 
 ### 84.12 Scheduled และ Recurring Jobs: `tokio-cron-scheduler`
 

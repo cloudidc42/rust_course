@@ -398,6 +398,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 นี่คือ end-to-end จริง: producer publish → RabbitMQ route ผ่าน exchange → เก็บใน queue → consumer (คนละ process) มาต่อและรับ message ที่ producer ส่งไปได้ครบถ้วนถูกต้อง แม้ producer จะปิดตัวไปแล้วตั้งแต่ก่อน consumer จะเริ่มทำงานด้วยซ้ำ (พิสูจน์ temporal decoupling จากหัวข้อ 82.1 อีกครั้งในระดับโค้ดจริง)
 
+#### Prefetch/QoS: กระจายงานอย่างเป็นธรรมเมื่อมี Consumer หลายตัวแข่งกันบน Queue เดียว
+
+ในระบบจริงมักไม่มี consumer แค่ตัวเดียว — เพื่อ scale การประมวลผล เรามักรัน consumer หลาย instance (เรียกว่า "worker") ที่ทั้งหมด consume จาก **queue เดียวกัน** RabbitMQ ค่า default จะส่ง message แบบ **round-robin** ให้ worker ที่ว่างเรียงตามลำดับ แต่ปัญหาคือ: ถ้า worker ตัวหนึ่ง "ช้า" (งานหนัก) กับอีกตัว "เร็ว" (งานเบา) round-robin แบบเดา ๆ อาจส่ง message ให้ worker ช้าไปกองรอเต็มมือ ทั้งที่ worker เร็วว่างอยู่
+
+ทางแก้คือ **`basic_qos`** (เรียกกันทั่วไปว่า "prefetch count") — กำหนดว่า worker แต่ละตัว **รับ message ที่ยังไม่ ack ได้พร้อมกันสูงสุดกี่ตัว** ถ้าตั้ง prefetch เป็น `1` worker จะได้รับ message ใหม่ **ก็ต่อเมื่อ ack message ก่อนหน้าเสร็จแล้วเท่านั้น** ทำให้ RabbitMQ ไม่ยัด message ไปกองไว้ที่ worker ที่กำลังทำงานช้าอยู่ (มันไม่ว่างรับตัวใหม่จนกว่าจะ ack ตัวเดิม) ผลคือ worker ที่เร็วกว่าจะได้รับงานถัดไปแทนโดยธรรมชาติ:
+
+```rust
+use lapin::options::BasicQosOptions;
+
+// prefetch_count = 1: consumer ตัวนี้จะมี unacked message ได้สูงสุดทีละ 1 เท่านั้น
+channel.basic_qos(1, BasicQosOptions::default()).await?;
+```
+
+สาธิตจริง: publish 6 task เข้า queue เดียว แล้วให้ `worker-slow` (จำลองงานหนัก sleep 400ms ก่อน ack) กับ `worker-fast` (จำลองงานเบา sleep 50ms ก่อน ack) แข่งกัน consume โดยทั้งคู่ตั้ง `prefetch_count = 1` เหมือนกัน:
+
+```rust
+slow_ch.basic_qos(1, BasicQosOptions::default()).await?;
+// ... worker-slow: รับ message มา sleep(400ms) แล้วค่อย ack
+fast_ch.basic_qos(1, BasicQosOptions::default()).await?;
+// ... worker-fast: รับ message มา sleep(50ms) แล้วค่อย ack
+```
+
+ผลลัพธ์จริงจากการรัน (คัดลอกจาก stdout ตรง ๆ):
+
+```
+[setup] published 6 tasks
+[worker-fast] processed task-1
+[worker-fast] processed task-2
+[worker-fast] processed task-3
+[worker-fast] processed task-4
+[worker-fast] processed task-5
+[worker-slow] processed task-0
+```
+
+เห็นได้ชัดว่า **`worker-slow` ได้รับแค่ 1 task (`task-0`)** ตลอดการทดสอบ ในขณะที่ **`worker-fast` กวาดไปเกือบทั้งหมด (`task-1` ถึง `task-5`)** ทั้งที่ตอนเริ่มต้น RabbitMQ ส่ง `task-0` ให้ `worker-slow` ไปก่อนตามลำดับ round-robin ปกติ (worker ทั้งสองว่างพร้อมกันตอนเริ่ม) — แต่เพราะ `worker-slow` ใช้เวลา 400ms กับ task นั้นและยังไม่ ack, prefetch=1 ทำให้ RabbitMQ **ไม่ส่ง task ใหม่ให้ `worker-slow` อีกจนกว่าจะ ack** ส่วน `worker-fast` ที่ ack เร็วกว่ามากก็วนกลับมารับ task ที่เหลือแทบทั้งหมดไปทำ
+
+ถ้าไม่ตั้ง `basic_qos` เลย (ค่า default ของ RabbitMQ คือไม่จำกัด prefetch เลย — ส่งให้ทุก message ที่มีในกรอบเวลาเดียวกันตาม round-robin แบบไม่ดูว่า worker ไหนว่างจริง) worker ที่ช้าจะสะสม message ค้างอยู่ในมือจำนวนมากโดยไม่จำเป็น สร้าง imbalance ของงานระหว่าง worker ที่ทำให้ throughput โดยรวมแย่ลง — นี่คือเหตุผลที่ **ระบบ production ที่มี worker หลายตัวแทบทุกระบบ ตั้ง `basic_qos` เป็นค่าน้อย ๆ (มักเป็น 1 หรือตัวเลขน้อย ๆ ตามลักษณะงาน) เสมอ** ไม่ปล่อยเป็นค่า default
+
 ### 82.5 Message Acknowledgment และ Delivery Guarantees
 
 #### auto-ack เทียบกับ manual ack
@@ -642,6 +680,37 @@ Consumer Group "analytics-group" (มี 1 consumer instance, อ่านแย
 - **แต่ละ partition รักษาลำดับ (ordering) ของ record ภายในตัวมันเองเท่านั้น** ไม่มีการการันตี ordering ข้าม partition — นี่คือเหตุผลที่การเลือก **partition key** สำคัญมาก (หัวข้อ 82.8): record ที่ต้องเรียงลำดับกัน (เช่น event ทั้งหมดของ ticket ใบเดียวกัน) ต้องถูกส่งไปยัง partition เดียวกันเสมอ
 - **consumer group ต่างกันอ่านเป็นอิสระจากกันสมบูรณ์** — group หนึ่งอ่านไปถึงไหนไม่มีผลกับอีก group เลย เพราะแต่ละ group เก็บ offset ของตัวเองแยกกัน
 
+#### ตั้งค่า Retention จริง และดู Offset/Lag ของ Consumer Group จริง
+
+Retention ของ topic ตั้งได้ต่อ topic ผ่าน `retention.ms` (หน่วยมิลลิวินาที) — ตัวอย่างการตั้งค่าจริงให้ topic เก็บ record ไว้ 7 วัน (604,800,000 ms) ด้วยเครื่องมือ `kafka-configs.sh` ที่มาพร้อม Kafka:
+
+```bash
+kafka-configs.sh --bootstrap-server localhost:9092 \
+  --entity-type topics --entity-name ticket.sold.multi \
+  --alter --add-config retention.ms=604800000
+```
+
+ผลลัพธ์จริงจากการรันคำสั่งนี้กับ broker ที่ใช้ตรวจสอบทั้งบท:
+
+```
+Completed updating config for topic ticket.sold.multi.
+Dynamic configs for topic ticket.sold.multi are:
+  retention.ms=604800000 sensitive=false synonyms={DYNAMIC_TOPIC_CONFIG:retention.ms=604800000}
+```
+
+หลังตั้งค่านี้ record ใน partition ของ topic นี้จะถูกลบทิ้งจริง ๆ ก็ต่อเมื่อผ่านไปแล้ว 7 วันนับจากเวลาที่ record ถูกเขียน (broker มี background process ไล่ลบ segment file ที่หมดอายุเป็นระยะ ไม่ใช่ลบทันทีตอนครบเวลาเป๊ะ ๆ) — นี่คือกลไกที่ทำให้ Kafka "ลืม" ข้อมูลเก่าไปเองในที่สุด **ไม่ใช่เก็บตลอดไปแบบไม่มีที่สิ้นสุด** เพียงแต่ retention period ยาวพอที่จะให้ consumer group ใหม่ ๆ มา replay history ย้อนหลังได้ตามช่วงเวลาที่กำหนด (ต่างจาก RabbitMQ ที่ message หายทันทีที่ ack ไม่ต้องรอ TTL ใด ๆ)
+
+ส่วนฝั่ง offset ของ consumer group ตรวจสอบได้จริงด้วย `kafka-consumer-groups.sh --describe` — นี่คือผลลัพธ์จริงจาก consumer group `notification-group` หลังจากรัน consumer ในหัวข้อ 82.9 เสร็จไปแล้ว (ตรวจสอบตอนที่ไม่มี consumer instance ใด active อยู่):
+
+```
+Consumer group 'notification-group' has no active members.
+
+GROUP              TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID  HOST  CLIENT-ID
+notification-group ticket.sold     0          3               3               0    -            -     -
+```
+
+คอลัมน์เหล่านี้คือหัวใจของโมเดล log-based retention ที่อธิบายไว้ข้างบน: **`LOG-END-OFFSET`** คือตำแหน่งล่าสุดที่มี record อยู่จริงใน partition (broker รู้ค่านี้เสมอ ไม่ว่าจะมี consumer หรือไม่), **`CURRENT-OFFSET`** คือตำแหน่งล่าสุดที่ consumer group นี้ commit ไว้ว่า "อ่านมาถึงตรงนี้แล้ว", และ **`LAG`** คือผลต่างระหว่างสองค่านี้ (`LOG-END-OFFSET - CURRENT-OFFSET`) — ในตัวอย่างนี้ `LAG = 0` แปลว่า `notification-group` อ่านตามทันทุก record ที่มีอยู่แล้ว ถ้า `LAG` เป็นค่าบวกมาก ๆ (เช่น หลักหมื่น) แปลว่า consumer group นี้ตามการผลิต record ไม่ทัน (producer ผลิตเร็วกว่า consumer บริโภค) ซึ่งเป็น metric ที่ระบบ production ต้อง monitor ตลอดเวลาเพื่อรู้ว่าต้อง scale consumer เพิ่มหรือยัง (ผูกกับหัวข้อ 82.10 เรื่อง consumer group rebalancing โดยตรง — เพิ่ม consumer instance เพื่อลด lag ได้จนถึงจำนวน partition สูงสุด)
+
 #### ทำไม Kafka เหมาะกับ high-throughput event streaming/replay, RabbitMQ เหมาะกับ task queue
 
 จากกลไกข้างบนสรุปเป็นแนวทางเลือกได้ตรง ๆ:
@@ -680,6 +749,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 ```
 
 นี่คือตัวอย่างจริงของ "ต้นทุนแอบแฝง" ของ FFI binding ที่ pure-Rust library อย่าง `lapin` ไม่มีเลย — ไม่ได้แปลว่า `rdkafka` แย่กว่า (มันคือ binding ของ client ที่เสถียรและครบฟีเจอร์ที่สุดสำหรับ Kafka จริง ๆ) แต่เป็นสิ่งที่ต้องรู้ล่วงหน้าตอนวางแผน deployment pipeline (Docker image ต้องมี build toolchain ที่ครบ หรือใช้ dynamic-linking กับ image ที่มี `librdkafka` ติดตั้งไว้แล้ว)
+
+ทำไมต้องพึ่ง `librdkafka` (C library) แทนที่จะเขียน Kafka client เป็น pure Rust แบบ `lapin` ทำกับ AMQP? เหตุผลหลักคือ**ความซับซ้อนของ Kafka wire protocol และ feature set สูงกว่า AMQP มาก** (transactional producer, exactly-once semantics ระดับ producer, compression หลายแบบ, consumer group protocol เต็มรูปแบบ) — `librdkafka` ผ่านการพัฒนาและ battle-test มานานหลายปีโดยทีม Confluent และ community จนกลายเป็น de facto standard ที่ client หลายภาษา (Python's `confluent-kafka`, Go's `confluent-kafka-go`, Node's `node-rdkafka`) ต่างก็ครอบมันเป็น binding เหมือนกัน ไม่ใช่แค่ Rust ที่เลือกทางนี้ — มี pure-Rust Kafka client อื่นอยู่บ้าง (เช่น `kafka-rust`) แต่ยังไม่ครบฟีเจอร์และไม่ active พัฒนาเทียบเท่า `rdkafka` ทำให้ `rdkafka` ยังเป็นตัวเลือกที่ community แนะนำมากที่สุดสำหรับงาน production จริงในตอนนี้ แม้ต้องแบกรับความซับซ้อนของ C dependency ก็ตาม
 
 #### Producer พร้อม Partition Key
 
@@ -896,6 +967,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Persistence ถ้าไม่มีใครฟัง | message รอใน queue ได้ (จนกว่าจะมีคน consume) | record รอใน log ได้ (ตาม retention) | **หายทันที** ถ้าไม่มี listener ต่ออยู่ตอนนั้น |
 | ความซับซ้อนในการ operate | ปานกลาง | สูง (ZooKeeper แบบเก่า/KRaft, partition rebalancing, tuning หลายชั้น) | **ต่ำสุด** (ไม่มีอะไรต้องดูแลเพิ่ม) |
 | เหมาะกับ | Task queue, work distribution, routing ที่ซับซ้อน | Event streaming, event sourcing, analytics ที่ต้อง replay, throughput สูงมาก | งานง่าย ๆ ปริมาณน้อย ที่ทนกับการ "พลาดบางครั้ง" ได้ |
+
+#### ตัวอย่างสถานการณ์จริงสามแบบ เพื่อฝึกใช้ตารางข้างบน
+
+การมีตารางไว้เฉย ๆ อาจยังไม่พอ ลองไล่สถานการณ์จริงที่คล้ายระบบที่คุณอาจเจอ เพื่อฝึกกระบวนการตัดสินใจ:
+
+**สถานการณ์ ก — ระบบจัดการสินค้าคงคลังร้านค้าออนไลน์ขนาดเล็ก**: เมื่อสต๊อกสินค้าต่ำกว่าเกณฑ์ ต้องแจ้งเตือนแอดมินทาง email มีร้านค้าแค่ไม่กี่สิบออร์เดอร์ต่อวัน — ไล่ตามคำถามในหัวข้อก่อนหน้า: ทนพลาดได้ไหม (การแจ้งเตือนสต๊อกต่ำพลาดไปบ้างไม่ทำให้ระบบพัง แค่แอดมินอาจรู้ช้าไปหน่อย), ปริมาณน้อยจริงไหม (ไม่กี่สิบครั้งต่อวัน) → **`LISTEN`/`NOTIFY`** เพียงพอ ไม่ต้องเพิ่ม broker เลย
+
+**สถานการณ์ ข — ระบบจองตั๋วเดียวกับที่ใช้ตลอดบทนี้**: booking created ต้องส่งอีเมลยืนยันแน่นอน (ลูกค้าจ่ายเงินไปแล้ว พลาดไม่ได้), ปริมาณระดับพันออร์เดอร์ต่อวัน, ต้อง route ไปหลายปลายทางตามเงื่อนไข (บาง event type ส่งแค่ notification บาง event type ส่งทั้ง notification และ analytics) → **RabbitMQ** ตรงกับทุกเงื่อนไข (task ที่ต้องแน่นอน + routing ที่ยืดหยุ่น) โดยไม่ต้องแบกความซับซ้อนของ Kafka เพราะไม่มีความจำเป็นต้อง replay history เลย
+
+**สถานการณ์ ค — ระบบ analytics ของแพลตฟอร์ม e-commerce ขนาดใหญ่**: ต้องเก็บ event "ทุกคลิกของผู้ใช้" (page view, add-to-cart, purchase) ไว้ให้หลายทีมนำไปประมวลผลต่อ (ทีม recommendation, ทีม fraud detection, ทีม BI dashboard) แต่ละทีมอาจอยากอ่านย้อนหลัง reprocess ด้วย algorithm ใหม่เป็นระยะ ปริมาณ event ระดับหลักแสนต่อวินาทีในช่วง peak → **Kafka** เหมาะที่สุด เพราะทั้ง throughput ระดับนี้และความต้องการ replay/หลาย consumer group อ่านอิสระกันคือจุดแข็งเฉพาะตัวของ Kafka ที่ RabbitMQ ทำไม่ได้เลย (แม้ RabbitMQ จะรองรับปริมาณนี้ได้ในทางเทคนิคระดับหนึ่ง แต่จะไม่มีทาง replay history ให้ทีมใหม่ที่เข้ามาทีหลังได้)
+
+ข้อสังเกตสำคัญจากสามสถานการณ์นี้: **ตัวชี้ขาดที่แท้จริงมักไม่ใช่แค่ "throughput สูงแค่ไหน" แต่คือ "ต้องการ replay/หลาย consumer อ่านอิสระกันหรือไม่"** สถานการณ์ ข มีปริมาณสูงกว่าสถานการณ์ ก มาก แต่ก็ยังไม่ต้อง Kafka เพราะไม่มีความต้องการ replay เลย ในขณะที่สถานการณ์ ค ต้อง Kafka เพราะโครงสร้างการใช้งาน (หลายทีมอ่านอิสระกัน, ต้อง reprocess ได้) ไม่ใช่เพราะตัวเลข throughput เพียงอย่างเดียว
 
 #### ข้อจำกัดสำคัญของ LISTEN/NOTIFY ที่ต้องเข้าใจให้ชัด
 
@@ -1167,6 +1250,95 @@ log จริงของ `notification-service` (terminal 1) — สังเ�
 
 นี่คือคำตอบเต็มรูปแบบของสิ่งที่ Part 81 foreshadow ไว้: `booking-service` ทำหน้าที่ของตัวเองจบ (สร้าง booking, ตอบ HTTP response กลับลูกค้าทันที) โดยไม่ต้องรอ ไม่ต้องรู้จัก `notification-service` เลยแม้แต่นิดเดียว — และอย่างที่พิสูจน์ไว้แล้วในหัวข้อ 82.1 ระบบยังทำงานถูกต้องแม้ `notification-service` จะยังไม่ online ตอนที่ publish event ก็ตาม การเพิ่ม `analytics-service` หรือ `inventory-sync-service` เข้ามาสมัครรับ event เดียวกันในอนาคตทำได้ทันทีโดย**ไม่ต้องแก้โค้ด `booking-service` แม้แต่บรรทัดเดียว** — เพียงแค่เขียน consumer ตัวใหม่ที่ bind queue ของตัวเองเข้ากับ exchange `booking.events` ด้วย routing key ที่สนใจ ตรงตามโมเดล AMQP ที่อธิบายไว้ในหัวข้อ 82.2
 
+### 82.13 การทดสอบโค้ดที่ผูกกับ Message Queue (ต่อยอด Part 32-33)
+
+โค้ดที่คุยกับ message queue มีลักษณะเหมือนโค้ดที่คุยกับ PostgreSQL ใน Part 71: มันมี I/O จริงเข้ามาเกี่ยวข้อง (เชื่อมต่อ network ไปที่ broker) ทำให้เขียนเทสยากกว่าโค้ดล้วน ๆ ทั่วไป แนวทางที่ได้ผลดีที่สุดคือ**แยกสองส่วนออกจากกันให้ชัด** ตามหลักการเดียวกับที่ Part 32-33 สอนเรื่อง unit test เทียบ integration test:
+
+#### ส่วนที่ 1 — Business logic ล้วน ๆ (unit test ธรรมดา ไม่แตะ network)
+
+ฟังก์ชันที่รับ event struct มาแล้ว "ตัดสินใจ" อะไรบางอย่าง (เช่น สร้างหัวเรื่องอีเมลตามจำนวนที่นั่ง) ไม่มี I/O เกี่ยวข้องเลย ควรเขียนเป็นฟังก์ชันแยกที่รับ struct ธรรมดาเข้า-ออก แล้วเทสด้วย `#[test]` ปกติตามที่ Part 32 สอนไว้ — เทสแบบนี้รันเร็วมาก (ไม่ต้องรอ network) และไม่ต้องมี broker รันอยู่เลยตอนรัน `cargo test`:
+
+```rust
+fn decide_email_subject(event: &BookingCreated) -> String {
+    if event.seats > 1 {
+        format!("ยืนยันการจอง {} ที่นั่งสำหรับ {}", event.seats, event.event_name)
+    } else {
+        format!("ยืนยันการจองสำหรับ {}", event.event_name)
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn multiple_seats_uses_plural_subject() {
+        let event = BookingCreated {
+            event_id: Uuid::new_v4(), booking_id: Uuid::new_v4(),
+            customer_email: "a@example.com".into(), event_name: "Rust Conf".into(), seats: 3,
+        };
+        assert_eq!(decide_email_subject(&event), "ยืนยันการจอง 3 ที่นั่งสำหรับ Rust Conf");
+    }
+}
+```
+
+#### ส่วนที่ 2 — Integration test ที่ต่อ broker จริง (แนวทางเดียวกับ Part 71 ที่ทดสอบ PgListener กับ PostgreSQL จริง)
+
+การ publish/consume จริงต้องทดสอบกับ broker จริงเท่านั้น (mock connection ของ AMQP/Kafka ไม่คุ้มค่าความซับซ้อนเทียบกับการรัน broker จริงในสภาพแวดล้อมทดสอบ) ใช้ `#[tokio::test]` ต่อ broker จริง สร้าง queue ชั่วคราวที่ชื่อไม่ชนกับเทสอื่น (`auto_delete: true` ให้ RabbitMQ ลบ queue ทิ้งเองหลัง connection ปิด) แล้ว publish-consume round trip จริงในเทสเดียว:
+
+```rust
+#[tokio::test]
+async fn publish_then_consume_round_trip() {
+    let addr = "amqp://guest:guest@127.0.0.1:5672/%2f";
+    let conn = Connection::connect(addr, ConnectionProperties::default())
+        .await
+        .expect("ต้องต่อ RabbitMQ ได้ระหว่างเทส");
+    let channel = conn.create_channel().await.unwrap();
+
+    // ชื่อ queue ไม่ชนกับเทสอื่นที่รันพร้อมกัน (เทียบกับแนวคิด test isolation ของ Part 32-33)
+    let queue_name = format!("test_queue_{}", Uuid::new_v4());
+    channel
+        .queue_declare(
+            &queue_name,
+            QueueDeclareOptions { auto_delete: true, ..Default::default() },
+            FieldTable::default(),
+        )
+        .await
+        .unwrap();
+
+    let event = BookingCreated {
+        event_id: Uuid::new_v4(), booking_id: Uuid::new_v4(),
+        customer_email: "test@example.com".into(), event_name: "Integration Test Event".into(), seats: 2,
+    };
+    let payload = serde_json::to_vec(&event).unwrap();
+    channel.basic_publish("", &queue_name, BasicPublishOptions::default(), &payload, BasicProperties::default())
+        .await.unwrap().await.unwrap();
+
+    let mut consumer = channel
+        .basic_consume(&queue_name, "test-consumer", BasicConsumeOptions::default(), FieldTable::default())
+        .await.unwrap();
+    let delivery = consumer.next().await.unwrap().unwrap();
+    let received: BookingCreated = serde_json::from_slice(&delivery.data).unwrap();
+    delivery.ack(BasicAckOptions::default()).await.unwrap();
+
+    assert_eq!(received.event_id, event.event_id);
+    assert_eq!(decide_email_subject(&received), "ยืนยันการจอง 2 ที่นั่งสำหรับ Integration Test Event");
+}
+```
+
+รันจริงด้วย `cargo test` กับ RabbitMQ ที่ใช้ตรวจสอบทั้งบท ได้ผลลัพธ์จริง (ทั้ง unit test และ integration test อยู่ใน binary เดียวกัน):
+
+```
+running 3 tests
+test unit_tests::single_seat_uses_singular_subject ... ok
+test unit_tests::multiple_seats_uses_plural_subject ... ok
+test integration_tests::publish_then_consume_round_trip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+```
+
+จุดสำคัญที่ทำให้ integration test แบบนี้เชื่อถือได้และไม่กวนกันข้ามเทส: **สร้างชื่อ queue ที่ unique ต่อเทส** (`Uuid::new_v4()` ต่อท้ายชื่อ) และตั้ง **`auto_delete: true`** ให้ RabbitMQ เก็บกวาดทิ้งเองหลัง connection ปิด — เทียบเท่ากับแนวคิด "แต่ละ test ใช้ transaction แยกที่ rollback" ที่ Part 71 สอนไว้สำหรับ PostgreSQL เพียงแต่ RabbitMQ ไม่มี transaction rollback แบบนั้น จึงใช้ "queue แยกต่อเทส + auto-delete" แทนเพื่อให้ได้ผลลัพธ์เชิง isolation ที่เทียบเคียงกัน ในระบบ CI จริงมักรัน RabbitMQ/Kafka เป็น service container คู่กับ job ทดสอบ (คล้ายที่ Part 71 แนะนำสำหรับ PostgreSQL) เพื่อให้ integration test เหล่านี้รันได้ทุกครั้งที่ CI ทำงาน
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 **1. publish ไปที่ exchange ที่ไม่มี queue ใด bind ไว้เลย — message หายไปเงียบ ๆ ไม่มี error**
@@ -1203,6 +1375,28 @@ PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-exchange' for queue 'poiso
 ```
 
 ทางแก้เมื่อเจอสถานการณ์นี้ในระบบจริง: ต้องลบ queue เดิมทิ้ง (`queue_delete`) แล้วสร้างใหม่ด้วย argument ที่ต้องการ (มีผลกระทบคือ message ที่ค้างอยู่ใน queue เดิมจะหายไปด้วย ต้องวางแผน migration ให้ดี เช่น ให้ consumer ระบายของออกจาก queue เดิมให้หมดก่อนค่อยลบสร้างใหม่) — บทเรียนคือควรตัดสินใจเรื่อง DLX ให้เรียบร้อย**ตั้งแต่ตอนออกแบบ queue ครั้งแรก** ไม่ใช่ไปเพิ่มทีหลังตอน queue มี data หรือ consumer ใช้งานอยู่แล้ว
+
+**6. Kafka ปฏิเสธ message ที่ใหญ่เกินไปแบบเงียบ ๆ ไม่ crash แต่ producer ได้ error กลับมาแทน**
+
+Kafka broker มีค่า default limit ขนาด message ต่อ record (`message.max.bytes` ฝั่ง broker, ปกติราว ๆ 1MB) ทดสอบจริงด้วยการส่ง payload ขนาด 2MB (เกิน limit ชัดเจน):
+
+```rust
+let big_payload = vec![b'x'; 2_000_000]; // 2MB
+let record = FutureRecord::to("ticket.sold").payload(&big_payload).key("big-test");
+producer.send(record, Duration::from_secs(5)).await
+```
+
+ผลลัพธ์จริงจากการรัน:
+
+```
+ส่งไม่สำเร็จตามคาด: Message production error: MessageSizeTooLarge (Broker: Message size too large)
+```
+
+`.send()` คืน `Err` กลับมาให้จัดการตามปกติ ไม่ crash โปรแกรม — แต่กับดักจริงมักไม่ได้เกิดตอนทดสอบแบบนี้ (ที่รู้ตัวว่าส่งข้อมูลใหญ่) แต่เกิดตอน production ที่ event payload โตขึ้นเรื่อย ๆ ตามเวลา (เช่น แนบ array ของ item ในออร์เดอร์ที่ไม่มีการจำกัดจำนวนไว้ล่วงหน้า) จนวันหนึ่งเกิน limit แบบไม่มีใครคาดคิด ทางแก้ระยะยาวคือกำหนด**ขนาด payload สูงสุดที่ยอมรับได้ตั้งแต่ตอนออกแบบ schema ของ event** (เช่น ไม่แนบ object ก้อนใหญ่เข้าไปในตัว event ตรง ๆ แต่แนบแค่ id แล้วให้ consumer ไป fetch รายละเอียดจาก API/DB เอาเองถ้าจำเป็น) แทนที่จะไปเพิ่ม `message.max.bytes` ที่ฝั่ง broker เรื่อย ๆ ตามขนาดข้อมูลที่โตขึ้น
+
+**7. เปลี่ยน schema ของ event โดยไม่ระวังความเข้ากันได้ระหว่าง producer กับ consumer คนละเวอร์ชัน**
+
+เพราะ producer และ consumer เป็น service คนละตัว deploy แยกกัน (ตามหลัก decoupling ของหัวข้อ 82.1) จึงมีช่วงเวลาที่ **producer เป็นเวอร์ชันใหม่แต่ consumer ยังเป็นเวอร์ชันเก่าอยู่** (deploy ไม่พร้อมกันเป๊ะ) เสมอ ถ้า producer เพิ่ม field ใหม่ที่เป็น**required** (ไม่มี `Option<T>` หรือ `#[serde(default)]`) เข้าไปใน struct โดยตรง — ยังไม่มีปัญหาฝั่ง producer เพราะมันแค่ serialize แต่ปัญหาจะเกิดตรงกันข้าม: ถ้า**ลบ field เก่าออกไปโดยที่ consumer เวอร์ชันเก่ายัง deserialize struct ที่มี field นั้นเป็น non-optional อยู่** consumer จะ deserialize ไม่ผ่านทันทีด้วย error แบบ `missing field` ของ `serde_json` (รูปแบบเดียวกับที่ Part 57 อธิบายไว้เรื่อง struct ที่ไม่ match กับ JSON) ทำให้ event ทุกตัวที่ผลิตจากเวอร์ชันใหม่ถูก parse ไม่ผ่านที่ consumer เวอร์ชันเก่าทั้งหมด (กลายเป็น poison message ไหลเข้า DLQ ตามหัวข้อ 82.6 เป็นจำนวนมากพร้อมกัน) แนวทางป้องกัน: เพิ่ม field ใหม่ให้เป็น `Option<T>` พร้อม `#[serde(default)]` เสมอ (ตาม attribute ที่ Part 57-58 สอนไว้) และห้ามลบ field เก่าออกทันที ให้ deprecate ไว้ก่อนแล้วค่อยลบทีหลังเมื่อ consumer ทุกตัวอัปเดตแล้วแน่ใจแล้วเท่านั้น — เป็นวินัยเดียวกับการทำ API versioning ที่ Part 78 พูดถึงเรื่อง backward compatibility
 
 ## แบบฝึกหัด (Exercises)
 

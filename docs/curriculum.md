@@ -100,10 +100,10 @@
 | 68 | Actix-web: Routing, Handlers, Middleware | ✅ |
 | 69 | เปรียบเทียบ Axum vs Actix-web vs Rocket | ✅ |
 | 70 | Database: เชื่อมต่อ PostgreSQL ด้วย SQLx | ✅ |
-| 71 | SQLx: Queries, Migrations, Connection Pooling | ⏳ |
-| 72 | Diesel ORM เบื้องต้น | ⏳ |
-| 73 | SeaORM เบื้องต้น | ⏳ |
-| 74 | Authentication: JWT | ⏳ |
+| 71 | SQLx: Queries, Migrations, Connection Pooling | ✅ |
+| 72 | Diesel ORM เบื้องต้น | ✅ |
+| 73 | SeaORM เบื้องต้น | ✅ |
+| 74 | Authentication: JWT | ✅ |
 | 75 | Authentication: Session-based และ OAuth2 | ⏳ |
 | 76 | Authorization และ RBAC | ⏳ |
 | 77 | WebSockets ด้วย Axum | ⏳ |

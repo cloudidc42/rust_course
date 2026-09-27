@@ -293,6 +293,22 @@ Functions  Expressions  Impls  Traits  Methods  Dependency
 มีคนดูแล/ไม่ค่อยมี test coverage) หรือใช้เป็นเกณฑ์เปรียบเทียบระหว่าง crate สองตัวที่ทำงานเหมือนกันแต่ตัวหนึ่งมี
 `unsafe` น้อยกว่าอย่างมีนัยสำคัญ
 
+#### Checklist สำหรับตรวจสอบ `unsafe` Code ตอน Code Review
+
+รวมหลักปฏิบัติของหัวข้อนี้เป็น checklist ที่ใช้ตรวจทุก pull request ที่มี `unsafe` block ใหม่ปรากฏขึ้น:
+
+1. **`unsafe` block นี้จำเป็นจริงหรือไม่** — มี safe alternative ที่ทำงานได้ผลลัพธ์เดียวกันโดยไม่ต่างด้าน
+   performance อย่างมีนัยสำคัญหรือไม่ (วัดด้วย benchmark จริง ไม่ใช่เดา)
+2. **block มีขนาดเล็กที่สุดเท่าที่จะทำได้หรือไม่** (Part 41.10) — โค้ดที่ไม่จำเป็นต้องอยู่ใน `unsafe` ถูกย้าย
+   ออกไปนอก block แล้วหรือยัง
+3. **precondition ที่โค้ดพึ่งพาถูกเขียนเป็น comment/`# Safety` doc ไว้ชัดเจนหรือไม่** (เช่น "index ต้องน้อยกว่า
+   `len()` เสมอ ก่อนเรียก `.add()`") — และมี assertion (`debug_assert!`) ตรวจ precondition นั้นจริงในโค้ดหรือไม่
+   แม้จะกระทบ performance เล็กน้อยใน debug build
+4. **ฟังก์ชันที่มี `unsafe` ข้างในถูกห่อเป็น safe abstraction ให้ผู้เรียกใช้หรือไม่** (Part 41.8) — หรือเปิด
+   `unsafe fn` เป็น public API ตรง ๆ โดยไม่มีเหตุผลที่ดีพอ
+5. **มี test ที่ครอบคลุม edge case ที่ precondition อาจถูกละเมิดหรือไม่** (index ที่ boundary, ค่าที่เป็น 0/max,
+   input ว่าง) — และถ้าเป็นไปได้ รันผ่าน Miri (Part 41.11) เพื่อจับ UB ที่ hardware จริงอาจไม่แสดงอาการให้เห็น
+
 ### 100.3 Dependency และ Supply-Chain Security
 
 Part 35 หัวข้อ 35.20 แนะนำ `cargo audit` ไว้เบื้องต้นแล้วว่ามันเทียบ `Cargo.lock` กับ RustSec Advisory Database
@@ -489,6 +505,30 @@ advisories ok, bans ok, licenses ok, sources ok
 ครั้งนี้ exit code เป็น `0` — เหลือแค่ `warning` สองบรรทัด (บอกว่า allow list มี license สองตัวที่ไม่มี
 dependency ตัวไหนใช้จริง ไม่ใช่ปัญหา แค่ข้อสังเกตว่า allow list กว้างกว่าที่ใช้จริง) ทั้งสี่ policy ผ่านหมด:
 `advisories ok, bans ok, licenses ok, sources ok`
+
+#### `cargo audit` vs `cargo deny`: ใช้ตัวไหนเมื่อไหร่
+
+| | `cargo audit` | `cargo deny` |
+|---|---|---|
+| ขอบเขต | เฉพาะ known vulnerability (RustSec) | vulnerability + license + banned crate + duplicate version + registry source |
+| ต้องมี config file หรือไม่ | ไม่ต้อง — รันได้ทันทีไม่ต้องตั้งค่า | ต้องมี `deny.toml` เพื่อกำหนด policy (license allow list ฯลฯ) |
+| เหมาะกับ | โปรเจกต์เล็ก/ทีมที่ต้องการแค่จับช่องโหว่เร็ว ๆ ไม่ต้องตั้งค่าอะไรเพิ่ม | ทีม/องค์กรที่ต้องการ enforce policy ที่ชัดเจนกว่านั้น (เช่น ห้าม license แบบ copyleft, ห้าม crate บางตัว) |
+| ใช้ในโปรเจกต์เดียวกันพร้อมกันได้ไหม | ได้ — หลายทีมรันทั้งสองตัวคู่กันใน CI เพราะ `cargo deny` ครอบคลุมกว้างกว่าแต่ `cargo audit` เร็วกว่าและไม่ต้องมี config ให้ดูแล | เช่นเดียวกัน |
+
+ทีมขนาดเล็กที่เพิ่งเริ่มสนใจเรื่องนี้ควรเริ่มจาก `cargo audit` ก่อน (ไม่ต้องตั้งค่าอะไรเลย ได้ผลลัพธ์ทันที) แล้ว
+ค่อยเพิ่ม `cargo deny` เมื่อทีมโตขึ้นและต้องการ policy ที่ชัดเจนกว่านั้น (โดยเฉพาะเรื่อง license compliance ที่
+มักกลายเป็นข้อกำหนดจากฝ่าย legal เมื่อบริษัทโตขึ้น)
+
+#### เครื่องมือเสริมที่ควรรู้จัก (Awareness): `cargo vet`
+
+นอกจาก `cargo audit`/`cargo deny` ที่บทนี้พิสูจน์ด้วยการรันจริงแล้ว ยังมี `cargo-vet` (พัฒนาโดยทีม Mozilla ร่วม
+กับ Google) ที่แก้ปัญหาคนละมุม: มันไม่ได้ตรวจ "ช่องโหว่ที่รู้จักแล้ว" แบบ `cargo audit` แต่ตรวจว่า **แต่ละ
+dependency เวอร์ชันที่ใช้อยู่มีใครสักคน (ในทีมของตัวเอง หรือองค์กรอื่นที่เชื่อถือได้และแบ่งปัน audit record กัน)
+"อ่านโค้ดแล้วรับรองว่าปลอดภัย" หรือยัง** — เป็นแนวทางที่ตรงกับความเสี่ยง "compromised dependency"/"malicious
+code แฝงมาในเวอร์ชันใหม่" ที่หัวข้อก่อนพูดถึงในระดับความตระหนักโดยตรง (ต่างจาก known-vulnerability ที่ประกาศไว้
+แล้วในฐานข้อมูลสาธารณะ) บทนี้ไม่ได้ลงรายละเอียดการตั้งค่า `cargo vet` เต็มรูปแบบ แต่ควรรู้จักไว้ว่ามีเครื่องมือ
+ระดับนี้อยู่ในระบบนิเวศ สำหรับทีมที่ต้องการมาตรการ supply-chain security ที่เข้มงวดกว่า known-vulnerability
+scanning เพียงอย่างเดียว
 
 ### 100.4 ผนวก `cargo audit`/`cargo deny` เข้า CI Pipeline
 
@@ -756,6 +796,24 @@ content-length: 0
 ๆ) ต้อง `canonicalize()` + `starts_with()` ตรวจก่อนเปิดไฟล์ทุกครั้งไม่มีข้อยกเว้น ตามรูปแบบของ `safe_resolve`
 ข้างบน
 
+#### สรุปเปรียบเทียบ: Injection ทั้งสามคลาสคือปัญหาเชิงโครงสร้างเดียวกัน
+
+ตารางนี้รวมสามหัวข้อที่ผ่านมาเข้าด้วยกัน เพื่อให้เห็นว่าโครงสร้างของปัญหาและวิธีแก้เหมือนกันทุกประการ เปลี่ยนแค่
+"ตัวตีความ" (interpreter) ที่ทำงานผิดพลาดเมื่อขอบเขตระหว่าง syntax กับข้อมูลถูกทำให้พร่าเลือน:
+
+| คลาส | ตัวตีความที่ถูกหลอก | วิธีที่ทำให้เกิด | วิธีป้องกันที่ถูกต้อง |
+|---|---|---|---|
+| SQL injection (Part 70) | SQL parser ของ database | `format!()` ค่า input เข้า SQL string ตรง ๆ | bind parameter (`$1, $2, ...` ผ่าน `.bind()`/`sqlx::query!`) |
+| Command injection (หัวข้อนี้) | `sh`/shell interpreter | `format!()` ค่า input เข้า shell command string แล้วส่งผ่าน `sh -c` | `Command::new(prog).arg(a).arg(b)` — argument list แยกชิ้น ไม่ผ่าน shell |
+| Path traversal (หัวข้อนี้) | Filesystem path resolver | `Path::join()` ค่า input เข้า path ตรง ๆ โดยไม่ตรวจสอบขอบเขต | `canonicalize()` + `starts_with()` ก่อนเปิดไฟล์ (หรือใช้ `ServeDir` ที่ทำให้อัตโนมัติ) |
+
+หลักการร่วมที่ใช้ได้กับ injection ทุกคลาสที่ยังไม่ถูกค้นพบ/สอนในหลักสูตรนี้ด้วย (เช่น LDAP injection, XML
+injection, template injection ในภาษา/framework อื่น ๆ ที่อาจพบในระบบที่ทำงานร่วมกับ Rust): **ระบุให้ชัดว่าค่า
+ไหนเป็น "ข้อมูลจากภายนอกที่ไม่น่าเชื่อถือ" แล้วส่งผ่านช่องทางที่ระบบปลายทางรับประกันว่าจะมองเป็น "ข้อมูล" เสมอ
+ไม่มีทางถูกตีความเป็น "คำสั่ง/syntax" ได้เลย** — ไม่ใช่การ "escape" ตัวอักษรอันตรายเอง (ซึ่งพลาดง่ายและต้องรู้
+กฎการ escape ของตัวตีความทุกตัวอย่างละเอียด) แต่คือการเลือก API ที่แยกช่องทางของ "คำสั่ง" กับ "ข้อมูล" ไว้ตั้งแต่
+ระดับ protocol/interface (bind parameter, argument list, canonicalized path)
+
 ### 100.6 Secrets Management ในหน่วยความจำ: `secrecy` และ `zeroize`
 
 หลักการพื้นฐาน "ห้าม commit secret เข้า source control" ถูกพูดถึงมาตลอดหลักสูตร (Part 74 กับดักข้อ 4, Part 94
@@ -877,6 +935,29 @@ optimize ออกไปในบาง build configuration
 เองเลย — ใช้ `zeroize` ตรง ๆ เฉพาะกรณีที่จัดการ raw buffer ที่ไม่ได้ผ่าน `secrecy` (เช่น derive session key ด้วย
 ตัวเองแล้วต้องล้าง buffer ชั่วคราวทันทีที่ใช้เสร็จ)
 
+#### เมื่อ Environment Variable ไม่พอ: Secret Manager ระดับ Cloud (Awareness)
+
+`.env.example` + environment variable (Part 94 หัวข้อ 94.4) เป็นรูปแบบที่เพียงพอและเหมาะสมสำหรับขนาดโปรเจกต์
+ที่หลักสูตรนี้ครอบคลุม แต่เมื่อระบบโตขึ้นถึงระดับที่ต้อง deploy หลาย service/หลาย environment (dev/staging/
+production) พร้อมกัน ทีม production จริงจำนวนมากเปลี่ยนไปใช้ **secret manager เฉพาะทาง** ที่ cloud provider
+มีให้ (AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault) แทนการตั้ง environment variable ตรง ๆ บน
+เครื่อง/container เหตุผลหลักสามข้อ:
+
+1. **Audit trail** — secret manager บันทึกว่าใคร/อะไรเข้าถึง secret ตัวไหนเมื่อไหร่ ในขณะที่ environment
+   variable ธรรมดาไม่มี log การเข้าถึงเลย
+2. **Rotation อัตโนมัติ** — เปลี่ยนค่า secret (เช่น database password) เป็นระยะได้โดยไม่ต้อง restart ทุก
+   service ที่ใช้ค่านั้นด้วยมือ
+3. **ไม่มี secret เดินทางผ่าน process environment เลย** — environment variable ของ process หนึ่งอ่านได้จาก
+   `/proc/<pid>/environ` โดย process อื่นที่มีสิทธิ์เพียงพอบนเครื่องเดียวกัน (ขึ้นกับการตั้งค่าสิทธิ์ของ OS) —
+   secret manager ให้แอปเรียก API ดึงค่ามาตอน runtime ใส่ตัวแปรในหน่วยความจำโดยตรง ลดพื้นที่ที่ secret
+   เดินทางผ่าน
+
+Part 101 (Deployment: Cloud Platforms) จะพาไป deploy ระบบ capstone จริงบน cloud platform ซึ่งเป็นจุดที่คำถามนี้
+จะกลับมาอีกครั้งในบริบทที่จับต้องได้ — บทนี้แค่ปูพื้นให้รู้ว่ามีทางเลือกนี้อยู่ และหลักการ `secrecy`/`zeroize`
+ที่เรียนไปแล้วยังใช้ได้เหมือนเดิมไม่ว่าค่า secret จะอ่านมาจาก environment variable ธรรมดาหรือจาก API ของ secret
+manager ก็ตาม — ทั้งสองกรณีคือ "จุดที่ค่า secret เข้าสู่หน่วยความจำของโปรแกรม" ที่ควรห่อด้วย `SecretString`
+ทันทีเหมือนกัน
+
 ### 100.7 Checklist รวม: Authentication และ Authorization
 
 หัวข้อนี้ไม่สอนกลไกใหม่ — Part 74-76 อธิบายกลไกเชิงลึกไว้ครบแล้ว สิ่งที่หัวข้อนี้ทำคือรวมเป็น **checklist ที่ใช้
@@ -898,6 +979,15 @@ optimize ออกไปในบาง build configuration
 การตรวจสอบตาม checklist นี้ไม่ใช่การอ่านทฤษฎีซ้ำ — มันคือการเปิดโค้ดจริงของระบบขึ้นมาไล่ทีละแถว แล้วยืนยันว่า
 แต่ละข้อมีการ implement จริงหรือไม่ (หัวข้อ 100.14 ท้ายบทจะทำแบบนี้กับระบบ capstone จาก Part 92-94 อย่างเป็น
 รูปธรรม)
+
+#### ทำไม Checklist ถึงสำคัญกว่าการอธิบายกลไกซ้ำ
+
+เหตุผลที่หัวข้อนี้เลือกทำเป็นตารางสั้น ๆ แทนการอธิบายกลไกแต่ละข้อซ้ำอีกครั้ง (ทั้งที่ style guide ของหลักสูตรนี้
+เน้นย้ำเสมอว่าต้องอธิบาย "ทำไม" ไม่ใช่แค่ "ทำอย่างไร") คือ **กลไกของแต่ละข้ออธิบายไว้ลึกและสมบูรณ์แล้วใน Part
+74-76** — การอธิบายซ้ำในบทนี้จะทำให้ผู้อ่านเสียเวลาอ่านสิ่งที่รู้แล้ว และเสี่ยงต่อการอธิบายไม่ตรงกับที่บทต้นฉบับ
+สอนไว้ (เกิดความขัดแย้งของเนื้อหาระหว่างบท) สิ่งที่บทสังเคราะห์แบบนี้ควรทำคือ**เปลี่ยนมุมมองจาก "เรียนรู้กลไก
+ทีละบท" เป็น "ตรวจสอบระบบทั้งระบบพร้อมกัน"** — checklist ที่มีลิงก์อ้างอิงกลับไปแต่ละบทคือรูปแบบที่ตรงกับ
+เป้าหมายนี้ที่สุด และเป็นรูปแบบเดียวกับที่หัวข้อ 100.11 จะใช้ตรวจสอบระบบ capstone จริงในตอนท้ายบท
 
 ### 100.8 TLS/HTTPS: เข้ารหัสข้อมูลระหว่างทางด้วย `rustls`
 
@@ -1010,12 +1100,49 @@ hello over TLS
 session) ต้องรันผ่าน HTTPS เท่านั้นในโปรดักชัน — cookie attribute `Secure` ที่ Part 75 สอนไว้จะไม่มีความหมายเลย
 ถ้า server ไม่มี TLS ให้ browser เชื่อมต่อผ่านตั้งแต่ต้น
 
+#### Certificate จริงในโปรดักชัน: ACME/Let's Encrypt และ TLS Termination
+
+ตัวอย่างข้างบนสร้าง self-signed certificate เพื่อสาธิตกลไก — browser/HTTP client ทั่วไปจะปฏิเสธ self-signed
+certificate โดยอัตโนมัติ (ต้องใช้ `-k` บังคับ curl ให้ข้ามการตรวจสอบ) เพราะไม่มีทางยืนยันได้ว่า certificate นั้น
+ออกโดยผู้ที่เป็นเจ้าของ domain จริง ในโปรดักชันต้องใช้ certificate จาก **Certificate Authority (CA)** ที่
+browser ทุกตัวเชื่อถืออยู่แล้ว วิธีที่นิยมที่สุดในปัจจุบันคือ **ACME protocol** (Automated Certificate
+Management Environment) ที่ **Let's Encrypt** เป็นผู้ให้บริการ CA แบบไม่มีค่าใช้จ่ายที่ใหญ่ที่สุด — ออก
+certificate ให้อัตโนมัติผ่านการพิสูจน์ความเป็นเจ้าของ domain (เช่น ตอบคำขอ HTTP challenge ที่ domain นั้นจริง)
+โดยไม่ต้องมีมนุษย์ตรวจสอบเอกสารเหมือน CA แบบดั้งเดิม crate `rustls-acme`/`tokio-rustls` รองรับการขอ/ต่ออายุ
+certificate ผ่าน ACME แบบอัตโนมัติเต็มรูปแบบสำหรับ Rust service ที่ terminate TLS เอง
+
+ในทางปฏิบัติ ทีมจำนวนมากเลือก**ไม่** terminate TLS ที่ตัว Axum process เองเลย แต่ให้ **reverse proxy/load
+balancer** ที่อยู่หน้าแอป (เช่น nginx, Caddy, หรือ load balancer ของ cloud provider ที่ Part 101 จะกล่าวถึง)
+เป็นผู้ terminate TLS แทน — connection ระหว่าง client กับ reverse proxy เข้ารหัสด้วย TLS เต็มรูปแบบ ส่วน
+connection ระหว่าง reverse proxy กับ Axum process (ที่มักอยู่ใน network ภายในที่เชื่อถือได้อยู่แล้ว เช่น
+container เดียวกันหรือ VPC เดียวกัน) อาจเป็น plain HTTP ได้ — สถาปัตยกรรมนี้ทำให้ certificate
+management/renewal เป็นความรับผิดชอบของ infrastructure layer แยกจาก application code โดยสิ้นเชิง ซึ่งเป็นรูป
+แบบที่พบได้บ่อยกว่าการทำ `axum_server::bind_rustls` ตรง ๆ แบบที่บทนี้สาธิต (ที่เหมาะกับกรณีที่ต้องการควบคุม TLS
+เองเต็มรูปแบบ หรือ deploy เป็น binary เดี่ยวที่ไม่มี reverse proxy คั่นกลาง)
+
+#### mTLS: เมื่อทั้งสองฝั่งต้องพิสูจน์ตัวตน (Awareness)
+
+TLS ปกติ (ที่บทนี้สาธิต) ให้**เฉพาะ server** พิสูจน์ตัวตนต่อ client (ผ่าน certificate ที่ CA รับรอง) — **mutual
+TLS (mTLS)** ขยายกลไกนี้ให้ทั้งสองฝั่งต้องพิสูจน์ตัวตนต่อกัน (client ก็ต้องมี certificate ของตัวเองเช่นกัน) ใช้
+กันมากในการสื่อสารระหว่าง service ภายในระบบ microservices (Part 81) ที่ต้องการความเชื่อมั่นสูงว่า request ที่
+เข้ามาจริงมาจาก service อื่นในระบบเดียวกัน ไม่ใช่จากที่อื่น `rustls` รองรับ mTLS ผ่าน `WebPkiClientVerifier` ที่
+ตรวจสอบ client certificate ฝั่ง server — บทนี้ไม่ได้ลงรายละเอียดการตั้งค่าเต็มรูปแบบ แต่ควรรู้จักไว้ว่าเป็น
+ส่วนขยายตามธรรมชาติของหลักการ TLS ที่เรียนไปแล้วในหัวข้อนี้ สำหรับสถานการณ์ที่ความเชื่อมั่นของทั้งสองฝั่งสำคัญ
+เท่ากัน
+
 ### 100.9 Denial-of-Service Awareness: ทวนมาตรการที่มีอยู่แล้วในหลักสูตร
 
 หัวข้อนี้ไม่มีโค้ดใหม่ — เป็นการรวม**มุมมองความปลอดภัย**ให้กับมาตรการที่ Part 65/78/83 implement ไว้แล้วด้วย
 เหตุผลอื่น (performance, resource management) แต่มาตรการเดียวกันนี้**คือมาตรการป้องกัน denial-of-service ที่
 สำคัญที่สุด** เพราะ availability (ระบบยังใช้งานได้) เป็นเสาหลักหนึ่งของ security ควบคู่กับ confidentiality
 (ข้อมูลไม่รั่ว) และ integrity (ข้อมูลไม่ถูกแก้ไขผิดพลาด)
+
+กรอบคิดที่เรียกว่า **CIA triad** (Confidentiality, Integrity, Availability) เป็นวิธีแบ่งเป้าหมายของ security
+ออกเป็นสามด้านที่ใช้กันแพร่หลายในวงการนี้ — หัวข้อก่อนหน้าทั้งหมดของบทนี้ (SQL/command/path injection,
+authentication/authorization, secrets, TLS) โฟกัสที่ **confidentiality** (ข้อมูลไม่รั่วไปให้คนที่ไม่มีสิทธิ์)
+และ **integrity** (ข้อมูลไม่ถูกแก้ไข/สร้างขึ้นโดยไม่ได้รับอนุญาต) เป็นหลัก — หัวข้อนี้คือจุดเดียวในบทที่โฟกัสที่
+**availability** ตรง ๆ: ระบบที่ป้องกัน confidentiality/integrity ได้สมบูรณ์แบบที่สุดก็ยังถือว่าไม่ปลอดภัยอย่าง
+สมบูรณ์ ถ้าใครก็ตามทำให้มันใช้งานไม่ได้ (ผู้ใช้ที่มีสิทธิ์จริงเข้าไม่ถึงระบบ) ได้ง่ายเกินไป
 
 | มาตรการ | อ้างอิง | ทำไมสำคัญด้าน DoS |
 |---|---|---|
@@ -1114,6 +1241,22 @@ hello
 ธรรมดา (ไม่มี TLS) จะถูก browser **เมิน** โดยสิ้นเชิงตามข้อกำหนดของ HSTS เอง (ป้องกันไม่ให้ attacker ที่ควบคุม
 HTTP connection ที่ไม่เข้ารหัสสั่ง downgrade HSTS policy ได้) เพราะฉะนั้น header นี้มีประโยชน์จริงก็ต่อเมื่อ
 deploy ผ่าน HTTPS แล้วเท่านั้น — ตั้งไว้ตั้งแต่ตอนพัฒนาไม่มีผลเสีย แต่ต้องรอ deploy จริงผ่าน TLS ก่อนมันจะมีผล
+
+#### Header เสริมอีกสองตัวที่ควรรู้จัก (Awareness)
+
+นอกจากสี่ header หลักที่บทนี้พิสูจน์ด้วยโค้ดจริง ยังมีอีกสองตัวที่ทีม production จำนวนมากเพิ่มเข้าไปด้วยหลักการ
+เดียวกัน (จำกัดสิ่งที่ browser อนุญาตให้เกิดขึ้นกับหน้าเว็บให้แคบที่สุดที่จำเป็น):
+
+- **`Referrer-Policy`** — ควบคุมว่า browser จะส่ง URL ของหน้าปัจจุบัน (ผ่าน header `Referer`) ไปให้ปลายทางแค่
+  ไหนเมื่อผู้ใช้คลิก link ออกจากหน้านี้ ค่า `strict-origin-when-cross-origin` (ค่าที่ browser สมัยใหม่ใช้เป็น
+  default อยู่แล้ว) ส่งแค่ origin (ไม่ส่ง path/query string ที่อาจมีข้อมูลอ่อนไหวปนอยู่) เมื่อไปยัง origin อื่น
+- **`Permissions-Policy`** — ควบคุมว่าหน้าเว็บนี้ (และ `<iframe>` ที่ฝังอยู่ในนั้น) ใช้ browser API ที่มีผลต่อ
+  privacy ได้บ้างไหม (กล้อง, ไมโครโฟน, ตำแหน่งที่ตั้ง) ค่า `camera=(), microphone=(), geolocation=()` ปิดทั้งสาม
+  อย่างถ้าหน้าเว็บไม่จำเป็นต้องใช้เลย
+
+เพิ่มเข้าไปในสไตล์เดียวกับสี่ header หลักได้ทันทีด้วย `SetResponseHeaderLayer` อีกสองตัวต่อกันในสไตล์เดียวกัน
+บทนี้ไม่ได้พิสูจน์ทั้งสองตัวด้วยการรันจริงเพราะกลไกเหมือนกับสี่ตัวหลักทุกประการ (แค่ชื่อ header/ค่าต่างกัน) —
+สิ่งที่ต่างจริงคือ**ความหมายที่ header สั่งให้ browser ทำ** ไม่ใช่กลไกการส่ง header
 
 ### 100.11 Capstone Security Audit: ตรวจสอบระบบห้องสมุดจาก Part 92-94 ทั้งระบบ
 

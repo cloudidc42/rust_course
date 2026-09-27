@@ -29,6 +29,12 @@
 
 ดูรายชื่อ Part ทั้งหมดแบบละเอียดที่ [`docs/curriculum.md`](./docs/curriculum.md)
 
+## โมดูลโปรเจค (100 Real-World Projects)
+
+นอกจากหลักสูตรหลัก 110 Parts แล้ว ยังมี **โมดูลโปรเจค** แยกต่างหาก — 100 โปรเจคที่รันได้จริง
+แบ่งเป็น 10 หมวด (CLI, Web, Data, Security, Games, Distributed, DevOps, Networking, ML/AI, Full-Stack)
+ดูรายชื่อโปรเจคทั้งหมดที่ [`projects/README.md`](./projects/README.md)
+
 ## สารบัญโดยย่อ
 
 ### โมดูล 0: เริ่มต้นใช้งาน Rust

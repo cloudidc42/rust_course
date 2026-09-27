@@ -209,6 +209,17 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 ระหว่างพัฒนา ใช้ `trunk serve` แทน `trunk build` เพื่อได้ dev server พร้อม hot-reload (rebuild อัตโนมัติเมื่อไฟล์ `.rs` เปลี่ยน แล้ว browser จะ auto-refresh ผ่าน WebSocket ที่ `trunk` ฝังสคริปต์ไว้ให้เอง) — เหมาะกับการพัฒนา component หลาย ๆ ตัวต่อเนื่อง ส่วน `wasm-pack build --target web` เหมาะกว่าตอนต้องการควบคุมทุกไฟล์ output เอง (เช่นตอนต้องเอา `.wasm`/`.js` ไปฝังในระบบ build ของ backend framework อื่นที่ไม่ใช่ `trunk`) — บทนี้ทดสอบทั้งสองวิธีจริง `wasm-pack` ใช้สำหรับตัวอย่าง signal/memo/component ในหัวข้อ 89.3-89.5 (เพื่อควบคุม `index.html` ที่ใช้กับ Playwright เอง) และ `trunk` ใช้พิสูจน์ workflow ที่ตรงกับที่ผู้เรียนจะใช้จริงในโปรเจกต์
 
+#### ขนาดไฟล์จริงระหว่าง debug กับ release build
+
+WASM bundle ที่ได้จาก `wasm-pack build --target web` แบบ debug (ค่า default ไม่ระบุ flag) มีขนาดใหญ่กว่าที่ควรส่งขึ้น production มาก เพราะไม่มีการ optimize ใด ๆ เลย ทดสอบวัดขนาดไฟล์จริงจากตัวอย่างในบทนี้ (รวม signal, memo, component, router เข้าด้วยกัน) เทียบ debug กับ `wasm-pack build --target web --release` (ซึ่งเรียก `wasm-opt` ต่อท้ายให้อัตโนมัติถ้าเครื่องมีติดตั้งไว้):
+
+| Build | ขนาดไฟล์ `.wasm` จริง |
+|---|---|
+| `--dev` (debug, ค่า default) | 915,664 bytes (~894 KB) |
+| `--release` (พร้อม `wasm-opt`) | 359,059 bytes (~350 KB) |
+
+ขนาดลดลงมากกว่าครึ่งหนึ่งแค่จากการสลับ flag เดียว (`--release` เปิด `opt-level` ที่สูงขึ้นของ `rustc` เอง บวกกับ `wasm-opt` ที่มา post-process ไฟล์ `.wasm` อีกชั้นเพื่อตัด code ที่ไม่ได้ใช้และบีบอัดโครงสร้างให้กระชับขึ้น) ตัวเลขที่แน่นอนจะต่างไปตามจำนวน component/dependency ของแอปคุณเอง แต่หลักการเดียวกันนี้ใช้ได้เสมอ: **อย่าลืม `--release` ก่อน deploy จริง** เพราะ WASM bundle คือสิ่งที่ผู้ใช้ทุกคนต้องดาวน์โหลดก่อนหน้าจะ interactive ได้เลย (ตามที่อธิบายเรื่อง CSR ในหัวข้อ 89.7) ขนาดไฟล์ที่เล็กลงมีผลตรงต่อเวลาที่ผู้ใช้ต้องรอจริง ๆ
+
 **แนวทางที่ 2 — Full-stack ด้วย `cargo-leptos`**: เมื่อคุณต้องการ SSR/server function (หัวข้อ 89.6 เป็นต้นไป) จำเป็นต้องมี**สอง build target ในโปรเจกต์เดียว** — เวอร์ชันที่ compile เป็น native binary (รันบน server จริง มี feature `ssr`) และเวอร์ชันที่ compile เป็น WASM (รันในเบราว์เซอร์เพื่อ hydrate, มี feature `hydrate`) `cargo-leptos` คือเครื่องมือ CLI เฉพาะของ Leptos ที่จัดการ build ทั้งสอง target นี้พร้อมกันให้ ติดตั้งด้วย:
 
 ```bash
@@ -279,11 +290,16 @@ pub fn create_signal<T: Send + Sync + 'static>(
 }
 ```
 
-`create_signal` **ยังเรียกใช้ได้จริง** (มันแค่ forward ไปเรียก `signal()` ข้างใน) แต่ถูก mark ด้วย `#[deprecated]` แล้ว — ถ้าใช้จะเจอ compiler warning แบบนี้จริง:
+`create_signal` **ยังเรียกใช้ได้จริง** (มันแค่ forward ไปเรียก `signal()` ข้างใน) แต่ถูก mark ด้วย `#[deprecated]` แล้ว — ถ้าใช้จะเจอ compiler warning จริง (คัดลอกมาจาก `cargo check` จริงบนเครื่องที่เขียนบทนี้):
 
 ```
-warning: use of deprecated function `leptos::reactive::signal::create_signal`:
-This function is being renamed to `signal()` to conform to Rust idioms.
+warning: use of deprecated function `leptos::prelude::create_signal`: This function is being renamed to `signal()` to conform to Rust idioms.
+ --> src/lib.rs:4:31
+  |
+4 |     let (count, _set_count) = create_signal(0);
+  |                               ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(deprecated)]` on by default
 ```
 
 เหตุผลเบื้องหลัง (ตามข้อความ deprecation) คือ "conform to Rust idioms" — สังเกตว่าใน Rust ธรรมดา ฟังก์ชันที่สร้างค่าของ type มักไม่มีคำว่า `create_` นำหน้า (เช่น `Vec::new()` ไม่ใช่ `create_vec()`, `String::from(...)` ไม่ใช่ `create_string(...)`) prefix `create_` เป็นธรรมเนียมที่หลุดมาจากตอน Leptos ยุคแรกที่ได้รับอิทธิพลจาก React hooks (`useState` มักถูกแปลเป็น `create_state` ในหลาย framework ที่ port มาจาก React) ทีม Leptos จึงค่อย ๆ เปลี่ยนชื่อฟังก์ชันกลุ่มนี้ทั้งหมดให้เข้ากับธรรมเนียม Rust มากขึ้น **บทนี้ใช้ `signal()` เป็นหลักตลอดทั้งบท** เพราะเป็น API ปัจจุบันที่ไม่มี warning
@@ -647,11 +663,128 @@ build เป็น WASM จริงแล้วอ่าน `document.body.inne
 
 สังเกตสามจุดจากผลลัพธ์จริงนี้: (1) `BookCard` ตัวแรกไม่ได้ส่ง `subtitle` — Leptos render เป็น comment node `<!---->` แทนตำแหน่งที่ `None` (นี่คือกลไกเดียวกับที่ใช้กับ conditional rendering ทั่วไปใน Leptos — comment node ทำหน้าที่เป็น "ตำแหน่งยึด" ในโครงสร้าง DOM เผื่อค่ากลายเป็น `Some` ทีหลัง โดยไม่กระทบ node ข้างเคียง) (2) `rating=stars` (ส่ง signal) กับ `rating=5` (ส่ง literal) ทำงานได้ทั้งคู่เพราะ `#[prop(into)]` เรียก `.into()` ให้อัตโนมัติ — `ReadSignal<i32>` และ `i32` ทั้งคู่ implement `Into<Signal<i32>>` (3) `children()` render เนื้อหาระหว่าง tag เปิด-ปิดของ `<BookCard>...</BookCard>` เข้าไปในตำแหน่ง `<div class="footer">` ตรงตามที่กำหนดไว้ในโค้ด — พิสูจน์ว่า pattern การส่ง markup ลูกผ่าน component ทำงานได้เหมือนกับที่ Yew ทำผ่าน `props.children` ใน Part 88 แม้ syntax รับ parameter จะต่างกัน (Leptos รับเป็น parameter `children: Children` ตรง ๆ ไม่ต้องพึ่ง struct props ที่มี field `children`)
 
+#### แชร์ state ข้าม component โดยไม่ต้อง prop-drilling: `provide_context`/`use_context`
+
+ส่งพารามิเตอร์ผ่าน props ตรง ๆ ใช้ได้ดีตอน component ไม่ลึกมาก แต่ถ้า state ต้องแชร์กันระหว่าง component ที่อยู่ไกลกันในโครงสร้างต้นไม้ (เช่น "จำนวนสินค้าในตะกร้า" ที่ปุ่ม "เพิ่มลงตะกร้า" กับ badge แสดงจำนวนอยู่ห่างกันคนละส่วนของหน้า) การส่งผ่าน props ทุกชั้นจะกลายเป็น **prop-drilling** ที่น่าเบื่อและแก้ยากเมื่อโครงสร้างเปลี่ยน Leptos มี `provide_context`/`use_context` แก้ปัญหานี้ — เคยเห็นมันมาแล้วในหัวข้อ 89.6 ตอนฉีด `PgPool` ให้ server function แต่จริง ๆ มันใช้งานทั่วไปได้กับ signal ฝั่ง client เช่นกัน (นี่คือกลไกเดียวกับ `ContextProvider` ของ Yew ใน Part 88 — ทั้งสอง framework มีแนวคิด "ค่าที่มองเห็นได้จาก component ลูกทุกตัวโดยไม่ต้องผ่าน props" เหมือนกัน):
+
+```rust
+use leptos::prelude::*;
+
+#[derive(Clone, Copy)]
+struct CartState {
+    count: RwSignal<i32>,
+}
+
+#[component]
+fn AddToCartButton() -> impl IntoView {
+    // use_context หา CartState จาก component บรรพบุรุษที่ provide_context ไว้
+    let cart = use_context::<CartState>().expect("CartState ต้องถูก provide ไว้ก่อน");
+    view! {
+        <button on:click=move |_| cart.count.update(|c| *c += 1)>
+            "เพิ่มลงตะกร้า"
+        </button>
+    }
+}
+
+#[component]
+fn CartBadge() -> impl IntoView {
+    let cart = use_context::<CartState>().expect("CartState ต้องถูก provide ไว้ก่อน");
+    view! { <span>"ตะกร้า: " {move || cart.count.get()}</span> }
+}
+
+#[component]
+fn App() -> impl IntoView {
+    let cart = CartState { count: RwSignal::new(0) };
+    provide_context(cart); // component ลูกทุกตัว (ไม่ว่าจะอยู่ลึกแค่ไหน) เรียก use_context เจอ
+
+    view! {
+        <div>
+            <AddToCartButton />
+            <CartBadge />
+        </div>
+    }
+}
+```
+
+`AddToCartButton` และ `CartBadge` เป็น component **พี่น้องกัน** (sibling) ไม่มีความสัมพันธ์ parent-child โดยตรง และไม่มีการส่ง prop ระหว่างกันเลย — ทดสอบจริงในเบราว์เซอร์ (คลิกปุ่มสามครั้งแล้วอ่านค่า badge) ได้ผลลัพธ์ตรงตามที่ตั้งใจ:
+
+```
+before: ตะกร้า: 0
+after 3 clicks: ตะกร้า: 3
+```
+
+`use_context::<T>()` หา value จาก **component บรรพบุรุษที่ใกล้ที่สุด**ที่เคยเรียก `provide_context` ด้วย type `T` เดียวกัน (ค้นหาตาม component tree ไม่ใช่ตาม lexical scope ของโค้ด) ถ้าไม่มีบรรพบุรุษไหน provide ไว้เลยจะได้ `None` กลับมา (ในตัวอย่างนี้ `.expect(...)` จะ panic ทันทีถ้าลืม `provide_context` — เป็นความตั้งใจให้เห็น bug นี้เร็วที่สุดตอน dev ไม่ใช่เงียบ ๆ แล้ว UI พังแบบเข้าใจยาก) จุดสำคัญคือ `CartState` ในตัวอย่างนี้ห่อ `RwSignal` ไว้ข้างใน (ไม่ใช่ `i32` ตรง ๆ) เพราะ `provide_context` ส่งค่าไปแบบ **snapshot ครั้งเดียวตอนเรียก** — ถ้าใส่ `i32` ธรรมดาเข้าไป component ลูกจะได้ค่าคงที่ ณ ตอนนั้นไปตลอด ไม่มีทาง "เห็น" การเปลี่ยนแปลงในอนาคตเลย ต้องห่อด้วย signal (หรือ struct ที่มี signal ข้างใน) เสมอถ้าต้องการให้ context เป็น reactive ตามหลักการเดียวกับหัวข้อ 89.3 ที่ต้องมี signal ถึงจะเกิด reactive effect ได้
+
 ### 89.6 Server Functions: จุดขายหลักของ Leptos
 
 ถ้า fine-grained reactivity คือความต่างเชิงสถาปัตยกรรมของ Leptos ฝั่ง client, **server function** คือความต่างเชิงสถาปัตยกรรมที่สำคัญกว่าในภาพรวม — และคือเหตุผลหลักที่ชื่อบทนี้มีคำว่า "Full-stack Rust"
 
 Yew (Part 88) ไม่มีแนวคิดนี้เลย ถ้าคุณอยากให้ Yew component คุยกับ database คุณต้อง: (1) เขียน REST API endpoint แยกด้วย Axum เอง (Part 62-70), (2) เขียนโค้ด fetch ฝั่ง client เอง (ผ่าน `gloo-net` หรือ `reqwasm`), (3) เขียน struct สำหรับ (de)serialize request/response เอง, (4) เขียน error handling คู่ขนานสองฝั่ง (ฝั่ง server ตอบ error code, ฝั่ง client parse error code) — ทั้งหมดนี้คือ "งานเชื่อมต่อ" ที่คุณต้องทำเองทุกจุด
+
+#### ปริมาณงานที่ต้องเขียนถ้าไม่มี server function
+
+เพื่อให้เห็นภาพจับต้องได้ ลองเขียนโค้ดที่ทำสิ่งเดียวกับ `get_event` (query event หนึ่งตัวจากฐานข้อมูล) แบบที่ Yew (หรือ Leptos ถ้าไม่ใช้ `#[server]`) ต้องทำ — ทดสอบว่า compile ผ่านจริงทั้งสองฝั่ง:
+
+**ฝั่ง client** (ต้องเขียนเอง เพราะไม่มี macro ช่วย):
+
+```rust
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+struct EventSeats {
+    id: i64,
+    name: String,
+    total_seats: i32,
+    booked_seats: i32,
+}
+
+// ต้องเขียน struct รับผลลัพธ์เอง (ซ้ำกับ struct ฝั่ง server แทบทุกฟิลด์)
+// ต้องเขียนโค้ด fetch เอง ทั้ง URL, method, error handling
+async fn fetch_event_manually(event_id: i64) -> Result<EventSeats, String> {
+    let url = format!("/api/manual/get_event?event_id={event_id}");
+    let resp = gloo_net::http::Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.json::<EventSeats>().await.map_err(|e| e.to_string())
+}
+```
+
+**ฝั่ง server** (endpoint ของ Axum ที่ต้องเขียนแยกไว้อีกจุด — ทับซ้อนกับ struct ฝั่ง client ทุกประการ):
+
+```rust
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::Json;
+use std::collections::HashMap;
+
+async fn get_event_handler(
+    State(pool): State<PgPool>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<EventSeats>, StatusCode> {
+    let event_id: i64 = params
+        .get("event_id")
+        .and_then(|s| s.parse().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let row = sqlx::query_as::<_, EventSeats>(
+        "SELECT id, name, total_seats, booked_seats FROM events WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(Json(row))
+}
+
+// ต้องไปเพิ่ม route นี้เข้า Router เองอีกจุด แยกจาก route อื่น ๆ ทั้งหมด
+// .route("/api/manual/get_event", get(get_event_handler))
+```
+
+ทั้งสองไฟล์นี้ทดสอบ compile ผ่านจริงแยกกัน (ฝั่ง client compile บน `wasm32-unknown-unknown` ฝั่ง server compile บน native target) — สิ่งที่ต้องสังเกตคือ **struct `EventSeats` ต้องเขียนซ้ำสองที่** (หรือแยกเป็น shared crate ที่ทั้งสองฝั่ง import — งาน setup เพิ่มอีกชั้น) **ต้องคิดชื่อ path เอง คิด encoding เอง เขียน error handling คู่ขนานเอง** และถ้าเปลี่ยน signature ของ `get_event` (เช่นเพิ่ม parameter) ต้องแก้ทั้งสามที่ให้ตรงกันเอง (struct, endpoint handler, fetch call) โดยไม่มี compiler ช่วยเตือนว่าสามจุดนี้ไม่ตรงกันแล้ว (เพราะมันเป็นโค้ดคนละไฟล์ที่เชื่อมกันด้วย string URL ไม่ใช่ type system)
+
+เทียบกับ `#[server]` ที่กำลังจะเห็นต่อไปนี้ — เขียนแค่ **ฟังก์ชันเดียว** และ struct **ครั้งเดียว** compiler จะบังคับให้ signature ของ client/server ตรงกันเสมอ (เพราะมันมาจากไฟล์ต้นฉบับเดียวกัน) ถ้าแก้ signature ผิดที่ใดที่หนึ่ง compile error ทันทีทั้งสอง target แทนที่จะไปเจอ bug ตอน runtime ว่า client ส่ง argument ไม่ตรงกับที่ server คาดหวัง
 
 Leptos ตัด "งานเชื่อมต่อ" นี้ออกไปด้วย macro `#[server]` หลักการคือ: **คุณเขียนฟังก์ชัน async ตัวเดียว** แล้วประกาศ `#[server]` ไว้บนหัวฟังก์ชันนั้น — Leptos จะ generate โค้ดให้สองแบบ ขึ้นกับว่า compile ด้วย feature อะไร:
 
@@ -831,9 +964,15 @@ ServerError|ที่นั่งเต็มแล้ว
 ```rust
 use leptos::prelude::*;
 
+// จำลอง network delay 300ms เหมือน server function จริงที่ต้องรอ round-trip
+// (ในแอปจริงฟังก์ชันนี้จะถูกแทนด้วยการเรียก get_book_count() ซึ่งเป็น server function จริง)
+async fn fetch_book_count() -> i32 {
+    gloo_timers::future::TimeoutFuture::new(300).await;
+    42
+}
+
 #[component]
 fn BookCountDisplay() -> impl IntoView {
-    // ในแอปจริง fetcher นี้จะเป็น get_book_count() (server function) ตรง ๆ
     let book_count = LocalResource::new(fetch_book_count);
 
     view! {
@@ -979,6 +1118,136 @@ Hydration คือกลไกที่ทำให้ SSR ต่างจา�
 จุดสำคัญที่สุดคือ **hydration ไม่ทำลาย DOM เดิมแล้วสร้างใหม่** — มันแค่ "จับมือ" กับ DOM ที่มีอยู่แล้วให้กลายเป็น interactive ผู้ใช้จะไม่เห็นการกระพริบหรือ flash ของหน้าจอเลยระหว่างขั้นตอนนี้ (ต่างจากแนวทางเดิมสมัย React ก่อนมี hydration ที่บางครั้ง client ต้อง re-render ทับ HTML ที่ server ส่งมาทั้งหมด) นี่คือเหตุผลที่คำว่า "hydrate" (เติมน้ำ) ถูกเลือกใช้เป็นคำเปรียบเปรย: HTML ที่ server ส่งมาเป็นเหมือน "โครงแห้ง" (มีรูปร่างครบแต่ยังไม่มีชีวิต ยังกดปุ่มไม่ได้) ส่วน WASM ที่มา hydrate คือการ "เติมชีวิต" ให้โครงเดิมโดยไม่เปลี่ยนรูปร่างมันเลย
 
 การที่ SSR + hydration ทำงานร่วมกันได้ดีเป็นเรื่องที่ต้องอาศัยความร่วมมือจาก fine-grained reactivity โดยตรง — เพราะ Leptos รู้อยู่แล้วตั้งแต่ compile time ว่า signal ตัวไหนผูกกับ node ไหน (ตามที่พิสูจน์ในหัวข้อ 89.1) การ hydrate จึงทำได้แค่ "หา node ที่ตรงตำแหน่งแล้วผูก effect เข้าไป" โดยไม่ต้องสร้าง representation ใหม่มาเทียบกับ DOM เดิมก่อน (ถ้าใช้โมเดล Virtual DOM การ hydrate มักซับซ้อนกว่านี้ เพราะต้องมีขั้นตอน reconcile ต้นไม้ virtual กับ DOM จริงที่ server ส่งมา)
+
+#### พิสูจน์ hydration แบบเต็ม pipeline: SSR ส่ง HTML จริง แล้ว WASM มา "จับมือ" กับ node เดิมจริง
+
+คำอธิบายข้างบนพิสูจน์ได้จริงแบบครบ pipeline (ไม่ใช่แค่ทฤษฎี) — ใช้โครงสร้างโปรเจกต์ Axum + `leptos_axum` + SQLx แบบเดียวกับที่หัวข้อ 89.8 จะอธิบายเต็ม ๆ ต่อไป (routing, `.leptos_routes_with_context`, server function ที่คุยกับฐานข้อมูล) แต่เพิ่มการ compile เป็น**สอง target จากซอร์สโค้ดชุดเดียวกัน**: build เป็น native binary ด้วย feature `ssr` (`cargo build --features ssr`) สำหรับรัน Axum server และ build เป็น WASM ด้วย feature `hydrate` (`wasm-pack build --target web --features hydrate`) สำหรับให้ browser โหลด — component `App` (มี signal `count` และปุ่ม increment เหมือนหัวข้อ 89.3-89.4) เขียนไว้**ที่เดียว**ใน `lib.rs` ใช้ร่วมกันทั้งสอง target โดยไม่ต้องเขียนซ้ำ (ต่างจากตัวอย่างในหัวข้อ 89.8 ที่ตั้งใจให้เรียบง่ายด้วยการ build แค่ target `ssr` อย่างเดียวเพื่อโฟกัสที่ server function ก่อน แล้วค่อยเพิ่ม `hydrate` เข้ามาที่นี่)
+
+โครงสร้าง `Cargo.toml` ที่ทำให้ compile ได้สองแบบจาก dependency set คนละชุด (`sqlx`/`axum`/`tokio` ต้องเป็น optional dependency ที่ผูกกับ feature `ssr` เท่านั้น ไม่อย่างนั้น `wasm-pack` จะพยายาม compile `sqlx` ลง `wasm32-unknown-unknown` ซึ่งจะพังเพราะ driver ของ PostgreSQL ต้องพึ่ง native networking):
+
+```toml
+[package]
+name = "leptos_ssr"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "leptos_ssr"
+required-features = ["ssr"]
+
+[dependencies]
+leptos = "0.8.21"
+serde = { version = "1", features = ["derive"] }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+axum = { version = "0.8.9", optional = true }
+leptos_axum = { version = "0.8.10", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros"], optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
+
+[features]
+hydrate = ["leptos/hydrate"]
+ssr = ["leptos/ssr", "dep:leptos_axum", "dep:axum", "dep:tokio", "dep:sqlx", "dep:tower-http"]
+```
+
+`lib.rs` มี `App` component ตัวเดียวที่ใช้ทั้งสอง target บวกจุดเข้าฝั่ง hydrate ที่ cfg ไว้ให้ compile เฉพาะเมื่อเปิด feature `hydrate` เท่านั้น:
+
+```rust
+#[component]
+pub fn App() -> impl IntoView {
+    let (count, set_count) = signal(0);
+    view! {
+        <h1>"Rust Conf 2026"</h1>
+        <p id="count-display">"Count: " {count}</p>
+        <button id="inc-btn" on:click=move |_| set_count.update(|n| *n += 1)>
+            "increment"
+        </button>
+    }
+}
+
+// จุดเข้าฝั่ง client — คอมไพล์เฉพาะตอน build ด้วย --features hydrate เท่านั้น
+#[cfg(feature = "hydrate")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn hydrate() {
+    console_error_panic_hook::set_once();
+    // hydrate_body ต่างจาก mount_to_body (หัวข้อ 89.2) ตรงที่มันไม่สร้าง DOM
+    // ใหม่ทั้งหมด — มันเดินเข้าไป "จับคู่" กับ DOM ที่มีอยู่แล้วจาก SSR
+    leptos::mount::hydrate_body(App);
+}
+```
+
+`main.rs` (compile เฉพาะ target `ssr` เพราะ `required-features = ["ssr"]` ใน `Cargo.toml`) เพิ่มสองอย่างจากตัวอย่างในหัวข้อ 89.8: `<HydrationScripts>`/`<AutoReload>` ใน shell, และ `.nest_service("/pkg", ServeDir::new("pkg"))` เพื่อเสิร์ฟไฟล์ที่ `wasm-pack` สร้างไว้เป็น static file:
+
+```rust
+use leptos_ssr::App;
+
+fn shell(options: LeptosOptions) -> impl IntoView {
+    view! {
+        <!DOCTYPE html>
+        <html lang="th">
+            <head>
+                <meta charset="utf-8" />
+                <title>"Leptos SSR + Hydrate Demo"</title>
+                // สองตัวนี้คือคนที่ generate <script>/<link> ที่โหลด WASM
+                // ให้อัตโนมัติ — ไม่ต้องเขียน <script> เองเลย
+                <leptos::hydration::AutoReload options=options.clone() />
+                <leptos::hydration::HydrationScripts options=options.clone() />
+            </head>
+            <body>
+                <App />
+            </body>
+        </html>
+    }
+}
+
+// ในฟังก์ชัน main (ส่วนที่เหลือเหมือนหัวข้อ 89.8 ทุกประการ) เพิ่มแค่บรรทัดนี้
+// ลงใน Router เพื่อเสิร์ฟไฟล์ WASM/JS จากโฟลเดอร์ pkg/ ที่ wasm-pack สร้างไว้:
+// .nest_service("/pkg", tower_http::services::ServeDir::new("pkg"))
+```
+
+build ทั้งสอง target จริง (`cargo build --no-default-features --features ssr` ได้ native binary, `wasm-pack build --target web --no-default-features --features hydrate` ได้ `pkg/leptos_ssr.js` + `pkg/leptos_ssr_bg.wasm` — ชื่อไฟล์ตรงกับที่ `<HydrationScripts>` คาดหวังไว้พอดีเพราะทั้งคู่ยึด `output_name` เดียวกันจาก `LeptosOptions`) ผลลัพธ์จริงจาก `curl http://127.0.0.1:3009/` (server ที่ compile ด้วย feature `ssr`) แสดง HTML ที่มีทั้งเนื้อหาที่ render จริง**และ**สคริปต์ hydration ที่ Leptos ฝังมาให้อัตโนมัติผ่าน component `<HydrationScripts>`:
+
+```html
+<body>
+  <h1>Rust Conf 2026</h1>
+  <p>หน้านี้ถูก render เป็น HTML จริงบนฝั่ง server ก่อน แล้วค่อย hydrate ให้กดปุ่มได้</p>
+  <p id="count-display">Count: <!>0</p>
+  <button id="inc-btn">increment</button>
+</body>
+```
+
+```html
+<script type="module" nonce="...">
+(function (root, pkg_path, output_name, wasm_output_name) {
+	import(`${root}/${pkg_path}/${output_name}.js`)
+		.then(mod => {
+			mod.default({module_or_path: `${root}/${pkg_path}/${wasm_output_name}.wasm`}).then(() => {
+				mod.hydrate();
+			});
+		})
+})
+("", "pkg", "leptos_ssr", "leptos_ssr_bg");
+</script>
+```
+
+สังเกตว่า `<p id="count-display">Count: 0</p>` เป็น **HTML จริงที่มีค่า `0` อยู่แล้ว** ตั้งแต่ response แรกที่ server ตอบมา (ไม่ใช่ placeholder เปล่า ๆ) และสคริปต์ที่แนบมาทำหน้าที่ตรงตามชื่อ `mod.hydrate()` — import ไฟล์ JS/WASM ที่ build จาก feature `hydrate` มา แล้วเรียกฟังก์ชัน `hydrate()` (ตรงกับ `#[wasm_bindgen(start)] pub fn hydrate() { leptos::mount::hydrate_body(App); }` ที่เขียนไว้ใน `lib.rs`) ไม่ใช่ `mount_to_body()` แบบที่ใช้ในตัวอย่าง CSR ล้วน ๆ ของหัวข้อ 89.2-89.5 — `hydrate_body` คือฟังก์ชันที่ทำหน้าที่ "จับคู่กับ DOM ที่มีอยู่แล้ว" แทนการสร้าง DOM ใหม่ทั้งหมดที่ `mount_to_body` ทำ
+
+เปิดหน้านี้ด้วยเบราว์เซอร์จริงผ่าน Playwright แล้วทดสอบสองเรื่อง: (1) กดปุ่ม increment ได้จริงหลัง WASM โหลดเสร็จ และ (2) **DOM node ของ `<h1>` ที่จับ reference ไว้ตั้งแต่ก่อน WASM โหลดเสร็จ (ตอนที่หน้ายังเป็น HTML ดิบจาก server) ยังเป็น object ตัวเดิมหลัง hydrate เสร็จแล้ว** — ผลลัพธ์จริงที่ได้:
+
+```
+after load, count-display: Count: 0
+after 3 clicks, count-display: Count: 3
+page errors: []
+
+h1 node identity preserved through hydration: true
+```
+
+`h1 node identity preserved through hydration: true` คือหลักฐานตรงจุดที่สุดของคำอธิบายในหัวข้อนี้ทั้งหมด: WASM ที่โหลดมาไม่ได้ทำลาย `<h1>` ที่ server ส่งมาแล้วสร้างใหม่ — มันแค่เดินเข้าไป "จับมือ" กับ node เดิมที่มีอยู่แล้วในหน้า (เหมือนที่อธิบายไว้ข้างบนทุกคำ) และหลังจากนั้นปุ่ม `increment` ก็ใช้งานได้จริงเพราะ reactive graph ถูกผูกเข้ากับ node เดิมเรียบร้อยแล้ว ไม่มี error ใดๆเกิดขึ้นระหว่างกระบวนการนี้เลย (`page errors: []`) — นี่คือ SSR + hydration ที่ทำงานจริงแบบครบวงจร ไม่ใช่แค่คำอธิบายเชิงทฤษฎี
 
 #### ข้อแลกเปลี่ยนของแต่ละ mode
 
@@ -1205,6 +1474,54 @@ at /books/42: หนังสือ id = 42
 
 ข้อควรระวังเชิง infrastructure ที่พบระหว่างทดสอบจริง (เจอ error จริงตอนแรก): เว็บเซิร์ฟเวอร์ที่เสิร์ฟไฟล์ static ต้อง **ส่ง `index.html` กลับมาสำหรับทุก path ที่ไม่ตรงกับไฟล์จริง** (เรียกว่า SPA fallback) เพราะ `leptos_router` ใช้ HTML5 History API (`pushState`) ควบคุม URL โดยไม่ reload หน้าจริง — ถ้าผู้ใช้กด refresh หรือพิมพ์ URL `/books/42` ตรง ๆ ใน address bar โดยที่ server ไม่มี SPA fallback server จะตอบ `404 Not Found` เพราะไม่มีไฟล์ชื่อ `books/42` อยู่จริงในระบบไฟล์ (ระหว่างทดสอบเจอ error `net::ERR_CONNECTION_REFUSED`/`404` จริงจนกว่าจะเพิ่ม fallback ให้เว็บเซิร์ฟเวอร์ที่ใช้ทดสอบ) — นี่ไม่ใช่ปัญหาเฉพาะ Leptos แต่เป็นข้อกำหนดของ client-side routing ทุกแบบ (Yew ที่ใช้ `yew-router` ใน Part 88 ก็ต้องการ SPA fallback แบบเดียวกัน) ในโปรเจกต์ SSR (หัวข้อ 89.8) ปัญหานี้หายไปเองเพราะทุก path ที่ `generate_route_list` รู้จักจะมี handler ฝั่ง Axum ตอบให้ตรง ๆ อยู่แล้ว ไม่ต้องพึ่ง fallback แบบ static file server
 
+#### บทพิสูจน์ครบวงจร: จากปุ่มที่ hydrate แล้ว ไปจนถึงแถวในฐานข้อมูลจริง
+
+ตอนนี้มีทุกส่วนพร้อมแล้ว (SSR ส่ง HTML จริงจากหัวข้อนี้, hydration ที่จับมือกับ DOM เดิมจากหัวข้อ 89.7, server function ที่คุยกับฐานข้อมูลจากหัวข้อ 89.6) ลองรวมทั้งหมดเข้าด้วยกันเป็นครั้งเดียวเพื่อพิสูจน์คำกล่าวที่สำคัญที่สุดของบทนี้แบบครบวงจรจริง ๆ: **"เขียนฟังก์ชันเดียว เรียกจาก component เหมือนฟังก์ชัน local แต่จริง ๆ มันคุยกับฐานข้อมูลข้ามเครือข่ายให้เสร็จ"**
+
+เพิ่มปุ่ม "จองที่นั่ง" ลงใน `App` (component เดียวกันที่ใช้ทั้ง SSR และ hydrate จากหัวข้อ 89.7) ผูกกับ `book_seat` (server function ตัวเดียวกับหัวข้อ 89.6) ผ่าน `Action`:
+
+```rust
+#[component]
+pub fn App() -> impl IntoView {
+    let (count, set_count) = signal(0);
+
+    // Action ผูกกับ server function จริง (book_seat) — เรียกจาก event handler
+    // เหมือนฟังก์ชัน async ธรรมดา ทั้งที่จริง ๆ มันยิง HTTP ไปเซิร์ฟเวอร์
+    let book_action = Action::new(|_: &()| book_seat(1));
+
+    view! {
+        <h1>"Rust Conf 2026"</h1>
+        <p id="count-display">"Count: " {count}</p>
+        <button id="inc-btn" on:click=move |_| set_count.update(|n| *n += 1)>"increment"</button>
+        <button id="book-btn" on:click=move |_| { book_action.dispatch(()); }>"จองที่นั่ง"</button>
+        <p id="book-result">
+            {move || match book_action.value().get() {
+                Some(Ok(n)) => format!("จองสำเร็จ ตอนนี้จองไปแล้ว {n} ที่"),
+                Some(Err(e)) => format!("จองไม่สำเร็จ: {e}"),
+                None => "ยังไม่ได้กดจอง".to_string(),
+            }}
+        </p>
+    }
+}
+```
+
+build ทั้งสอง target อีกครั้ง (`cargo build --features ssr` และ `wasm-pack build --features hydrate`) รัน server แล้วเปิดหน้าด้วย Playwright จริง คลิกปุ่ม "จองที่นั่ง" หนึ่งครั้ง แล้วอ่านทั้งข้อความบนหน้าเว็บและแถวจริงในฐานข้อมูล:
+
+```
+before click: ยังไม่ได้กดจอง
+after click: จองสำเร็จ ตอนนี้จองไปแล้ว 43 ที่
+```
+
+```sql
+SELECT booked_seats FROM events WHERE id=1;
+ booked_seats
+--------------
+           43
+(1 row)
+```
+
+เส้นทางที่เกิดขึ้นจริงตอนคลิกปุ่มนี้ครบทุกขั้น: (1) เบราว์เซอร์ (WASM ที่ hydrate ไว้แล้ว) เรียก `book_action.dispatch(())` (2) โค้ดฝั่ง client ของ `book_seat` (คนละโค้ดกับที่เราเขียน — macro generate ให้ ตามที่อธิบายในหัวข้อ 89.6) ยิง HTTP POST ไปที่ `/api/book_seat` (3) Axum route ที่ `.leptos_routes_with_context` สร้างไว้รับ request นี้ (4) เรียก `book_seat` เวอร์ชันจริงฝั่ง server (โค้ดเดียวกันที่เราเขียนไว้ใน `lib.rs` แต่ compile ด้วย feature `ssr`) ซึ่งเปิด transaction จริงกับ PostgreSQL, ล็อกแถวด้วย `FOR UPDATE`, เช็คที่นั่งว่าง, `UPDATE`, และ `COMMIT` (5) ผลลัพธ์ (`43`) เดินทางกลับมาเป็น HTTP response (6) โค้ด client deserialize กลับมาเป็น `Result<i32, ServerFnError>` แล้วเขียนใส่ `book_action.value()` (signal ภายในของ `Action`) (7) `{move || match book_action.value().get() {...}}` ที่อ่าน signal นั้นถูกกระตุ้นให้รันใหม่ (fine-grained reactivity จากหัวข้อ 89.1) แล้วเขียนข้อความใหม่ลง DOM node เดิม —**ทั้งเจ็ดขั้นตอนนี้เกิดขึ้นจากการเขียนโค้ดแค่สองบรรทัดในฝั่ง component** (`Action::new(...)` กับ `.dispatch(())`) โดยไม่มีการเขียน fetch, ไม่มีการเขียน JSON serialize/deserialize มือ, ไม่มีการเขียน HTTP route แยกสำหรับ endpoint นี้เลยแม้แต่บรรทัดเดียว — นี่คือสิ่งที่หัวข้อ 89.6 อธิบายไว้ว่าเป็น "จุดขายหลักของ Leptos" ตอนนี้พิสูจน์แล้วว่าทำงานได้จริงครบทั้ง pipeline ตั้งแต่ปลายนิ้วผู้ใช้ไปจนถึงแถวในฐานข้อมูล
+
 ### 89.9 Islands Architecture: Partial Hydration (แนวคิดขั้นสูง)
 
 หัวข้อ SSR ในหัวข้อ 89.7-89.8 มีข้อจำกัดหนึ่งที่ต้องพูดตรง ๆ: แม้ SSR จะทำให้ HTML แรกมาเร็ว แต่ **WASM bundle ทั้งก้อนยังต้องถูกส่งไปให้ client เพื่อ hydrate ทั้งหน้า** แม้หน้านั้นจะมีส่วน interactive อยู่นิดเดียว (เช่นปุ่มกดเดียวท่ามกลางเนื้อหา static เป็นพันบรรทัด) นี่คือปัญหาที่ **islands architecture** ถูกออกแบบมาแก้ — แนวคิดคือ: มีแค่ "island" (ส่วนที่ต้อง interactive จริง ๆ) เท่านั้นที่ compile เป็น WASM แล้วส่งไปให้ client ส่วนที่เหลือของหน้ายังคงเป็น static HTML ล้วน ๆ ไม่มี JS/WASM ห่อหุ้มเลย
@@ -1371,11 +1688,13 @@ note: future is not `Send` as it awaits another future which is not `Send`
 
 4. **(ยาก/ประยุกต์)** สร้างหน้า SSR เต็มรูปแบบที่มี route `/books` แสดงรายการหนังสือทั้งหมด (query ผ่าน server function ตอน component โหลดด้วย `Resource::new`) ผสานกับ route ธรรมดาของ Axum ที่ชื่อ `/api/stats` (คืนค่า `{"total_books": N}` แบบ JSON ธรรมดาไม่ผ่าน Leptos) ใน `Router` เดียวกันตามที่หัวข้อ 89.8 สอน แล้วพิสูจน์ด้วย `curl` สองคำสั่งว่าทั้งสอง route ตอบถูกต้องจากเซิร์ฟเวอร์ตัวเดียวกัน — Hint: `Resource::new(|| (), |_| get_all_books())` คือรูปแบบมาตรฐานสำหรับ fetch ข้อมูลตอน component mount ใน Leptos (คล้าย `useEffect` + fetch ของ React แต่ผูกกับ reactive graph โดยตรง)
 
+5. **(ยากมาก/ประยุกต์เต็มรูปแบบ)** ทำตามหัวข้อ 89.7-89.8 ให้ครบ: ตั้งโปรเจกต์ที่ compile ได้ทั้ง feature `ssr` (native binary, รัน Axum server) และ feature `hydrate` (WASM ผ่าน `wasm-pack build --target web --features hydrate`) จากซอร์สโค้ด `App` component ชุดเดียวกัน แล้วเปิดหน้าเว็บด้วยเบราว์เซอร์จริง (Chromium headless ผ่าน Playwright หรือเบราว์เซอร์ปกติก็ได้) เขียนสคริปต์ทดสอบที่ (ก) จับ DOM node reference ของ element หนึ่งตัว **ก่อน** WASM โหลดเสร็จ (ข) รอให้ hydrate เสร็จแล้วคลิกปุ่มที่ผูกกับ signal (ค) เทียบ node reference เดิมกับที่อ่านได้หลัง hydrate ด้วย `===` — ถ้าทำถูก ค่าที่ได้ต้องเป็น `true` เสมอ (ตามที่พิสูจน์ไว้จริงในหัวข้อ 89.7) — Hint: จุดที่มักพลาดคือลืมเสิร์ฟไฟล์ `pkg/*.js`/`pkg/*.wasm` เป็น static file จาก Axum (ต้องมี route หรือ `ServeDir` ชี้ไปที่โฟลเดอร์ `pkg/` ให้ตรงกับ path ที่ `<HydrationScripts>` generate ไว้ใน HTML)
+
 ## สรุป
 
-บทนี้พาไปรู้จัก Leptos ในฐานะ framework ที่ตั้งใจต่างจาก Yew (Part 88) ในระดับสถาปัตยกรรม ไม่ใช่แค่ syntax: **fine-grained reactivity** ทำให้ signal ที่เปลี่ยนค่าไปอัปเดตเฉพาะ DOM node ที่เกี่ยวข้องโดยตรง ไม่มีขั้นตอน diffing เลย (พิสูจน์แล้วด้วยทั้งซอร์สโค้ดจริงของ `tachys` และการทดสอบ DOM node identity จริงในเบราว์เซอร์) API ปัจจุบัน (`signal()`, `Memo::new()`) มาแทน `create_signal()`/`create_memo()` รุ่นเก่าที่ deprecate ไปแล้วเพื่อให้สอดคล้องกับธรรมเนียม Rust มากขึ้น และที่สำคัญที่สุด — **server function** (`#[server]`) คือจุดขายที่ทำให้ Leptos เป็น "full-stack" อย่างแท้จริง: เขียนฟังก์ชันเดียวที่คุยกับฐานข้อมูลผ่าน SQLx (Part 70) ตรง ๆ แล้ว Leptos generate ทั้ง HTTP endpoint ฝั่ง server และโค้ด fetch ฝั่ง client ให้อัตโนมัติ ทั้งหมดนี้รันได้จริงภายใน `axum::Router` เดียวกับที่เรียนมาตั้งแต่ Module 4 — เห็นได้จากตัวอย่าง SSR+Axum+SQLx ที่ทดสอบด้วย `curl` จริงทั้ง query, mutation, และ error path
+บทนี้พาไปรู้จัก Leptos ในฐานะ framework ที่ตั้งใจต่างจาก Yew (Part 88) ในระดับสถาปัตยกรรม ไม่ใช่แค่ syntax: **fine-grained reactivity** ทำให้ signal ที่เปลี่ยนค่าไปอัปเดตเฉพาะ DOM node ที่เกี่ยวข้องโดยตรง ไม่มีขั้นตอน diffing เลย (พิสูจน์แล้วด้วยทั้งซอร์สโค้ดจริงของ `tachys` และการทดสอบ DOM node identity จริงในเบราว์เซอร์) API ปัจจุบัน (`signal()`, `Memo::new()`) มาแทน `create_signal()`/`create_memo()` รุ่นเก่าที่ deprecate ไปแล้วเพื่อให้สอดคล้องกับธรรมเนียม Rust มากขึ้น และที่สำคัญที่สุด — **server function** (`#[server]`) คือจุดขายที่ทำให้ Leptos เป็น "full-stack" อย่างแท้จริง: เขียนฟังก์ชันเดียวที่คุยกับฐานข้อมูลผ่าน SQLx (Part 70) ตรง ๆ แล้ว Leptos generate ทั้ง HTTP endpoint ฝั่ง server และโค้ด fetch ฝั่ง client ให้อัตโนมัติ ทั้งหมดนี้รันได้จริงภายใน `axum::Router` เดียวกับที่เรียนมาตั้งแต่ Module 4 — เห็นได้จากตัวอย่าง SSR+Axum+SQLx ที่ทดสอบด้วย `curl` จริงทั้ง query, mutation, และ error path และพิสูจน์ครบวงจรที่สุดในหัวข้อ 89.8 ที่คลิกปุ่มบนหน้าที่ hydrate แล้วในเบราว์เซอร์จริง แล้วเห็นแถวในฐานข้อมูล PostgreSQL เปลี่ยนค่าจริงตามไปด้วย โดยไม่มีการเขียนโค้ด fetch/JSON มือแม้แต่บรรทัดเดียว
 
-หัวข้อ SSR/hydration ในบทนี้เป็นเพียงการแนะนำแนวคิด — **Part 90 (Dioxus Framework เบื้องต้น)** จะพาไปรู้จักตัวเลือกที่สามในโลก Rust+WASM frontend ซึ่งพยายามผสานจุดแข็งของทั้งสองแนวทางเข้าด้วยกัน พร้อมมุมมองเรื่อง cross-platform ที่ Yew และ Leptos ไม่ได้โฟกัสเป็นหลัก ก่อนที่จะสรุปเปรียบเทียบทั้งสาม framework เข้าด้วยกันในบทถัดไปหลังจากนั้น
+หัวข้อ SSR/hydration ในบทนี้ก็ไม่ใช่แค่คำอธิบายเชิงทฤษฎีเช่นกัน — พิสูจน์แล้วด้วยการ build โปรเจกต์เดียวกันเป็นสอง target จริง (`ssr` สำหรับ native binary, `hydrate` สำหรับ WASM) แล้วเทียบ DOM node reference ก่อน/หลัง hydration ด้วย `===` จริงในเบราว์เซอร์ ยืนยันว่า WASM ที่โหลดมาไม่ได้ทำลาย HTML ที่ server ส่งมาแล้วสร้างใหม่ แต่ "จับมือ" กับ node เดิมให้กลายเป็น interactive เท่านั้น — แต่นี่เป็นเพียงการแนะนำแนวคิด — **Part 90 (Dioxus Framework เบื้องต้น)** จะพาไปรู้จักตัวเลือกที่สามในโลก Rust+WASM frontend ซึ่งพยายามผสานจุดแข็งของทั้งสองแนวทางเข้าด้วยกัน พร้อมมุมมองเรื่อง cross-platform ที่ Yew และ Leptos ไม่ได้โฟกัสเป็นหลัก ก่อนที่จะสรุปเปรียบเทียบทั้งสาม framework เข้าด้วยกันในบทถัดไปหลังจากนั้น
 
 ---
 

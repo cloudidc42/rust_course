@@ -126,7 +126,7 @@
 | 89 | Leptos Framework: Full-stack Rust | ✅ |
 | 90 | Dioxus Framework เบื้องต้น | ✅ |
 | 91 | Server-Side Rendering (SSR) ด้วย Rust | ⏳ |
-| 92 | Full-Stack Project (1/3): ออกแบบและสร้าง Backend | ⏳ |
+| 92 | Full-Stack Project (1/3): ออกแบบและสร้าง Backend | ✅ |
 | 93 | Full-Stack Project (2/3): สร้าง Frontend | ⏳ |
 | 94 | Full-Stack Project (3/3): Integration และ Deployment | ⏳ |
 | 95 | Testing Web Applications แบบครบวงจร (unit/integration/e2e) | ⏳ |

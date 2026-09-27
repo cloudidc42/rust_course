@@ -108,7 +108,7 @@
 | 76 | Authorization และ RBAC | ⏳ |
 | 77 | WebSockets ด้วย Axum | ⏳ |
 | 78 | RESTful API Design Best Practices | ✅ |
-| 79 | GraphQL ด้วย async-graphql | ⏳ |
+| 79 | GraphQL ด้วย async-graphql | ✅ |
 | 80 | gRPC ด้วย Tonic | ⏳ |
 | 81 | Microservices Architecture ด้วย Rust | ⏳ |
 | 82 | Message Queues: RabbitMQ/Kafka Integration | ⏳ |

@@ -320,6 +320,49 @@ fn main() {
 - `is_valid()` ตรวจสอบสองเงื่อนไขที่แยกจากกันแต่สำคัญทั้งคู่: เงื่อนไขแรกตรวจ**การเชื่อมโยงระหว่าง block**
   เงื่อนไขที่สองตรวจ**ความถูกต้องภายในของแต่ละ block เอง** ทั้งสองต้องผ่านพร้อมกันเสมอ
 
+ควรพูดถึงกลไกเบื้องหลัง `hasher.update()`/`hasher.finalize()` สักเล็กน้อย เพราะมันคือตัวอย่างที่ดีของสิ่งที่ Part
+19-21 สอนไว้เรื่อง trait: `Sha256::new()` คืนค่า struct ที่ implement trait `Digest` (จาก crate `digest` ที่เป็น
+มาตรฐานกลางของ ecosystem hash function ใน Rust ทั้งหมด ไม่ใช่แค่ `sha2`) — `update()` ป้อนข้อมูลเข้าไปทีละ chunk
+ได้ (มีประโยชน์มากตอนข้อมูลมีขนาดใหญ่เกินกว่าจะโหลดเข้า memory ทั้งหมดพร้อมกัน เพราะเรียก `update()` ซ้ำได้กี่ครั้ง
+ก็ได้ก่อนเรียก `finalize()` ครั้งเดียวตอนจบ) และ `finalize()` คำนวณผลสุดท้ายคืนมาเป็น `GenericArray<u8, N>` (ชนิด
+array ที่รู้ขนาดตายตัวตั้งแต่ compile time — สำหรับ SHA-256 คือ 32 byte) ที่ `hex::encode` แปลงเป็น string ได้ทันที
+เพราะมัน implement `AsRef<[u8]>` — ทั้งหมดนี้คือเหตุผลที่ `sha3` (Keccak-256 ที่ Ethereum ใช้) หรือ hash function
+ตัวอื่นในตระกูล `RustCrypto` ใช้ pattern การเรียกแบบเดียวกันเป๊ะ (`new()` → `update()` → `finalize()`) เพราะทุกตัว
+implement trait `Digest` ร่วมกัน — เขียนโค้ดที่ generic เหนือ `D: Digest` ตัวเดียวก็สลับ hash function ได้โดยไม่ต้อง
+แก้ logic เลย ตรงตามหลักการ "เขียนโค้ดครั้งเดียว ใช้ได้กับหลาย concrete type ผ่าน trait bound" ที่ Part 19-21 ปูพื้น
+ไว้
+
+เพิ่มเติมอีกจุดเล็ก ๆ ที่มีประโยชน์ในทางปฏิบัติ: การ `println!("{:?}", block)` ตรง ๆ (ผ่าน `#[derive(Debug)]`) จะ
+พิมพ์ field ทุกตัวออกมารวมถึง hash 64 ตัวอักษรเต็ม ๆ ซึ่งอ่านยากเวลา debug ที่มีหลาย block พร้อมกัน — implement
+`std::fmt::Display` เองสั้น ๆ ช่วยให้อ่านง่ายขึ้นมากในทางปฏิบัติจริง:
+
+```rust
+use std::fmt;
+
+impl fmt::Display for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Block #{} [nonce={}] hash={}... prev={}...",
+            self.index,
+            self.nonce,
+            &self.hash[..8],
+            &self.previous_hash[..8.min(self.previous_hash.len())]
+        )
+    }
+}
+```
+
+ทดสอบจริง (`println!("{block}")` แทน `{:?}`) ได้ผลลัพธ์ที่อ่านง่ายกว่ามาก:
+
+```
+Block #1 [nonce=42] hash=abcdefab... prev=00000000...
+```
+
+รูปแบบนี้ (แสดงแค่ hash ไม่กี่ตัวอักษรแรก) คือ pattern ที่ระบบจริงจำนวนมากใช้ตอน log หรือแสดงผลใน UI เพราะ hash
+เต็ม 64 ตัวอักษรมีประโยชน์ตอนต้องเทียบค่าให้ตรงเป๊ะ (เช่นใน `is_valid()`) แต่ไม่มีประโยชน์ตอนแสดงให้คนอ่านเร็ว ๆ
+เลย
+
 ### 104.3 Proof of Work: nonce, difficulty, และการวัดเวลาจริง
 
 ในโค้ดหัวข้อที่แล้ว `nonce` ถูกตั้งเป็น `0` เฉย ๆ ไม่ได้ใช้ประโยชน์อะไร หัวข้อนี้จะอธิบายว่ามันมีไว้ทำอะไรกันแน่ ผ่าน
@@ -436,6 +479,24 @@ fn main() {
 มือ ๆ ในหัวข้อนี้มาก แต่**หลักการเดียวกันเป๊ะ**: วัดผลจริงจากการทำงานจริง แล้วใช้ตัวเลขนั้นตัดสินใจ ไม่ใช่เดาเอา
 เองว่าเครือข่ายจะขุดเร็วหรือช้าแค่ไหน
 
+สุดท้ายในหัวข้อนี้ ควรปิดประเด็นที่ทิ้งไว้จากหัวข้อ 104.1 เรื่อง consensus mechanism ให้ครบ: Proof of Work ที่
+implement ไปเป็นเพียง**หนึ่งในหลายวิธี**ที่เครือข่าย distributed ใช้ตัดสินใจว่า block ไหนถูกต้อง — วิธีอื่นที่ใช้
+งานจริงกว้างขวางในปัจจุบันคือ **Proof of Stake (PoS)** ซึ่งใช้หลักการที่ต่างไปจาก PoW โดยสิ้นเชิงในการเลือกว่าใคร
+มีสิทธิ์เสนอ block ถัดไป ตารางนี้เปรียบเทียบแนวคิดหลักของทั้งสองแบบไว้ในระดับแนวคิด (ไม่ลงรายละเอียด
+implementation เพราะเกินขอบเขตของบทนี้ที่โฟกัสที่การเขียนโค้ด Rust เป็นหลัก):
+
+| ประเด็น | Proof of Work (ที่ implement ในหัวข้อนี้) | Proof of Stake (แนวคิดโดยสรุป) |
+|---|---|---|
+| สิทธิ์เสนอ block ถัดไปมาจากอะไร | ใครก็ตามที่ทำงานคำนวณ (หา nonce ที่ผ่านเงื่อนไข) สำเร็จก่อน | ผู้ที่ "วาง" สินทรัพย์ของเครือข่ายไว้เป็นหลักประกัน (stake) ถูกเลือกตามกลไกที่ออกแบบไว้ (สุ่มถ่วงน้ำหนักตามปริมาณ stake เป็นต้น) |
+| ต้นทุนหลักของการเข้าร่วม | พลังคำนวณ/ไฟฟ้า (ตามที่หัวข้อนี้วัดเวลาจริงให้เห็น) | สินทรัพย์ที่ต้องวางเป็นหลักประกัน (เสี่ยงถูกตัด/ยึดถ้าพฤติกรรมไม่ซื่อสัตย์ ตามกลไกที่แต่ละเครือข่ายออกแบบ) |
+| ตัวอย่างเครือข่ายที่ใช้จริง | Bitcoin | Ethereum (เปลี่ยนจาก PoW มาใช้ PoS ตั้งแต่ปี 2022), Solana, Polkadot, เครือข่ายในตระกูล Cosmos ส่วนใหญ่ |
+
+ข้อควรระวัง: การเลือก consensus mechanism เป็นการตัดสินใจทางวิศวกรรมระดับ**การออกแบบเครือข่ายทั้งเส้น** ไม่ใช่สิ่ง
+ที่คนเขียน smart contract บน chain ที่มีอยู่แล้วต้อง implement เอง — Solana/CosmWasm/Substrate (หัวข้อ 104.8)
+ล้วนใช้ PoS หรือกลไกที่ใกล้เคียงกันอยู่แล้วในระดับ network เอง คนเขียน contract ไม่ต้องยุ่งกับส่วนนี้เลย บทนี้
+implement PoW ขึ้นมาเองเพราะมันเป็นตัวอย่างที่**สอนแนวคิด consensus ให้จับต้องได้ง่ายที่สุดด้วยโค้ดไม่กี่สิบบรรทัด**
+ไม่ใช่เพราะแพลตฟอร์มที่จะไปใช้งานจริงต่อในหัวข้อถัดไปใช้ PoW
+
 ### 104.4 ทำไม Rust ถึงเหมาะกับงาน Blockchain/Crypto Infrastructure เป็นพิเศษ
 
 ก่อนไปต่อเรื่อง digital signature และ smart contract ควรหยุดตั้งคำถามที่มักถูกมองข้าม: **ทำไมโปรเจกต์ blockchain
@@ -540,7 +601,21 @@ struct Transaction {
     amount: u64,
     nonce: u64, // ใช้ป้องกัน replay attack (เซ็น transaction เดิมส่งซ้ำ) — ไม่เกี่ยวกับ nonce ของ PoW ในหัวข้อ 104.3
 }
+```
 
+field `nonce` ใน `Transaction` นี้ควรค่าแก่การอธิบายเพิ่มสักหน่อย เพราะชื่อซ้ำกับ `nonce` ของ `Block` ในหัวข้อ
+104.3 ทั้งที่หน้าที่ต่างกันโดยสิ้นเชิง — `nonce` ของ `Block` มีไว้ให้ปรับค่าเพื่อค้นหา hash ที่ผ่านเงื่อนไข
+difficulty (ไม่มีความหมายทางธุรกิจอะไรเลย) ส่วน `nonce` ของ `Transaction` มีไว้ป้องกัน **replay attack**: ลอง
+นึกภาพว่าถ้า transaction ไม่มี field นี้ — สมมติ Alice เซ็น transaction "โอน 10 ให้ Bob" ครั้งหนึ่ง Bob (หรือใคร
+ก็ตามที่เห็น transaction พร้อม signature ที่ถูกต้องนี้ผ่านมา) สามารถ**ส่ง transaction เดิมซ้ำเข้าเครือข่ายได้อีก
+เรื่อย ๆ** เพราะ signature ยัง valid อยู่เสมอ (signature ผูกกับเนื้อหา ไม่ได้ผูกกับ "จำนวนครั้งที่ส่งไปแล้ว") ทำให้
+เงินถูกโอนซ้ำได้ไม่จำกัดจากการเซ็นครั้งเดียว — การเพิ่ม `nonce` ที่เพิ่มขึ้นทีละ 1 ทุกครั้งที่ Alice ทำ transaction
+ใหม่ (และให้ network ปฏิเสธ transaction ที่ nonce ไม่ตรงกับค่าที่คาดไว้ถัดไปของบัญชีนั้น) ทำให้ transaction แต่ละ
+ตัวใช้ได้แค่ครั้งเดียวจริง ๆ แม้ signature จะ valid ตลอดไปก็ตาม — pattern นี้คล้ายกับแนวคิด **JWT `jti` (JWT ID)
+claim** หรือ nonce ใน OAuth flow ที่ Part 74 อาจสัมผัสมาบ้างเรื่องการป้องกัน token ถูกใช้ซ้ำ เพียงแต่ในบริบทนี้ใช้
+เป็นตัวเลขที่นับเพิ่มขึ้นเรื่อย ๆ ต่อบัญชี ไม่ใช่ค่าสุ่มแบบ `jti`
+
+```rust
 fn main() {
     // ขั้นที่ 1: สร้างคู่กุญแจ (ในระบบจริง private key ต้องถูกเก็บอย่างปลอดภัยมาก ไม่ใช่สร้างทิ้งในโค้ดตัวอย่างแบบนี้)
     let mut rng = rand::rng();
@@ -916,6 +991,29 @@ false
 (`BTreeMap` ที่เรียง key ตามลำดับคงที่, หรือ `Vec` ที่ sort ก่อนเสมอ) แทน `HashMap` ในทุกจุดที่ผลลัพธ์จะถูกนำไป hash
 หรือมีผลต่อ consensus
 
+ยังมีข้อจำกัดอีกข้อที่เชื่อมโยงกับ determinism โดยตรง แม้จะดูเหมือนคนละเรื่องในตอนแรก: **smart contract ต้องรันจบ
+ภายในเวลา/ทรัพยากรที่จำกัดเสมอ ห้ามมีทางที่จะวนลูปไม่จบ (infinite loop)** เหตุผลย้อนไปถึงปัญหาคลาสสิกทางทฤษฎี
+คอมพิวเตอร์ที่เรียกว่า **halting problem**: ไม่มีทางพิสูจน์ทางคณิตศาสตร์ได้ล่วงหน้าอย่างทั่วไปว่าโปรแกรมหนึ่ง ๆ
+จะรันจบหรือไม่ (สำหรับโปรแกรมที่ทรงพลังเพียงพอ) ถ้า node ตัวหนึ่งพยายามรัน contract ที่ดันเข้า loop ไม่จบ (จะเป็น
+เพราะ bug จริงหรือ transaction ที่ตั้งใจโจมตีก็ตาม) node นั้นจะค้างตลอดไป ไม่สามารถสร้าง block ต่อไปได้เลย —
+เครือข่ายทั้งเส้นจะหยุดทำงาน
+
+ทางแก้ที่แพลตฟอร์ม smart contract ทุกตัวใช้ (ไม่ว่าจะเป็น Solana, CosmWasm, หรือ Ethereum) เรียกว่า **gas/fuel
+metering**: ทุก instruction ที่รันใน virtual machine ของ contract ถูกกำหนด "ราคา" ไว้ล่วงหน้า (หน่วยที่เรียกว่า
+gas หรือ fuel ขึ้นกับแพลตฟอร์ม) transaction ที่ส่ง contract มารันต้องระบุ "งบ" (gas limit) ไว้ล่วงหน้าด้วย ถ้า
+contract รันไปเรื่อย ๆ จนใช้ gas ครบตามงบที่กำหนดแล้วยังไม่จบ **runtime จะบังคับหยุดการรันทันที** แล้วคืนค่า error
+กลับไป ไม่ปล่อยให้รันต่อไม่จำกัด — นี่คือวิธีที่เครือข่ายแก้ปัญหา halting problem ในทางปฏิบัติ: **ไม่ได้พิสูจน์ว่า
+โปรแกรมจะจบเมื่อไร แต่บังคับให้จบภายในงบที่กำหนดเสมอ ไม่ว่า logic ภายในจะเป็นอย่างไรก็ตาม** ผลข้างเคียงที่ตามมาคือ
+transaction ที่ทำให้ contract ใช้ gas มาก (เช่น loop ยาว, คำนวณซับซ้อน) ผู้ส่งต้องจ่าย "ค่าธรรมเนียม" ที่สูงขึ้นตาม
+ปริมาณ gas ที่ใช้จริง — เป็นกลไกที่ทำหน้าที่สองอย่างพร้อมกัน: ป้องกันการรันไม่จบ และป้องกันการใช้ทรัพยากรของ
+เครือข่ายฟรีโดยไม่มีต้นทุนไปในตัว
+
+ในเชิง Rust ล้วน ๆ (ไม่เกี่ยวกับ blockchain โดยตรง) แนวคิด "จำกัดทรัพยากรที่ใช้ได้ล่วงหน้า" นี้มีความคล้ายกับสิ่งที่
+`std::time::Duration`/timeout pattern ที่ Part 46-50 (async/await, tokio) สอนไว้เรื่องการจำกัดเวลาที่ future
+หนึ่งตัวจะรันได้ (`tokio::time::timeout`) — หลักการร่วมกันคือ**ไม่ปล่อยให้ operation ใดรันได้ไม่จำกัดโดยไม่มีขอบเขต
+ควบคุม** เพียงแต่ในบริบท async ทั่วไปคือขอบเขตด้าน "เวลา" ส่วนในบริบท smart contract คือขอบเขตด้าน "หน่วยงาน
+คำนวณ (gas)" ที่แม่นยำกว่าเวลาจริง เพราะเวลาจริงเองก็เป็นสิ่งที่ non-deterministic ตามที่อธิบายไปแล้วข้างบน
+
 ### 104.8 แพลตฟอร์ม Smart Contract ที่เขียนด้วย Rust จริงในโลกจริง
 
 เข้าใจ concept ของ determinism แล้ว มาดูว่าในโลกจริงมีแพลตฟอร์มไหนที่ให้เขียน smart contract ด้วย Rust ได้จริง
@@ -927,7 +1025,79 @@ false
 **Anchor** ที่ห่อ boilerplate จำนวนมาก (การตรวจสอบ account, การ serialize/deserialize instruction data) ให้เขียน
 ง่ายขึ้นมาก ในสภาพแวดล้อมตรวจสอบของบทนี้ crate `solana-program` (เวอร์ชัน 5.1.0 ณ เวลาที่เขียน) **ถูกเพิ่มเป็น
 dependency และ compile ผ่านได้จริง** ยืนยันว่ามันเป็น crate ที่เผยแพร่จริงบน crates.io ใช้งานได้จริงในฐานะ
-dependency ของ Rust project ทั่วไป
+dependency ของ Rust project ทั่วไป — แต่**ยังไม่ได้ทดสอบการทำงานเป็น on-chain program เต็มรูปแบบ** เพราะนั่น
+ต้องมี `solana-test-validator` (local blockchain จำลองของ Solana) ซึ่งต้องติดตั้งผ่าน Solana CLI toolchain ที่ไม่
+มีอยู่ในสภาพแวดล้อมตรวจสอบนี้
+
+เพื่อให้เห็นภาพว่าโค้ด Solana program จริงหน้าตาเป็นอย่างไร (โค้ดตัวอย่างต่อไปนี้เป็นรูปแบบมาตรฐานตามเอกสารทางการ
+ของ Anchor framework — **ไม่ได้ compile/ทดสอบในสภาพแวดล้อมตรวจสอบของบทนี้** เพราะไม่มี Anchor CLI ติดตั้งอยู่ ต่าง
+จากโค้ด CosmWasm ในหัวข้อ 104.9 ที่ผ่านการ compile และ test จริงครบทุกบรรทัด):
+
+```rust
+// ตัวอย่างเชิงอ้างอิงจากเอกสารทางการของ Anchor (ยังไม่ได้ compile ทดสอบในบทนี้)
+use anchor_lang::prelude::*;
+
+declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+
+#[program]
+pub mod counter_anchor {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>, initial_count: i64) -> Result<()> {
+        ctx.accounts.counter.count = initial_count;
+        Ok(())
+    }
+
+    pub fn increment(ctx: Context<Increment>) -> Result<()> {
+        ctx.accounts.counter.count += 1;
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(init, payer = user, space = 8 + 8)]
+    pub counter: Account<'info, Counter>,
+    #[account(mut)]
+    pub user: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Increment<'info> {
+    #[account(mut)]
+    pub counter: Account<'info, Counter>,
+}
+
+#[account]
+pub struct Counter {
+    pub count: i64,
+}
+```
+
+จุดที่ควรสังเกตแม้จะยังไม่ได้ลงมือ compile จริง: `#[program]`, `#[derive(Accounts)]`, และ `#[account]` เป็น
+attribute macro ของ Anchor (ทำงานบนหลักการเดียวกับ proc macro ที่ Part 44-45 สอนไว้) ที่ generate boilerplate
+จำนวนมากให้อัตโนมัติ — โดยเฉพาะ `Context<Initialize>`/`Context<Increment>` ที่ห่อ**การตรวจสอบ account** ไว้ให้
+ครบ (เช่น `Signer<'info>` บังคับว่า account นี้ต้องเซ็น transaction จริงตามหลักการหัวข้อ 104.5) เทียบกับโค้ด
+CosmWasm ในหัวข้อ 104.9 ที่ต้องเขียนการตรวจสอบสิทธิ์ (`if info.sender.to_string() != owner`) ด้วยมือเอง — นี่คือ
+ความต่างเชิง philosophy ระหว่างสองแพลตฟอร์ม: Anchor เน้นการ generate โค้ดจาก declarative attribute ให้มากที่สุด
+ส่วน CosmWasm เน้นความชัดเจนตรงไปตรงมาของ logic ที่เขียนด้วยมือ ทั้งสองแนวทางถูกต้องและใช้งานจริงกันอย่างแพร่หลาย
+ทั้งคู่ ไม่มีแนวทางใดที่ "ดีกว่า" โดยสัมบูรณ์ — ขึ้นอยู่กับว่าทีมให้ความสำคัญกับความกระชับของโค้ดหรือความชัดเจนของ
+logic ที่มองเห็นได้ตรง ๆ มากกว่ากัน
+
+มีความต่างเชิงโครงสร้างอีกจุดหนึ่งที่สำคัญมากและควรรู้จักไว้ก่อนไปศึกษาแพลตฟอร์มไหนต่อในเชิงลึก: **Solana ใช้
+"account model" ที่ต่างจาก CosmWasm/Ethereum อย่างมีนัยสำคัญ** ในโค้ด Anchor ตัวอย่างข้างบน สังเกตว่า state ของ
+contract (`Counter { count: i64 }`) **ไม่ได้ถูกเก็บไว้ "ข้างใน" contract เอง** แบบที่ `COUNT: Item<i64>` ในโค้ด
+CosmWasm หัวข้อ 104.9 ทำ แต่ถูกเก็บไว้ใน **account แยกต่างหาก** (`Account<'info, Counter>`) ที่ผู้เรียกต้องส่ง
+เข้ามาให้ contract เป็น parameter อย่างชัดเจนทุกครั้งที่เรียก — Solana ออกแบบมาแบบนี้เพื่อให้ runtime **รู้ล่วงหน้า
+ว่า transaction หนึ่ง ๆ จะแก้ไข account ตัวไหนบ้าง** (ตามที่พูดถึงไปแล้วเรื่อง Sealevel และการรันแบบ parallel ใน
+หัวข้อ 104.4) ในขณะที่ CosmWasm/Ethereum ใช้โมเดลที่ contract เก็บ state ของตัวเองไว้ภายในโดยตรง (เรียกว่า
+"contract storage" หรือ "contract account" ที่ผูกกับ contract address นั้นโดยเฉพาะ) เรียกใช้งานง่ายกว่าในเชิง
+mental model แต่ runtime ต้องดูเนื้อหาของ transaction ก่อนจึงจะรู้ได้ว่ามันจะไปแก้ contract ไหนบ้าง — ความต่างนี้
+ไม่ใช่แค่รายละเอียดเล็กน้อย มันมีผลต่อวิธีออกแบบ contract ทั้งระบบเลย (เช่น การจัดการ "ใครเป็นเจ้าของ account
+ไหน" กลายเป็นเรื่องสำคัญมากในโลกของ Solana ที่ไม่มีอยู่ในรูปแบบเดียวกันในโลกของ CosmWasm) — นี่คือหนึ่งในเหตุผลที่
+ทักษะการเขียน smart contract บนแพลตฟอร์มหนึ่งไม่ transfer ไปอีกแพลตฟอร์มได้ทั้งหมดโดยอัตโนมัติ ต้องศึกษา
+account/storage model ของแต่ละแพลตฟอร์มแยกกันเสมอ ตามที่หัวข้อ 104.11 จะเน้นย้ำอีกครั้งเรื่องขอบเขตของบทนี้
 
 **CosmWasm — smart contract สำหรับ ecosystem Cosmos** CosmWasm คือ framework ที่ให้เขียน smart contract ด้วย
 Rust ธรรมดา แล้ว **compile เป็น WebAssembly (.wasm)** ก่อนนำไป deploy บน blockchain ที่รองรับ (เครือข่ายในตระกูล
@@ -1040,6 +1210,18 @@ pub enum ContractError {
 อย่างเดียว ไม่เปลี่ยนอะไร ไม่ต้องมี transaction) — การแยกชัดขนาดนี้คือส่วนหนึ่งของการันตี determinism: `query`
 รับประกันไม่มีทางแก้ state ได้เลยแม้จะเผลอเขียนโค้ดผิดในนั้น เพราะ signature ของฟังก์ชัน (`Deps` แบบ read-only
 ไม่ใช่ `DepsMut`) บังคับไว้ตั้งแต่ระดับ type system
+
+ควรอธิบาย `Item<i64>` จาก `cw-storage-plus` สักเล็กน้อยก่อนไปต่อ เพราะมันซ่อนกลไกที่น่าสนใจอยู่ข้างใน: ในระดับ
+ต่ำที่สุด storage ของ CosmWasm contract คือ **key-value store แบบ byte-to-byte ล้วน ๆ** (คล้ายกับหลักการเดียวกับ
+`HashMap<Vec<u8>, Vec<u8>>` ที่ Part 15 สอนไว้ เพียงแต่ persist ลง disk ของ chain จริงแทนอยู่ใน memory ชั่วคราว)
+— `Item::new("count")` ที่เขียนไว้เป็น `const` ระดับ module ไม่ได้ "จอง memory" อะไรไว้ล่วงหน้าเหมือน variable
+ทั่วไป มันแค่**ผูก key คงที่ไว้กับ struct ตัวช่วย** ที่พอเรียก `.save()`/`.load()`/`.update()` แล้วค่อยไป
+serialize/deserialize (ด้วย `serde` เช่นเดียวกับที่บทนี้ใช้ hash ข้อมูล) แล้วอ่าน/เขียนลง byte store จริงที่ key
+`"count"` ตอนนั้น — เหตุผลที่ต้องระบุ key เป็น string คงที่แบบนี้ (ไม่ใช่แค่ตั้งชื่อ variable ธรรมดา) ก็เพราะ
+contract หนึ่งตัวอาจมี `Item`/`Map` หลายตัวพร้อมกัน (เช่นในตัวอย่างนี้มีทั้ง `COUNT` และ `OWNER`) แต่ทุกตัวแบ่งกัน
+ใช้ byte store**เดียวกัน**ของ contract นั้น จึงต้องมี namespace (key คงที่) แยกกันไม่ให้ข้อมูลชนกัน — ตรงตาม
+หลักการเดียวกับการตั้ง key ให้ไม่ชนกันใน `HashMap` ทั่วไปที่ Part 15 สอนไว้ เพียงแต่ในบริบทนี้ namespace ถูกกำหนด
+ไว้ตายตัวตั้งแต่เขียนโค้ด ไม่ใช่ค่าที่คำนวณระหว่างรัน
 
 ตอนนี้มาเขียน entry point จริง:
 
@@ -1248,6 +1430,44 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ความแตกต่างระหว่างสองกลุ่มนี้คือประเด็นสำคัญที่สุดของหัวข้อ 104.11: **"contract logic ถูกต้องและผ่าน test ในเครื่อง
 พัฒนา" กับ "contract พร้อม deploy สู่ production จริง" เป็นคนละเรื่องกันโดยสิ้นเชิง**
 
+ควรรู้จักไว้ด้วยว่า ecosystem ของ CosmWasm มีเครื่องมือทดสอบอีกระดับที่ไปได้ลึกกว่า unit test ที่ทำในบทนี้ (ตามที่
+ระบุไว้ในตารางว่ายังไม่ได้ทำ): crate ชื่อ **`cw-multi-test`** ให้จำลอง blockchain แบบง่าย (in-memory ล้วน ๆ ไม่
+ต้องมี network จริงเหมือนกัน) ที่รองรับการ deploy **หลาย contract พร้อมกัน** ให้เรียกกันข้าม contract ได้จริงใน
+test (เช่น contract A เรียก contract B ผ่าน `SubMsg`) และรองรับการจำลอง chain module มาตรฐานอย่าง bank module
+(การโอนเงินระหว่าง address) ด้วย — เหมาะกับการทดสอบ scenario ที่ซับซ้อนกว่า contract เดียวโดด ๆ เช่น ระบบ DEX
+(decentralized exchange) ที่ต้องมี contract หลายตัวทำงานร่วมกัน ตัวอย่าง counter contract ในบทนี้ไม่จำเป็นต้องใช้
+เครื่องมือระดับนี้เพราะมันไม่ได้เรียก contract อื่นเลย แต่สำหรับระบบจริงที่ซับซ้อนกว่านี้ `cw-multi-test` คือ
+ขั้นต่อไปที่ควรศึกษาเพิ่ม
+
+อีกเครื่องมือหนึ่งที่ควรรู้จักไว้ (ไม่ได้ลงมือทำในบทนี้เพราะไม่ใช่ส่วนของ contract logic โดยตรง): CosmWasm ให้
+generate **JSON Schema** ของ message ทั้งสามชนิด (`InstantiateMsg`, `ExecuteMsg`, `QueryMsg`) ผ่าน crate
+`cosmwasm-schema` ที่เพิ่มไว้ใน `Cargo.toml` ตั้งแต่ต้นหัวข้อนี้แล้ว — เขียนโปรแกรมเล็ก ๆ แยกไว้ใน `src/bin/schema.rs`
+ที่เรียก macro `cosmwasm_schema::write_api!` แล้วรันด้วย `cargo run --bin schema` จะได้ไฟล์ JSON Schema ออกมาที่
+อธิบาย shape ของ message แต่ละชนิดอย่างเป็นทางการ — มีประโยชน์มากตอนที่ทีม frontend หรือทีมอื่นต้องเขียนโค้ดเรียก
+contract จากภายนอก (คล้ายกับที่ OpenAPI schema ช่วยให้ทีม frontend เรียก REST API ได้โดยไม่ต้องอ่านโค้ด backend
+ทั้งหมด) — เป็นเครื่องมือมาตรฐานของ ecosystem ตามเอกสารทางการ แต่ไม่ได้ลงมือรันจริงในบทนี้เพราะโฟกัสหลักของบทนี้
+คือความถูกต้องของ contract logic เอง ไม่ใช่ workflow เสริมรอบข้าง
+
+มองภาพรวมของ "การทดสอบ smart contract ให้พร้อมสำหรับ production" เป็นลำดับขั้น (testing pyramid) ช่วยให้เห็นว่า
+สิ่งที่บทนี้ทำอยู่ในขั้นไหน:
+
+1. **Unit test แบบ local ล้วน ๆ** (สิ่งที่บทนี้ทำจริงในหัวข้อนี้) — ทดสอบ logic ของ function แต่ละตัวแยกกัน ด้วย
+   mock storage/environment เร็วที่สุด รันบ่อยที่สุดระหว่างพัฒนา
+2. **Integration test ข้าม contract** (ผ่าน `cw-multi-test` ตามที่พูดถึงข้างบน — บทนี้ไม่ได้ลงมือทำ) — ทดสอบว่า
+   contract หลายตัวเรียกกันถูกต้อง รวม chain module มาตรฐานอย่าง bank module ด้วย ยังคงรันแบบ local ทั้งหมด ไม่
+   ต้องมี network จริง
+3. **Testnet deployment** — deploy contract ขึ้นเครือข่ายทดสอบจริงที่จำลองสภาพแวดล้อมของ mainnet แต่ใช้ token ที่
+   ไม่มีมูลค่าจริง ทดสอบ interaction กับ node จริงหลายตัว ตรวจสอบพฤติกรรมภายใต้ latency/condition ของเครือข่ายจริง
+4. **Security audit โดยผู้เชี่ยวชาญเฉพาะทาง** — ตรวจสอบโค้ดทั้งหมดอย่างละเอียดโดยทีมที่ไม่ได้เขียนโค้ดนั้นเอง เพื่อ
+   หาช่องโหว่ประเภทที่คุยไว้ในหัวข้อ 104.11 (เช่น reentrancy, authorization check ที่พลาด) — ขั้นนี้จำเป็นเสมอก่อน
+   จัดการมูลค่าทางการเงินจริงบน mainnet
+5. **Mainnet deployment** — deploy ขึ้นเครือข่ายจริง หลังผ่านทุกขั้นก่อนหน้าครบถ้วนแล้วเท่านั้น
+
+บทนี้พาไปถึงแค่ขั้นที่ 1 อย่างสมบูรณ์และพิสูจน์ได้จริงทุกจุด — ขั้นที่ 2-5 คือสิ่งที่ต้องศึกษาเพิ่มจากแหล่งข้อมูล
+ทางการที่หัวข้อ 104.11 จะแนะนำไว้ การเข้าใจว่าตัวเองอยู่ตรงไหนของลำดับขั้นนี้คือทักษะสำคัญไม่แพ้การเขียนโค้ดเอง
+เลย เพราะการข้ามขั้นตอนใดขั้นตอนหนึ่งไป (โดยเฉพาะขั้นที่ 4) คือสาเหตุตรงของเหตุการณ์ทางประวัติศาสตร์ที่จะพูดถึงใน
+หัวข้อ 104.11
+
 ### 104.10 WebAssembly กับ Blockchain: จุดที่ Module 5 เชื่อมกับบทนี้ตรง ๆ
 
 หัวข้อที่แล้วน่าจะทำให้สังเกตเห็นแล้วว่า CosmWasm compile contract เป็น **WebAssembly (.wasm)** ก่อนนำไป deploy —
@@ -1286,6 +1506,17 @@ implementation ต่างกันตามบริบท**
 ในบริบทไหนก็ได้ที่ต้องการคุณสมบัติแบบนี้ — เบราว์เซอร์เป็นบริบทแรกที่ WASM ถูกออกแบบมาให้ใช้ แต่ blockchain คือ
 บริบทที่สองที่ต้องการคุณสมบัติชุดเดียวกันนี้พอดิบพอดี และนำ WASM ไปใช้ต่อโดยตรง
 
+ประเด็นเรื่องขนาดไฟล์ `.wasm` ที่ Part 86 พูดถึงไว้ (ตั้งค่า `opt-level = "z"`, `lto = true`, และใช้เครื่องมือ
+`wasm-opt` เพื่อลดขนาด binary ก่อน deploy จริง) ก็เชื่อมกับตัวเลขจริงที่วัดได้ในหัวข้อ 104.9 ตรง ๆ: counter
+contract ที่ compile แบบ `--release` ธรรมดา (ไม่ผ่านการ optimize ขนาดเพิ่มเติมใด ๆ) ได้ไฟล์ขนาด **276,272 byte**
+— ในโลกจริง ก่อนนำ contract ไป deploy บนเครือข่ายจริง workflow มาตรฐานของ CosmWasm (ผ่านเครื่องมือ
+`cosmwasm/optimizer` ที่รันเป็น Docker container) จะทำสิ่งที่คล้ายกับที่ Part 86 สอนไว้เป๊ะ: ตั้งค่า release
+profile ให้ optimize ขนาดเป็นหลัก (`opt-level = "z"`) และรัน `wasm-opt` ทับอีกชั้นเพื่อลดขนาดลงไปอีก — เหตุผลที่
+ขนาดไฟล์สำคัญมากในบริบท blockchain มากกว่าบริบทเว็บเบราว์เซอร์เสียอีก: **contract ที่ deploy ขึ้น chain จริง มี
+ค่าธรรมเนียมที่คิดตามขนาดข้อมูลที่บันทึกลง chain โดยตรง** (ต่างจากเว็บที่แค่โหลดช้าลงถ้าไฟล์ใหญ่ ไม่มีค่าใช้จ่าย
+ที่วัดเป็นตัวเงินชัดเจนขนาดนั้น) — เป็นอีกตัวอย่างที่ยืนยันว่าทักษะการลดขนาด `.wasm` ที่เรียนใน Part 86 ไม่ใช่แค่
+เรื่อง "โหลดเว็บให้เร็วขึ้น" มันมีมูลค่าที่จับต้องได้ตรงในบริบท blockchain ด้วยเหตุผลที่ต่างออกไปแต่หนักแน่นไม่แพ้กัน
+
 ### 104.11 ขอบเขตของบทนี้ ความปลอดภัย และแหล่งเรียนรู้ต่อ
 
 ก่อนปิดบท ต้องพูดตรง ๆ อย่างชัดเจนถึงขอบเขตของสิ่งที่เรียนมา: **บทนี้ให้ความรู้กว้างระดับตระหนักรู้
@@ -1306,6 +1537,31 @@ contract ให้ความสำคัญกับ **security audit โด�
 release build ที่ compile แบบ default จะ wrap around แบบเงียบ ๆ ตามพฤติกรรมมาตรฐานของ Rust ที่ Part 3 อธิบายไว้ —
 เป็นเหตุผลหนึ่งที่ smart contract จริงมักเลือกใช้ arithmetic ที่ checked/saturating อย่างชัดเจนเสมอ ไม่พึ่งพฤติกรรม
 default)
+
+เพื่อให้เห็นว่าความเสี่ยงนี้ไม่ใช่เรื่องสมมติ วงการ smart contract มีเหตุการณ์ทางประวัติศาสตร์ที่มีการบันทึกและ
+วิเคราะห์อย่างเปิดเผยกว้างขวาง (เป็นข้อเท็จจริงทางวิศวกรรมซอฟต์แวร์ที่ควรรู้ ไม่เกี่ยวกับการประเมินมูลค่าใด ๆ)
+ซึ่งควรศึกษาไว้เป็นบทเรียนเชิงเทคนิค:
+
+- **เหตุการณ์ปี 2016 ที่เรียกกันว่า "The DAO"** — เป็น smart contract บนเครือข่าย Ethereum ที่มีช่องโหว่ประเภท
+  **reentrancy**: contract เรียกออกไปยัง address ภายนอก (เพื่อโอนเงิน) **ก่อน**ที่จะอัปเดต state ภายใน (ลด
+  balance) ของตัวเองให้เสร็จสมบูรณ์ — ผู้โจมตีใช้ประโยชน์จากลำดับนี้ด้วยการทำให้ address ภายนอกที่ถูกเรียก
+  เรียกกลับเข้า contract เดิมซ้ำหลายครั้ง**ก่อน**ที่ state จะถูกอัปเดต ทำให้ถอนเงินซ้ำได้หลายรอบจากยอดเงินตั้งต้น
+  เดียว — บทเรียนเชิงเทคนิคที่ตกผลึกจากเหตุการณ์นี้คือหลักการที่เรียกกันแพร่หลายว่า **"checks-effects-interactions
+  pattern"**: ต้องตรวจสอบเงื่อนไข (checks) และอัปเดต state ภายในทั้งหมด (effects) ให้เสร็จสมบูรณ์**ก่อน**ที่จะ
+  เรียกออกไปยัง contract หรือ address ภายนอก (interactions) เสมอ ไม่ใช่เรียงลำดับตรงกันข้าม
+- **เหตุการณ์ปี 2017 ของ Parity multisig wallet library** — library contract ตัวหนึ่งที่ multisig wallet จำนวน
+  มากอ้างอิงใช้งานร่วมกัน มี function หนึ่งที่ควรมีการตรวจสอบสิทธิ์ผู้เรียกแต่กลับไม่มี (คล้ายกับรูปแบบ
+  authorization check ที่ `execute_reset` ในหัวข้อ 104.9 ของบทนี้ implement ไว้ให้ถูกต้อง) ทำให้ใครก็ตามเรียก
+  function นั้นได้โดยไม่ต้องมีสิทธิ์ ส่งผลให้ wallet จำนวนมากที่อ้างอิง library ตัวนี้ถูกทำให้ใช้งานไม่ได้พร้อมกัน
+  — บทเรียนเชิงเทคนิคคือ**การตรวจสอบสิทธิ์ (authorization check) ในทุก function ที่แก้ไข state สำคัญ ต้องไม่มี
+  ข้อยกเว้นแม้แต่จุดเดียว** และการให้ contract หลายตัวอ้างอิง logic ร่วมกันผ่าน library pattern ต้องระวังเป็น
+  พิเศษว่าช่องโหว่ใน library ตัวเดียวกระทบ contract ที่อ้างอิงมันได้**พร้อมกันทั้งหมด**
+
+ทั้งสองเหตุการณ์นี้เกิดจาก**หลักการพื้นฐานที่พลาดไปเพียงจุดเดียว** ไม่ใช่ช่องโหว่ทางคณิตศาสตร์ที่ซับซ้อนอะไร — นี่
+คือเหตุผลที่ยืนยันย้ำอีกครั้งว่าทำไม security audit โดยผู้เชี่ยวชาญเฉพาะทางที่ตรวจสอบ logic ทุกเส้นทางอย่างละเอียด
+ถึงเป็นมาตรฐานที่ขาดไม่ได้ก่อน deploy smart contract จริงขึ้น mainnet เสมอ ไม่ว่าทีมพัฒนาจะมั่นใจในโค้ดของตัวเอง
+แค่ไหนก็ตาม — memory safety ที่ Rust ให้มาไม่ได้ป้องกันช่องโหว่ทั้งสองแบบนี้เลยแม้แต่นิดเดียว เพราะทั้งคู่เป็น
+logic bug ระดับการออกแบบ ไม่ใช่ memory bug ระดับ implementation ตามที่ Part 100 แยกประเภทไว้อย่างชัดเจน
 
 สำหรับใครที่ต้องการศึกษาต่อจริงจัง แหล่งข้อมูลที่ควรไปอ่านต่อ (เอกสารทางการของแต่ละแพลตฟอร์ม ไม่ใช่บล็อกหรือ
 คอร์สออนไลน์ที่ไม่มีการดูแลคุณภาพ):
@@ -1426,25 +1682,86 @@ tutorial เก่าโดยส่ง `&str` ตรง ๆ จะเจอ typ
 2.x ไป 3.x) อาจเปลี่ยน API ของ testing utility ได้เหมือนกัน ควรเช็ค changelog/documentation เวอร์ชันที่ใช้จริง
 เสมอ ไม่ใช่ก็อปโค้ดจาก tutorial เก่าโดยไม่ตรวจสอบ
 
+**7. วัดเวลาการขุด (mining) ด้วย `cargo run` ธรรมดา (debug build) แล้วสงสัยว่าทำไมช้ากว่าที่คาดมาก**
+
+โค้ด Proof of Work ในหัวข้อ 104.3 ถ้ารันด้วย `cargo run` ธรรมดา (ไม่ใส่ `--release`) จะช้ากว่าที่ควรมาก เพราะ
+debug build ของ Rust ไม่เปิด optimization ใด ๆ เลย (ตามที่ Part 5 และ Part 54 เคยพูดถึงความต่างของ debug/release
+profile ไว้) ทดสอบจริงด้วย `nonce`/`difficulty` เดียวกันทุกประการ (difficulty=4, ได้ `nonce=49313` เหมือนกันเพราะ
+ลำดับการค้นหาคือ deterministic ไม่ใช่ random จริง — สุ่มแค่ตอนสร้าง key ในหัวข้อ 104.5 เท่านั้น):
+
+```
+cargo run --release  →  ใช้เวลา 26,296 micro seconds
+cargo run (debug)     →  ใช้เวลา 627,350 micro seconds
+```
+
+ต่างกันประมาณ **24 เท่า** สำหรับงานคำนวณ hash ซ้ำ ๆ จำนวนมากแบบนี้ — ยิ่ง difficulty สูงขึ้น (ต้องขุดนานขึ้นอยู่แล้ว
+ตามที่คุยไว้ในหัวข้อ 104.3) ความต่างระหว่าง debug/release จะยิ่งส่งผลชัดเจนขึ้นไปอีก บทเรียนตรงนี้คือสิ่งที่ Part
+54 เน้นย้ำไว้ตั้งแต่ต้น: **ต้อง benchmark ด้วย `--release` เสมอ** การวัดผลด้วย debug build แล้วเอาไปเทียบหรือสรุปผล
+จะให้ตัวเลขที่ผิดเพี้ยนไปจากความเป็นจริงมาก — ยิ่งในงานที่ทำ hash ซ้ำจำนวนมากแบบ PoW ความต่างจะเห็นชัดกว่างานทั่วไป
+มาก เพราะ `sha2` และ compiler optimization ของ inline/vectorization ทำงานได้เต็มที่เฉพาะใน release build เท่านั้น
+
 ## แบบฝึกหัด (Exercises)
 
 1. **(ง่าย)** จากโค้ด `Blockchain` ในหัวข้อ 104.2 เพิ่ม method `tamper_check_report(&self) -> Vec<String>` ที่คืน
    list ของข้อความอธิบายว่า block ไหนบ้าง (ระบุ index) ที่ทำให้ chain invalid แทนที่จะคืนแค่ `bool` เดียวเหมือน
    `is_valid()` — hint: วน loop เหมือน `is_valid()` เดิม แต่แทนที่จะ `return false` ทันที ให้ push ข้อความอธิบาย
-   เข้า `Vec` แล้ววนต่อไปให้ครบทุก block ก่อนคืนค่า
+   เข้า `Vec` แล้ววนต่อไปให้ครบทุก block ก่อนคืนค่า โครงเริ่มต้นที่ปรับจากของเดิม:
+
+   ```rust
+   impl Blockchain {
+       fn tamper_check_report(&self) -> Vec<String> {
+           let mut issues = Vec::new();
+           for i in 1..self.blocks.len() {
+               let current = &self.blocks[i];
+               let previous = &self.blocks[i - 1];
+               if current.previous_hash != previous.hash {
+                   issues.push(format!(
+                       "block #{}: previous_hash ไม่ตรงกับ hash ของ block #{}",
+                       current.index, previous.index
+                   ));
+               }
+               if current.hash != current.calculate_hash() {
+                   issues.push(format!("block #{}: เนื้อหาถูกแก้ไขหลังสร้าง", current.index));
+               }
+           }
+           issues
+       }
+   }
+   ```
 
 2. **(กลาง)** เพิ่ม field `transactions: Vec<String>` ให้กับ `Block` (แทนที่ `data: String` เดิม) แล้วปรับ
    `calculate_hash` ให้ใช้ **Merkle root** ของ `transactions` (จากฟังก์ชัน `build_merkle_tree` ในหัวข้อ 104.6)
    เป็นส่วนหนึ่งของข้อมูลที่ hash แทนการ hash ข้อความทั้งหมดตรง ๆ — hint: `calculate_hash` ต้องเรียก
    `build_merkle_tree(&self.transactions)` แล้วดึง Merkle root (element เดียวใน level สุดท้าย) มาใส่ใน
-   `BlockContentForHashing` แทน field `data`
+   `BlockContentForHashing` แทน field `data` (เปลี่ยน field `data: &'a str` เป็น `merkle_root: &'a str`) — ระวัง
+   edge case ที่ `transactions` มี 0 รายการ (block ว่าง) ต้องตัดสินใจว่าจะให้ `build_merkle_tree` คืนอะไรกรณีนี้
+   ก่อนเขียนโค้ด (แนวทางที่ใช้กันจริงคือกำหนดค่า Merkle root คงที่พิเศษ เช่น hash ของ string ว่าง สำหรับ block ที่
+   ไม่มี transaction เลย)
 
 3. **(ยาก)** เขียนฟังก์ชัน `sign_transaction(signing_key: &SigningKey, tx: &Transaction) -> Signature` และ
    `verify_transaction(verifying_key: &VerifyingKey, tx: &Transaction, signature: &Signature) -> bool` แล้วผสาน
    เข้ากับโครงสร้าง `Block`/`Blockchain` จากข้อ 2: ทำให้ `add_block` รับ `Vec<(Transaction, Signature,
    VerifyingKey)>` เข้ามา และ**ปฏิเสธ** transaction ใดก็ตามที่ signature ไม่ถูกต้อง (ไม่ใส่เข้า block เลย พร้อม
    print คำเตือนออกมา) ก่อนคำนวณ Merkle root และ mine block — hint: ทำเหมือน `execute_reset` ในหัวข้อ 104.9 ที่
-   ตรวจสอบสิทธิ์ก่อนแก้ state เสมอ ในที่นี้คือ "ตรวจสอบ signature ก่อนรวม transaction เข้า block เสมอ"
+   ตรวจสอบสิทธิ์ก่อนแก้ state เสมอ ในที่นี้คือ "ตรวจสอบ signature ก่อนรวม transaction เข้า block เสมอ" โครงของ
+   ส่วนกรองที่ควรมีอยู่ใน `add_block`:
+
+   ```rust
+   let mut accepted: Vec<String> = Vec::new();
+   for (tx, signature, verifying_key) in incoming {
+       let tx_bytes = serde_json::to_vec(&tx).unwrap();
+       if verifying_key.verify(&tx_bytes, &signature).is_ok() {
+           accepted.push(serde_json::to_string(&tx).unwrap());
+       } else {
+           println!("ปฏิเสธ transaction: signature ไม่ถูกต้อง — {tx:?}");
+       }
+   }
+   // ใช้ `accepted` (แทน `data`/`transactions` เดิม) ไปคำนวณ Merkle root ต่อ
+   ```
+
+   คำถามเพิ่มเพื่อฝึกคิดต่อ: ถ้า `incoming` ทั้งหมดถูกปฏิเสธ (accepted ว่างเปล่า) ควรยัง mine block เปล่าต่อไปหรือไม่?
+   เหตุผลของคำตอบควรอ้างอิงกับสิ่งที่หัวข้อ 104.7 สอนไว้เรื่อง determinism และเรื่องต้นทุนของการ mine ที่หัวข้อ
+   104.3 อธิบายไว้
 
 4. **(ยาก / ประยุกต์ใช้งานจริง)** ต่อยอด counter contract จากหัวข้อ 104.9: เพิ่ม `ExecuteMsg::IncrementBy { amount:
    u64 }` ที่เพิ่มค่าตัวนับตามจำนวนที่ระบุ (ไม่ใช่แค่ +1) โดยต้องใช้ `checked_add` (ไม่ใช่ operator `+` ตรง ๆ)
@@ -1452,7 +1769,27 @@ tutorial เก่าโดยส่ง `&str` ตรง ๆ จะเจอ typ
    `Err(ContractError::Std(...))` ที่มีข้อความอธิบายชัดเจน แทนการปล่อยให้ wrap around แบบเงียบ ๆ แล้วเขียน unit
    test เพิ่มอย่างน้อย 2 เคส: (ก) `IncrementBy` ทำงานถูกต้องในกรณีปกติ (ข) `IncrementBy` คืน error เมื่อค่าที่ได้
    จะเกิน `i64::MAX` — hint: `i64::checked_add` คืน `Option<i64>`, ใช้ `.ok_or_else(|| ...)` แปลงเป็น
-   `Result` ตามที่ Part 12/30 สอนไว้เรื่อง `Option`↔`Result` conversion
+   `Result` ตามที่ Part 12/30 สอนไว้เรื่อง `Option`↔`Result` conversion โครงของ handler ที่ควรเขียน:
+
+   ```rust
+   fn execute_increment_by(deps: DepsMut, amount: u64) -> Result<Response, ContractError> {
+       let new_count = COUNT.update(deps.storage, |count| -> Result<_, ContractError> {
+           count
+               .checked_add(amount as i64)
+               .ok_or_else(|| ContractError::Std(cosmwasm_std::StdError::generic_err(
+                   "counter overflow: ค่าที่ได้เกิน i64::MAX",
+               )))
+       })?;
+       Ok(Response::new()
+           .add_attribute("action", "increment_by")
+           .add_attribute("new_count", new_count.to_string()))
+   }
+   ```
+
+   ข้อควรระวังเพิ่มเติมสำหรับข้อนี้: `amount as i64` เองก็มีความเสี่ยง silent truncation/overflow ถ้า `amount`
+   (เป็น `u64`) มีค่ามากกว่า `i64::MAX` ได้พอดี — ลองคิดต่อว่าจะป้องกันจุดนี้ด้วย `i64::try_from(amount)` (ที่คืน
+   `Result` ตรงตามหลักการ `TryFrom` ที่ Part 18-19 สอนไว้เรื่อง trait การแปลงชนิดข้อมูล) แทน `as` cast ตรง ๆ ได้
+   อย่างไร เพื่อปิดช่องโหว่ overflow ให้ครบทุกจุดจริง ๆ ไม่ใช่แค่จุดที่เห็นได้ชัดจุดเดียว
 
 ## สรุป
 

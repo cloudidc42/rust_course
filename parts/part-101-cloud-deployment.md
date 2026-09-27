@@ -93,6 +93,39 @@ DigitalOcean Droplet) ที่มาพร้อม OS เปล่า ๆ แ�
 และดูแลเองตลอดชีวิตของระบบ (patch OS, จัดการ certificate renewal, monitor เครื่อง) ซึ่งเป็นงานที่ไม่เกี่ยวกับ
 ตัวแอปเลยแต่กินเวลาทีมจริง
 
+**ตัวอย่าง systemd unit สำหรับกรณี deploy บน VM ดิบ**: ถ้าเลือกทางนี้ ส่วนที่ต้องทำเองคือให้ OS (Linux ที่ใช้
+`systemd` เป็น init system มาตรฐานของ distro สมัยใหม่ส่วนใหญ่ เช่น Ubuntu/Debian/RHEL) จัดการ auto-restart
+ให้ binary ที่ build ไว้แล้ว (จาก Part 96 หรือ compile ตรงบนเครื่องเลยก็ได้ถ้าไม่ใช้ container) — เขียนไฟล์
+`/etc/systemd/system/library-api-mini.service`:
+
+```ini
+[Unit]
+Description=library_api_mini web service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/library-api-mini/library_api_mini
+Restart=on-failure
+RestartSec=5
+Environment=BIND_ADDR=0.0.0.0:8080
+EnvironmentFile=/etc/library-api-mini/secrets.env
+User=appuser
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`Restart=on-failure` คือกลไก **self-healing ระดับพื้นฐานที่สุด** (เทียบกับที่ Fly.io/ECS/Kubernetes ทำให้
+อัตโนมัติในระดับ Machine/Task/Pod) — ถ้า process crash `systemd` จะ start ใหม่ให้เองหลัง `RestartSec` วินาที
+— `EnvironmentFile` คือทางที่ใกล้เคียงกับหลัก "แยก secret ออกจาก config ทั่วไป" ของหัวข้อ 101.8 มากที่สุดใน
+บริบทของ VM ดิบ (ไฟล์ `secrets.env` ต้องตั้ง permission ให้อ่านได้แค่ `root`/`appuser` เท่านั้น ไม่ commit
+เข้า git เด็ดขาด) — เปิดใช้งานด้วย `systemctl enable --now library-api-mini` — สังเกตว่า**ทุกอย่างที่
+`systemd` ทำให้ตรงนี้ คือสิ่งที่ Fly.io/ECS/Kubernetes ทำให้อัตโนมัติแบบไม่ต้องเขียนไฟล์ config แยกแบบนี้เลย**
+— นี่คือรูปธรรมของ "operational overhead" ที่หัวข้อนี้พูดถึงตอนต้น: งานเดียวกัน (auto-restart, env var
+injection) ทำได้ทั้งสองทาง แต่ทางหนึ่งต้องเขียน/ดูแลไฟล์ config ระดับ OS เองทุกเครื่อง อีกทางหนึ่งแพลตฟอร์ม
+จัดการให้หมด
+
 **ระดับที่ 2 — Container Orchestration เต็มรูปแบบ (Kubernetes)**: Kubernetes (K8s) คือระบบที่รับ container
 image (image เดียวกับที่ Part 96 สร้าง) แล้วจัดการ **scheduling** (จะรัน container ไหนบนเครื่องไหนใน cluster),
 **self-healing** (container crash แล้ว restart อัตโนมัติ, เครื่อง (node) ตายแล้วย้าย container ไปเครื่องอื่น),
@@ -130,6 +163,51 @@ Heroku แบบเดิมที่ใช้ buildpack เฉพาะตั�
 บทนี้เลือกโฟกัสที่ **PaaS (Fly.io)** และ **Serverless (AWS Lambda)** เป็นหลัก เพราะทั้งสองแบบเหมาะกับสถานการณ์
 ที่ผู้เรียนหลักสูตรนี้ (นักพัฒนา Rust ที่กำลังเรียนรู้ deploy แอป web service เดี่ยว ๆ) เจอบ่อยที่สุด — พร้อม
 เกริ่น AWS ECS/EC2/GCP Cloud Run ในเชิงแนวคิดให้เห็นภาพครบ
+
+**ลองประยุกต์ decision framework กับสถานการณ์จริงสามแบบ** (เพื่อให้เห็นว่าตารางด้านบนใช้งานจริงอย่างไร ไม่ใช่
+แค่ท่องจำ):
+
+- **สถานการณ์ที่ 1**: ทีม 2 คนกำลังสร้าง MVP ของแอป booking ระบบห้องประชุม (คล้าย capstone ของ Part 92-94)
+  ต้องการ demo ให้ลูกค้าดูภายในสัปดาห์นี้ ยังไม่รู้ว่าจะมีผู้ใช้จริงกี่คน — **คำตอบ**: Fly.io หรือ Cloud Run
+  ทั้งสองใช้ container image เดียวกับที่ Part 96 สร้างได้ตรง ๆ, `auto_stop_machines`/scale-to-zero ทำให้
+  ค่าใช้จ่ายช่วง demo ต่ำมาก (ตามหัวข้อ 101.12), และไม่ต้องมีทีม DevOps แยกมาดูแล Kubernetes ที่ทีมเล็กขนาดนี้
+  ไม่มีกำลังคนพอ
+- **สถานการณ์ที่ 2**: บริษัทมี 15 microservice (ภาษาหลากหลาย: Rust, Go, Python) ทีม Platform Engineering
+  8 คนดูแล infrastructure ให้ทุกทีม ต้องการมาตรฐานเดียวที่ scale ได้ถึงหลักร้อย instance และ portable ถ้า
+  ต้องย้าย cloud provider ในอนาคต — **คำตอบ**: Kubernetes (EKS/GKE) เหมาะกว่า เพราะจำนวน service และทีมที่
+  มากพอจะคุ้มกับ operational overhead ที่ต้องแบกรับ, และ manifest เดียวกันใช้กับทุกภาษาได้ (ไม่ต้องมี
+  Fly.io/Cloud Run ต่างระบบสำหรับแต่ละภาษา)
+- **สถานการณ์ที่ 3**: ระบบประมวลผลภาพที่ผู้ใช้อัปโหลดรูปแล้วต้อง resize/แปลง format — เกิดขึ้นไม่สม่ำเสมอมาก
+  (บางวันไม่มีเลย บางวันมีหลักพันรูป) แต่ละงานใช้เวลาไม่กี่วินาที — **คำตอบ**: AWS Lambda (trigger จาก S3
+  event ตอนมีไฟล์ใหม่) เหมาะที่สุด เพราะ scale-to-zero ธรรมชาติของ FaaS ตรงกับ traffic pattern แบบ "burst
+  ไม่สม่ำเสมอ" เป๊ะ ไม่ต้องจ่ายค่าเครื่องช่วงที่ไม่มีงานเข้ามาเลย ต่างจาก Fly.io/ECS ที่ต้องมี Machine/task
+  อย่างน้อย 1 ตัวพร้อมรับงานตลอดเวลาถ้าไม่อยากมี cold start (แม้ตั้ง scale-to-zero ได้เหมือนกัน แต่ Lambda
+  ออกแบบมาเพื่อ pattern นี้โดยเฉพาะตั้งแต่ต้น)
+
+**รู้จัก Kubernetes ไว้ในระดับแนวคิด (awareness เท่านั้น — บทนี้ไม่ลงมือใช้งานจริง)**: เพราะ Kubernetes เป็น
+มาตรฐานที่พบได้ทั่วไปมากในสายงาน DevOps/Platform Engineering ผู้เรียนควรรู้จักคำศัพท์หลักไว้อย่างน้อยเพื่อ
+อ่านเอกสาร/สื่อสารกับทีมอื่นได้ แม้บทนี้จะไม่ลงรายละเอียดการใช้งานจริง:
+
+- **Pod** — หน่วยที่เล็กที่สุดที่ Kubernetes จัดการ ประกอบด้วย container หนึ่งตัวหรือมากกว่า (ปกติแอป Rust
+  หนึ่งตัวคือหนึ่ง container ในหนึ่ง Pod) ที่ share network namespace เดียวกัน (คุยกันผ่าน `localhost` ได้)
+  — เทียบได้กับ "Machine" หนึ่งตัวของ Fly.io ในความหมายที่ใกล้เคียงกัน
+- **Deployment** — object ที่บอกว่าต้องการ Pod แบบไหนกี่ตัว (`replicas: 3`) พร้อมกลยุทธ์ rolling update
+  (`maxUnavailable`/`maxSurge` ตามที่หัวข้อ 101.10 พูดถึง) — คล้าย `[[http_service]]`+`min_machines_running`
+  ของ Fly.io รวมกัน
+- **Service** — ให้ endpoint เครือข่ายที่คงที่สำหรับกลุ่ม Pod ที่อาจถูกสร้าง/ทำลายอยู่เรื่อย ๆ (Pod มี IP
+  เปลี่ยนได้ทุกครั้งที่ restart แต่ Service มี IP/DNS name คงที่เสมอ) — Pod อื่นเรียก Service นี้ผ่านชื่อ
+  DNS ภายใน cluster ได้เลย (`my-service.my-namespace.svc.cluster.local`)
+- **Ingress** — ตัวกำหนดว่า HTTP traffic จาก public internet จะ route เข้า Service ไหนตาม hostname/path
+  (ต้องมี Ingress Controller เช่น nginx-ingress/Traefik ติดตั้งแยกใน cluster — ไม่ได้มาให้ในตัวเหมือน
+  `[http_service]` ของ Fly.io)
+- **ConfigMap/Secret** — เก็บ config/secret แบบเดียวกับที่หัวข้อ 101.8 อธิบาย แต่เป็น object ของ Kubernetes
+  เอง ที่ Pod mount เข้ามาเป็น environment variable หรือไฟล์ได้
+
+สังเกตว่าแนวคิดทั้งหมดนี้ **มีคู่เทียบใน Fly.io/ECS อยู่แล้วเกือบทุกตัว** เพียงแต่ Kubernetes แยกเป็น object
+ชัดเจนกว่ามาก (ยืดหยุ่นกว่าแต่ก็ซับซ้อนกว่าตามไปด้วย) — นี่คือเหตุผลที่ concept การ deploy ที่เรียนในบทนี้ (
+container image มาตรฐาน, health check, environment variable config, rolling deployment) **ถ่ายทอดข้ามไปสู่
+Kubernetes ได้ตรง ๆ** ถ้าผู้เรียนต้องเรียน Kubernetes ต่อในอนาคต แค่ต้องเรียนรู้ syntax/object ใหม่ ไม่ต้อง
+เรียน concept ใหม่ทั้งหมด
 
 ### 101.2 Fly.io และ `flyctl`: แนวคิดของ Fly.io ในฐานะ PaaS ที่ใช้ Container Image มาตรฐาน
 
@@ -288,6 +366,84 @@ kill_timeout = "5s"
   แบบ array-of-table (สังเกต `[[ ]]` สองชั้น) เพราะ Fly.io รองรับการตั้ง process หลายกลุ่มให้ VM ขนาดต่างกันได้
   ถ้าแอปมีหลาย process (เช่น web process กับ background worker process แยกกัน)
 
+**Field เพิ่มเติมที่ควรรู้จัก แม้ capstone ของบทนี้ยังไม่ต้องใช้ทั้งหมด** (อ้างอิงจากเอกสาร Fly.io):
+
+- **`[http_service.concurrency]`** — ควบคุมว่าแต่ละ Machine รับ connection พร้อมกันได้กี่ตัวก่อนที่ Fly.io
+  proxy จะเริ่ม route ไปที่ Machine อื่นแทน (หรือ start Machine ใหม่ถ้า `auto_start_machines = true`):
+
+  ```toml
+  [http_service.concurrency]
+    type = "connections"   # หรือ "requests"
+    hard_limit = 25
+    soft_limit = 20
+  ```
+
+  `soft_limit` คือจุดที่ proxy **เริ่ม**พิจารณาส่ง traffic ไปที่ Machine อื่น (ถ้ามี) ส่วน `hard_limit` คือ
+  เพดานที่ Machine นั้น**ปฏิเสธ**ไม่รับ connection ใหม่เพิ่มเลย — field นี้สำคัญมากสำหรับแอปที่ใช้
+  `tokio`/async runtime อย่าง axum เพราะ connection หนึ่งไม่ได้แปลว่า thread หนึ่ง (axum จัดการ concurrent
+  connection ได้เยอะมากด้วย async I/O ตามที่ Part 30+ สอน) แต่ก็ยังมีเพดานจริงที่ database connection pool
+  (ขนาดที่ Part 70 ตั้งไว้ตอนสร้าง `PgPool`) จะรับได้ — ตั้ง `hard_limit` ให้สัมพันธ์กับขนาด connection pool
+  จริงของแอป ไม่ใช่ตั้งสูงลอย ๆ โดยไม่คิดถึงข้อจำกัดของ database ด้านหลัง
+- **`[[mounts]]`** — ผูก persistent volume เข้ากับ Machine (สำหรับข้อมูลที่ต้องอยู่ถาวรข้าม deployment เช่น
+  ไฟล์ที่ผู้ใช้อัปโหลด) — **capstone ของบทนี้ไม่ต้องใช้เลย** เพราะข้อมูลทั้งหมดอยู่ใน managed PostgreSQL
+  (ตามหัวข้อ 101.9) ซึ่งเป็นแนวทางที่แนะนำอยู่แล้ว (เก็บ state ไว้ที่ database แยกออกจาก Machine ที่รันแอป
+  ทำให้ Machine เป็น "stateless" — ทดแทน/ย้าย region ได้ทุกเมื่อโดยไม่เสียข้อมูล ตรงกับหลัก twelve-factor
+  app ข้อที่ว่า process ควร stateless) แต่ถ้าแอปจำเป็นต้องเก็บไฟล์ไว้ในเครื่องจริง ๆ (เช่น cache ขนาดใหญ่ที่
+  ไม่ควรโหลดใหม่ทุกครั้ง) จะเขียนแบบนี้:
+
+  ```toml
+  [[mounts]]
+    source = "library_mini_data"
+    destination = "/data"
+  ```
+
+  ข้อจำกัดสำคัญที่ต้องรู้: volume แบบนี้ **ผูกกับ Machine ตัวเดียวในตำแหน่งเดียว** ไม่ใช่ shared storage
+  ข้าม Machine หลายตัว (ต่างจาก S3/Cloud Storage ที่หลาย instance เข้าถึงพร้อมกันได้) — ถ้าต้องการ scale
+  หลาย Machine พร้อม shared file storage ต้องใช้ object storage (S3-compatible) แทน ไม่ใช่ `[[mounts]]`
+- **`[processes]`** (top-level table, คนละอันกับ `processes` ใน `[http_service]`) — ถ้าโปรเจกต์เป็น
+  workspace ที่มีหลาย binary (ตามที่ Part 17/96 หัวข้อ 96.7 สอนเรื่อง workspace หลาย crate) กำหนดได้ว่า
+  process group ไหนรันคำสั่งอะไร เช่น:
+
+  ```toml
+  [processes]
+    app = "./library_api_mini"
+    worker = "./library_api_mini --mode=background-worker"
+  ```
+
+  แล้วอ้างชื่อ group (`app`) กลับใน `[http_service] processes = ["app"]` (ตามที่ตัวอย่างหัวข้อนี้ตั้งไว้แล้ว)
+  — ทำให้ Fly.io รู้ว่า process group ไหนควรรับ HTTP traffic (มี `[[http_service.checks]]`) และ process group
+  ไหนไม่ควร (เช่น `worker` ที่ประมวลผล background job อย่างเดียว ไม่ต้องมี health check HTTP เลย)
+
+**Database Migration ตอน Deploy — `[deploy] release_command` เทียบกับการรัน migration ใน process ตอน
+start**: capstone `library_api_mini` ของ Part 96 หัวข้อ 96.10 เลือกรัน migration ผ่าน `sqlx::migrate!`
+**ใน process หลักตอน start ทุกครั้ง** (log ยืนยันจริงว่า "รัน migration สำเร็จ" ปรากฏก่อน "library_api_mini
+ฟังอยู่ที่ 0.0.0.0:8080") — วิธีนี้ใช้งานได้ดีเพราะ `sqlx::migrate!` ออกแบบมาให้ **idempotent** (รันซ้ำกี่ครั้ง
+ก็ปลอดภัย เพราะเช็ค migration ที่รันไปแล้วจากตาราง `_sqlx_migrations` ก่อนเสมอ ไม่รัน migration เดิมซ้ำ) แต่
+เมื่อ scale เป็นหลาย Machine พร้อมกัน (ตามหัวข้อ 101.10) **ทุก Machine ที่ start จะพยายามรัน migration พร้อม
+กันได้ในทางทฤษฎี** ซึ่ง `sqlx::migrate!` จัดการด้วย advisory lock ของ PostgreSQL เองให้ปลอดภัย (Machine อื่น
+จะรอ Machine แรกที่ได้ lock ทำ migration เสร็จก่อน) แต่ก็ยังเพิ่มความซับซ้อนเล็กน้อยที่ไม่จำเป็นถ้าไม่ต้องการ
+ให้ทุก Machine มีหน้าที่นี้
+
+Fly.io มีทางเลือกอื่นผ่าน **`[deploy] release_command`** — คำสั่งที่ Fly.io รันแค่ **ครั้งเดียว** บน Machine
+ชั่วคราวพิเศษ **ก่อน**ที่จะเริ่ม deploy เวอร์ชันใหม่ไปที่ Machine จริงเลย (ถ้า `release_command` fail
+deployment ทั้งหมดจะถูกยกเลิกทันที ไม่มี Machine ใหม่ตัวไหนถูกสร้างขึ้นมาเลย — เป็นอีกระดับของ
+health-check-gated cutover ที่หัวข้อ 101.10 อธิบาย แต่เช็คก่อนแม้แต่จะสร้าง Machine ใหม่ด้วยซ้ำ):
+
+```toml
+[deploy]
+  release_command = "/library_api_mini --migrate-only"
+```
+
+(ตัวอย่างนี้ต้องเพิ่ม flag `--migrate-only` เข้าไปใน binary จริงเอง ให้รัน migration แล้ว exit ทันทีโดยไม่
+เปิด HTTP listener — เป็นการปรับโค้ดแอปเพิ่มเติมที่ Part 96/94 ยังไม่ได้ทำไว้ จึงไม่ใช่ส่วนที่ capstone ของ
+บทนี้ใช้จริง แต่เป็นแนวทางที่ควรรู้จักไว้สำหรับโปรเจกต์ที่ต้องการแยก "งาน migration" ออกจาก "งานรับ traffic"
+อย่างเด็ดขาด) — **ข้อดี**: migration รันแค่ครั้งเดียวจริง ๆ ไม่ต้องพึ่ง advisory lock ของ PostgreSQL มาช่วย
+กันชนกัน, และถ้า migration fail deployment จะไม่ไปถึงขั้นสร้าง Machine ใหม่เลยด้วยซ้ำ (ปลอดภัยกว่าการให้
+Machine ใหม่ start ไม่สำเร็จเพราะ migration fail แล้วเข้า restart loop ตามกับดักข้อ 3) — **ข้อเสีย**: ต้องเขียน
+โค้ดเพิ่ม (flag แยกสำหรับโหมด migrate-only) และเพิ่มความซับซ้อนของ binary หนึ่งตัวให้ทำได้สองโหมด — สำหรับ
+โปรเจกต์เล็ก/capstone ระดับหลักสูตรนี้ วิธีเดิม (migrate ใน process ตอน start) ยังคงเป็นทางเลือกที่เรียบง่าย
+พอและปลอดภัยเพียงพอ แต่โปรเจกต์ที่ scale ใหญ่ขึ้นมากในอนาคตควรพิจารณาย้ายไปทาง `release_command`
+
 ### 101.4 คำสั่ง `flyctl` หลักที่ต้องรู้ (อ้างอิงจากเอกสารทางการ)
 
 หัวข้อนี้สรุป syntax ของคำสั่งที่ใช้บ่อยที่สุด — **ทุกคำสั่งในหัวข้อนี้อ้างอิงจากเอกสารทางการของ Fly.io
@@ -331,6 +487,64 @@ secret ใหม่จะ trigger deployment ใหม่โดยอัตโ�
 shell อยู่ข้างในเลย) คำสั่งนี้จะใช้ไม่ได้ — ต้อง `fly ssh console` เข้าเครื่อง host ที่รัน Machine นั้นแทน
 (Fly.io มี debug image พิเศษให้ผ่าน flag เพิ่มเติม) หรือพึ่ง `fly logs` เป็นหลักแทนสำหรับ image ที่ไม่มี shell
 
+**`fly machine list` / `fly machine status <id>`** — ละเอียดกว่า `fly status` ตรงที่แสดงข้อมูลระดับ Machine
+เดี่ยว ๆ (region, ขนาด CPU/memory จริงที่รันอยู่, เวลาที่ start) มีประโยชน์เมื่อ App มีหลาย Machine กระจาย
+หลาย region และต้องการรู้ว่า Machine ตัวใดตัวหนึ่งเจาะจงมีปัญหาหรือไม่
+
+**Deployment strategy — ทางเลือกที่มากกว่า `rolling` แบบ default**: `fly deploy --strategy <ชื่อ>` รองรับ
+หลายกลยุทธ์ที่ให้ trade-off ต่างกันระหว่างความเร็วกับความปลอดภัยของการ cutover (ตามเอกสาร Fly.io):
+
+- **`rolling`** (default) — ทดแทน Machine ทีละตัวตามที่หัวข้อ 101.10 อธิบาย ปลอดภัยที่สุดแต่ใช้เวลานานสุด
+  ถ้ามี Machine หลายตัว
+- **`immediate`** — เปลี่ยนทุก Machine พร้อมกันทันที ไม่รอ health check ก่อน เร็วที่สุดแต่เสี่ยงมีช่วง
+  downtime สั้น ๆ ถ้า image ใหม่มีปัญหา (เหมาะกับ dev/staging environment ที่ downtime สั้น ๆ ไม่กระทบใคร
+  ไม่ใช่ production ที่มีผู้ใช้จริง)
+- **`bluegreen`** — สร้าง Machine ชุดใหม่ **ทั้งหมด** ขึ้นมาคู่กับชุดเก่า (ไม่ได้ทดแทนทีละตัวแบบ rolling)
+  รอให้ชุดใหม่ผ่าน health check ครบทุกตัวก่อน แล้วสลับ traffic ทั้งหมดไปที่ชุดใหม่ในทีเดียว พร้อมคง Machine
+  ชุดเก่าไว้ช่วงหนึ่งเผื่อต้อง rollback ทันที (เร็วกว่า rollback ผ่าน `fly deploy` เวอร์ชันก่อนหน้าใหม่ทั้ง
+  หมด) — ใช้ resource มากกว่า rolling ชั่วคราว (มี Machine สองชุดอยู่พร้อมกันช่วงสั้น ๆ) แต่ปลอดภัยกว่าและ
+  rollback ไวกว่า เหมาะกับ production ที่ critical มาก
+- **`canary`** — ทดสอบ Machine ใหม่แค่**บางส่วน**ก่อน (รับ traffic เปอร์เซ็นต์น้อย ๆ) แล้วค่อยขยายทีละขั้น
+  ถ้าไม่มีปัญหา — ให้ความปลอดภัยสูงสุดสำหรับการเปลี่ยนแปลงที่มีความเสี่ยง แลกกับเวลาที่ deploy เต็มรูปแบบใช้
+  นานที่สุดในทุกกลยุทธ์
+
+**ผูกกับ CI/CD (ต่อยอดจาก Part 97)**: Part 97 สอนให้ GitHub Actions build/test/push container image
+อัตโนมัติทุกครั้งที่ push — ขั้นตอนที่ยังไม่ได้ตอบคือ "แล้วใครสั่ง deploy image ใหม่นั้นไปที่ Fly.io" คำตอบคือ
+เพิ่ม step ท้าย workflow ที่เรียก `flyctl deploy` โดยใช้ Fly.io API token ที่เก็บเป็น GitHub Actions secret
+(สร้างผ่าน `fly tokens create deploy` ตามเอกสารทางการ แล้วเก็บด้วยชื่อ `FLY_API_TOKEN`) ตัวอย่าง workflow
+(YAML นี้ตรวจสอบ **syntax จริง** ด้วย `PyYAML` — parser มาตรฐานสำหรับ YAML — ในสภาพแวดล้อมที่เขียนบทนี้
+ส่วนพฤติกรรมจริงของ `superfly/flyctl-actions` เป็นข้อมูลอ้างอิงจากเอกสารของ Fly.io เพราะไม่มี account จริง
+ให้ทดสอบ):
+
+```yaml
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency: deploy-group
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+```
+
+> **ข้อสังเกตที่พบจริงตอนตรวจสอบ syntax ของไฟล์นี้**: เมื่อ parse ด้วย `PyYAML` (`yaml.safe_load`) key
+> `on:` (ที่บรรทัดสองของไฟล์) **ถูกแปลงเป็น boolean `true` แทนที่จะเป็น string `"on"`** ตามที่คาดหวัง! นี่ไม่
+> ใช่บั๊กของไฟล์ — เป็นพฤติกรรมของ **YAML 1.1 spec เอง** ที่กำหนดให้คำอย่าง `on`/`off`/`yes`/`no`/`true`/
+> `false` (แม้ไม่ได้ใส่ quote) ถูกตีความเป็น boolean เสมอ ซึ่งเป็นเรื่องที่ชุมชน GitHub Actions รู้จักกันดีใน
+> ชื่อ "the Norway problem" (เพราะ `NO` ซึ่งเป็น ISO code ของประเทศนอร์เวย์ก็โดนแปลงเป็น `false` ไปด้วยถ้าไม่
+> ใส่ quote ในบริบทอื่น) — **GitHub Actions เองมี parser พิเศษที่รู้จัก key `on` ของ workflow file
+> โดยเฉพาะและตีความเป็น string เสมอ ไม่ตกกับดักนี้** แต่ถ้าเขียนเครื่องมือ/script ของทีมเองที่ใช้ YAML parser
+> มาตรฐานตรวจสอบ workflow file (เช่นตอนเขียน test เอง) ต้องรู้ตัวว่าอาจเจอพฤติกรรมนี้ และเลือกใส่ quote
+> (`"on":`) หรือใช้ YAML 1.2 parser ที่ไม่มีปัญหานี้ถ้าต้องการผลลัพธ์ที่ตรงไปตรงมากว่า
+
 ### 101.5 ตัวเลือก Deployment ของ AWS: ECS/Fargate, EC2, และ Lambda — เปรียบเทียบ
 
 AWS มีตัวเลือกในการรัน container/binary จำนวนมากกว่า Fly.io มาก เพราะ AWS เป็น cloud provider ที่ครอบคลุม
@@ -362,6 +576,22 @@ AWS Console/Terraform/CDK — ซับซ้อนกว่า `fly deploy` ค
 **EC2 ดิบ ๆ**: เหมือน VM ทั่วไปตามที่หัวข้อ 101.1 อธิบาย — เหมาะกับกรณีที่ต้องการควบคุมทุกอย่างเอง หรือ
 workload ที่คงที่มากจนการใช้ Reserved Instance/Savings Plan (จ่ายล่วงหน้าแลกราคาถูกกว่า on-demand มาก) คุ้ม
 กว่า Fargate ในระยะยาว
+
+**ตัวเลือกที่ใกล้เคียง Fly.io มากกว่า ECS/Fargate ดิบ — AWS App Runner และ Lightsail Containers**: AWS เอง
+รู้ตัวว่า ECS/Fargate ดิบมี operational overhead สูงกว่า PaaS แบบ Fly.io มาก จึงมีบริการเสริมสองตัวที่ **ลด**
+ความซับซ้อนนั้นลงโดยยังใช้ container image มาตรฐานอยู่:
+
+- **AWS App Runner** — รับ container image (หรือ source code ที่ build ให้อัตโนมัติ) แล้วจัดการ Load
+  Balancer/Auto Scaling/HTTPS certificate ให้ **ทั้งหมดในคำสั่งเดียว** ใกล้เคียงความเรียบง่ายของ `fly deploy`
+  มากที่สุดในฝั่ง AWS — เหมาะกับทีมที่ต้องการอยู่ใน AWS ecosystem (integrate กับ IAM/VPC/CloudWatch ของ AWS
+  แน่นกว่า Fly.io) แต่ไม่ต้องการความซับซ้อนของการตั้ง ECS/ALB/Target Group เอง
+- **Amazon Lightsail Containers** — ง่ายกว่า App Runner อีกขั้น (ตัดสินใจเรื่อง scaling/network ให้น้อยลง
+  ไปอีก) เหมาะกับโปรเจกต์เล็กมาก/demo ที่ต้องการความเรียบง่ายสูงสุดในฝั่ง AWS แลกกับความยืดหยุ่นที่น้อยกว่า
+  App Runner/ECS
+
+ทั้งสองตัวนี้แสดงให้เห็นว่า **"container image มาตรฐาน" กับ "ความเรียบง่ายระดับ PaaS" ไม่ใช่สิ่งที่แยกจากกัน
+เสมอไป** — AWS/GCP ก็มีชั้น PaaS ของตัวเองที่ใช้ container image เดียวกับที่ deploy บน Fly.io/ECS/Kubernetes
+ได้ ต่างกันแค่ว่าอยู่ใน ecosystem ไหนและควบคุมรายละเอียดได้มาก-น้อยแค่ไหน
 
 ### 101.6 AWS Lambda สำหรับ Rust: `cargo lambda` — ตรวจสอบจริงแบบ Local 100%
 
@@ -553,6 +783,55 @@ $ cargo lambda invoke --invoke-address 127.0.0.1 --invoke-port 9000 --data-ascii
 เข้ามาแทนคำสั่ง `cargo lambda invoke` ที่ทำหน้าที่นี้แทนตอน dev) — นี่คือหลักฐานที่แสดงว่า flow การพัฒนา Lambda
 function ด้วย Rust **ทดสอบได้ครบวงจรแบบ offline สมบูรณ์** ตรงตามที่โจทย์ของบทนี้ต้องการ
 
+**Cold Start ในรายละเอียด — ทำไม memory ที่จองมีผลต่อความเร็ว CPU ด้วย**: จุดที่มักเข้าใจผิดคือคิดว่า memory
+ที่จองให้ Lambda function มีผลแค่เรื่อง "จะ out-of-memory หรือไม่" — จริง ๆ แล้ว **AWS จัดสรร CPU ให้ Lambda
+function ตามสัดส่วนของ memory ที่จอง** (จองน้อย ได้ CPU น้อยตามไปด้วย ไม่ใช่ CPU เต็มความเร็วเสมอ) ทำให้
+บางครั้ง**การเพิ่ม memory กลับทำให้ค่าใช้จ่ายรวมถูกลง** แม้ราคาต่อ GB-second จะสูงขึ้นตามสัดส่วน memory เพราะ
+function ทำงานเสร็จเร็วขึ้นมากจนเวลารวมที่ต้องจ่ายลดลงมากกว่าที่ราคาต่อหน่วยเพิ่มขึ้น (ต้องวัดจริงเป็นกรณี ๆ
+ไป ไม่มีค่าที่ดีที่สุดตายตัว) — สำหรับ Rust ที่ binary เบาและ start เร็วอยู่แล้วตามที่อธิบายไว้ต้นหัวข้อ ผล
+ต่างจากการปรับ memory มักเห็นได้น้อยกว่าภาษาที่ CPU-bound หนัก ๆ ตอน cold start (เช่นภาษาที่ต้อง JIT compile
+ตอน start) แต่ยังคุ้มที่จะทดลองปรับดูสำหรับ workload ที่มีการคำนวณหนักจริง ๆ ใน handler
+
+**Provisioned Concurrency — ทางเลือกสำหรับกำจัด cold start ให้เหลือศูนย์ (แลกกับเสียประโยชน์ scale-to-zero
+ไปบางส่วน)**: ถ้า cold start (แม้จะเร็วมากสำหรับ Rust) ยังไม่เป็นที่ยอมรับได้เลยสำหรับบางกรณี (เช่น API ที่
+ต้องการ latency ต่ำสุดเสมอไม่มีข้อยกเว้น) AWS มี **Provisioned Concurrency** ให้ตั้งจำนวน execution
+environment ที่ **"อุ่นไว้ล่วงหน้าตลอดเวลา"** (คล้ายกับตั้ง `min_machines_running` ของ Fly.io ในหัวข้อ 101.3)
+— แลกกับการต้อง**จ่ายค่าใช้จ่ายคงที่สำหรับ environment ที่อุ่นไว้นั้นตลอดเวลาไม่ว่าจะมี invocation จริงหรือ
+ไม่** ทำให้เสียคุณสมบัติ "จ่ายตามการใช้งานจริง 100%" ของ Lambda ไปบางส่วนแลกกับ latency ที่แน่นอนกว่า — เป็น
+ตัวอย่างที่ดีว่าทุก serverless platform มักมี "ทางออก" สำหรับ trade-off ของตัวเองเสมอ แต่ทางออกนั้นมักต้อง
+แลกกับคุณสมบัติที่เป็นจุดขายหลักของ platform นั้นบางส่วนเสมอเช่นกัน
+
+**สถาปัตยกรรม CPU — ARM (Graviton) เทียบกับ x86_64**: `cargo lambda build` รองรับ cross-compile ให้ทั้ง
+`x86_64-unknown-linux-gnu` (default) และ `aarch64-unknown-linux-gnu` (ARM) ผ่าน flag `--arm64` โดยไม่ต้อง
+ติดตั้ง toolchain เพิ่มเอง (Zig backend ที่ `cargo lambda` ใช้จัดการ cross-compilation ให้ทั้งหมด) — ทดสอบ
+จริงในสภาพแวดล้อมที่เขียนบทนี้:
+
+```bash
+$ cargo lambda build --release --arm64
+    Finished `release` profile [optimized] target(s) in 42.22s
+```
+
+build ผ่านสำเร็จจริงโดยไม่ต้องแก้โค้ดแม้แต่บรรทัดเดียว (Rust cross-compile ข้าม architecture ได้ตรงไปตรงมา
+กว่าหลายภาษาที่ต้องพึ่ง native extension/FFI ที่ผูกกับ architecture เฉพาะ) — เหตุผลที่ควรสนใจตัวเลือกนี้:
+AWS Lambda บน **AWS Graviton (ARM)** มีราคาต่อ GB-second **ถูกกว่า x86_64 ประมาณ 20% ตามที่ AWS ประกาศไว้**
+(ตัวเลขนี้เป็นสัดส่วนที่ AWS สื่อสารต่อสาธารณะ อาจเปลี่ยนแปลงได้) โดยประสิทธิภาพต่อ core ใกล้เคียงกันหรือดีกว่า
+สำหรับ workload จำนวนมาก — เพราะ Rust compile เป็น native machine code ให้ทั้งสอง architecture ได้เท่าเทียม
+กัน (ไม่มี "penalty" แบบภาษาที่ต้องพึ่ง JIT/interpreter ที่อาจ optimize ให้ x86 ดีกว่า ARM หรือกลับกัน) **การ
+เลือก ARM สำหรับ Lambda function ที่เขียนด้วย Rust จึงมักเป็นตัวเลือกที่ "ได้เปล่า" ในแง่ต้นทุน** แทบไม่มี
+downside ให้ต้องแลก ต่างจากภาษาอื่นที่บางครั้ง library dependency ยังไม่รองรับ ARM สมบูรณ์ (ต้องเช็ค
+compatibility เพิ่มเติม)
+
+**Packaging เป็น Container Image แทน ZIP/`bootstrap`**: `cargo lambda build --output-format Zip` (ตามที่
+เกริ่นไว้ก่อนหน้า) ให้ ZIP ที่มี `bootstrap` อยู่ข้างใน แต่ Lambda ยังรองรับการ deploy เป็น **container image**
+โดยตรงด้วย (ขนาดสูงสุดถึง 10GB ต่าง จาก ZIP ที่จำกัดเล็กกว่ามาก) — ถ้าเลือกทางนี้ Dockerfile ต้อง `FROM`
+base image พิเศษที่ AWS เตรียมไว้ (`public.ecr.aws/lambda/provided:al2023` สำหรับ custom runtime อย่าง Rust)
+แทน `scratch`/`debian:bookworm-slim` แบบที่ Part 96 สอน เพราะ Lambda container image ต้องมี Lambda Runtime
+Interface Client ฝังอยู่ (หรือ compile เข้ากับ binary เองแบบที่ `lambda_runtime` crate ทำให้แล้ว) — สำหรับ
+capstone ของหลักสูตรนี้ที่เน้น musl static binary บน `scratch` (Part 96 หัวข้อ 96.5) เส้นทาง ZIP/`bootstrap`
+ตรงไปตรงมากว่ามาก เพราะไม่ต้องเปลี่ยน base image ของ Dockerfile เลย — เส้นทาง container image เหมาะกับกรณีที่
+โปรเจกต์มี dependency ระดับ OS ที่ซับซ้อนเกินกว่าจะฝังใน ZIP function ธรรมดา (เช่นต้องมี native library ขนาด
+ใหญ่ที่ base Lambda runtime ไม่มีให้)
+
 **ขั้นตอนที่ต้องมี AWS account จริง (ไม่ได้ทำในบทนี้ — อธิบายจากเอกสารทางการ)**: หลัง build/test ในเครื่อง
 พอใจแล้ว การ deploy จริงใช้ `cargo lambda deploy` (ต้องตั้งค่า AWS credential ผ่าน `aws configure` หรือ
 environment variable `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` ก่อน) คำสั่งนี้จะอัปโหลด `bootstrap`
@@ -562,9 +841,85 @@ environment variable `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` ก่อน) �
 สองขั้นตอนนี้ (`cargo lambda deploy` และการต่อ API Gateway/Function URL) เขียนจากเอกสารทางการของ
 `cargo-lambda`/AWS เท่านั้น ไม่ได้รันจริงในสภาพแวดล้อมนี้ เพราะไม่มี AWS credential ให้ authenticate
 
-**Cleanup ของหัวข้อนี้**: หลังตรวจสอบเสร็จ ลบโปรเจกต์ `greet-lambda`, หยุด `cargo lambda watch` process,
-และลบ virtual environment ของ `pip` ที่สร้างไว้ทั้งหมดออกจาก scratch directory (ไม่กระทบไฟล์ใด ๆ ในหลักสูตร)
-ตามที่ระบุไว้ในหมายเหตุต้นบท
+**ต่อยอด — Lambda ที่รับ event จาก API Gateway จริงด้วย `lambda_http`**: ตัวอย่างข้างบนใช้ `lambda_runtime`
+ตรง ๆ กับ event ที่กำหนดโครงสร้างเอง — แต่สถานการณ์ที่พบบ่อยกว่ามากในโลกจริงคือ Lambda ที่อยู่หลัง **API
+Gateway** (หรือ Function URL) เพื่อรับ HTTP request จาก public internet — สำหรับกรณีนี้ crate `lambda_http`
+(แยกจาก `lambda_runtime` แต่ใช้ร่วมกัน) ให้ type `Request`/`Response<Body>` ที่มี**หน้าตาคล้าย `http` crate
+มาตรฐานที่ Part 60 ใช้กับ axum มาก** ทำให้ปรับโค้ดจาก axum handler มาเป็น Lambda handler ได้ไม่ยาก:
+
+```toml
+# Cargo.toml
+[dependencies]
+lambda_http = "0.14"
+lambda_runtime = "0.13"
+tokio = { version = "1", features = ["macros"] }
+```
+
+```rust
+// src/main.rs
+use lambda_http::{run, service_fn, Body, Error, Request, RequestExt, Response};
+
+async fn handler(event: Request) -> Result<Response<Body>, Error> {
+    // RequestExt::query_string_parameters_ref() ให้ query parameter จาก URL
+    // เหมือนกับ Query<T> extractor ของ axum ที่ Part 63 สอน แต่ดึงค่าด้วยมือ
+    // ตรง ๆ เพราะ Lambda ไม่มี extractor pattern แบบ axum ในตัว
+    let name = event
+        .query_string_parameters_ref()
+        .and_then(|params| params.first("name"))
+        .unwrap_or("world");
+
+    let body = format!("สวัสดี, {name} (path: {})", event.uri().path());
+
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(body.into())
+        .map_err(Box::new)?)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    run(service_fn(handler)).await
+}
+```
+
+Build จริงสำเร็จ (`cargo lambda build --release` ใช้เวลา 33.4 วินาที รวม dependency ของ `lambda_http`/
+`aws_lambda_events` ที่หนักกว่าตัวอย่างแรกเล็กน้อยเพราะต้อง deserialize event schema ของ API Gateway เต็ม
+รูปแบบ) แล้วทดสอบด้วย `cargo lambda watch -A 127.0.0.1 -P 9001` (คนละ port จากตัวอย่างแรกเพื่อรันคู่กันได้)
+— คราวนี้ต้อง**ส่ง event ให้ตรงกับรูปแบบที่ API Gateway HTTP API (payload format version 2.0) จริงจะส่งมา**
+(ไม่ใช่ JSON ธรรมดาแบบตัวอย่างแรก) — `cargo lambda invoke` มี flag `--data-example` ที่ดึง example event
+สำเร็จรูปจาก `event-examples.cargo-lambda.info` มาให้ตรง ๆ แต่โดเมนนี้**ไม่อยู่ใน network allowlist ของ
+สภาพแวดล้อมนี้** ทำให้ต้อง fail แบบนี้ (บันทึกไว้จริงตามที่พบ):
+
+```bash
+$ cargo lambda invoke --invoke-address 127.0.0.1 --invoke-port 9001 --data-example apigw-request
+Error:   × error dowloading example data
+  ├─▶ error sending request for url (https://event-examples.cargo-lambda.info/example-apigw-request.json)
+  ├─▶ client error (Connect)
+  ╰─▶ unsuccessful tunnel
+```
+
+จึงเขียน event payload ของ API Gateway HTTP API (v2.0) เองแทน (`apigw_v2_event.json` — โครงสร้าง JSON ตรง
+ตาม schema ที่ AWS เอกสารไว้ ประกอบด้วย `requestContext.http`, `rawPath`, `queryStringParameters` ฯลฯ) แล้ว
+invoke ด้วย `--data-file`:
+
+```bash
+$ cargo lambda invoke --invoke-address 127.0.0.1 --invoke-port 9001 --data-file apigw_v2_event.json
+{"statusCode":200,"headers":{"content-type":"text/plain; charset=utf-8"},"multiValueHeaders":{},"body":"สวัสดี, Ferris (path: /greet)","isBase64Encoded":false,"cookies":[]}
+```
+
+**สำเร็จจริง** — สังเกตว่า response ที่ `cargo lambda invoke` แสดงกลับมา **ไม่ใช่** `Response<Body>` ดิบ ๆ
+ที่ handler คืนตรง ๆ แต่เป็น **JSON ที่ `lambda_http` ห่อให้ตรงตาม schema ที่ API Gateway คาดหวัง**
+(`statusCode`/`headers`/`multiValueHeaders`/`body`/`isBase64Encoded`/`cookies`) — นี่คือสิ่งที่ `lambda_http`
+ทำให้อัตโนมัติ: แปลง `Response<Body>` แบบมาตรฐานของ Rust ให้เป็น "API Gateway proxy response" ที่ AWS ต้องการ
+พอดี ทำให้นักพัฒนาเขียนโค้ดด้วย type ที่คุ้นเคย (เหมือนเขียน axum handler) โดยไม่ต้องรู้จัก JSON schema ที่ AWS
+กำหนดไว้เองเลยแม้แต่บรรทัดเดียว และ `event.query_string_parameters_ref()` ก็ดึงค่า `name=Ferris` จาก
+`queryStringParameters` ของ event ได้ถูกต้อง ยืนยันว่า deserialization ทำงานถูกต้องสมบูรณ์ทั้ง input และ
+output
+
+**Cleanup ของหัวข้อนี้**: หลังตรวจสอบเสร็จ ลบโปรเจกต์ทั้งสอง (`greet-lambda`, `http-lambda-demo`), หยุด
+`cargo lambda watch` process ทั้งหมด, และลบ virtual environment ของ `pip` ที่สร้างไว้ทั้งหมดออกจาก scratch
+directory (ไม่กระทบไฟล์ใด ๆ ในหลักสูตร) ตามที่ระบุไว้ในหมายเหตุต้นบท
 
 ### 101.7 GCP Cloud Run: ภาพรวมเชิงแนวคิด
 
@@ -656,6 +1011,22 @@ Manager) สำหรับ secret จริงจัง — แนวคิด�
 Part 96 หัวข้อ 96.10 พิสูจน์ไว้แล้วว่า capstone ทำงานถูกต้องทั้งบน `docker run` ตรง ๆ และ `docker-compose`
 เพราะมันอ่านทุกอย่างจาก environment variable ตั้งแต่ต้น
 
+**สรุปรวม — environment variable ของ capstone `library_api_mini` ตั้งที่ไหนในแต่ละ target**: เพื่อให้เห็น
+ภาพรวมทั้งหมดในตารางเดียว (สังเคราะห์จากทุกหัวข้อของบทนี้และ Part 96):
+
+| Environment Variable | เป็น secret ไหม | Fly.io | ECS Task Definition | Lambda |
+|---|---|---|---|---|
+| `BIND_ADDR` | ไม่ (config ทั่วไป) | `[env]` ใน `fly.toml` | field `environment` | ไม่เกี่ยว (Lambda ไม่ bind TCP port เอง ตามหัวข้อ 101.6) |
+| `RUST_LOG` | ไม่ | `[env]` ใน `fly.toml` | field `environment` | `--env-var RUST_LOG=info` ตอน `cargo lambda deploy` |
+| `DATABASE_URL` | **ใช่** | `fly secrets set` | field `secrets` (อ้าง ARN ของ SSM/Secrets Manager) | ดึงจาก Secrets Manager ที่ runtime (แนะนำ) หรือ `--env-var` (ไม่แนะนำสำหรับ production) |
+| `JWT_SECRET` | **ใช่** | `fly secrets set` | field `secrets` | ดึงจาก Secrets Manager ที่ runtime (แนะนำ) |
+
+ตารางนี้ตอกย้ำหลักการของหัวข้อ 101.8 อีกครั้งในรูปแบบที่นำไปใช้ตรงได้ทันที: **ไม่ว่า deploy target จะเป็น
+อะไร ค่าที่เป็นความลับต้องผ่านกลไก secret เฉพาะของ platform นั้นเสมอ ไม่เคยใส่ในช่องของ config ทั่วไป** — และ
+โค้ดแอป (`env::var("DATABASE_URL")`) **เหมือนกันทุกประการไม่ว่าจะ deploy ที่ไหน** เพราะสุดท้ายทุก target ก็
+inject เป็น environment variable ธรรมดาให้ process อ่านผ่าน `std::env` เหมือนกันหมด ต่างกันแค่ "ที่มา" ของค่า
+นั้นเบื้องหลังเท่านั้น
+
 ### 101.9 Managed Database Hosting: RDS, Cloud SQL, Fly Postgres, Neon, Supabase
 
 Part 70 สอนการต่อ PostgreSQL ผ่าน `DATABASE_URL` (connection string) และ Part 96 รัน PostgreSQL ผ่าน
@@ -673,6 +1044,30 @@ database service** ที่ provider จัดการ operational work ทั
 | **Neon** | Platform-agnostic (ใช้กับที่ไหนก็ได้ที่ต่อ internet ถึง) | **Serverless Postgres** — scale-to-zero ได้แบบ compute (เก็บข้อมูลถาวรแต่ปิด compute ตอนไม่มี query ประหยัดเงินคล้ายหลักการ auto-stop ของ Fly.io Machine), branching ของ database คล้าย git branch | มี free tier ใช้งานได้จริงสำหรับโปรเจกต์เล็ก |
 | **Supabase** | Platform-agnostic | Postgres + ชุด feature เพิ่ม (auth, realtime subscription, storage, auto-generated REST/GraphQL API) — เหมาะถ้าต้องการ backend-as-a-service ไม่ใช่แค่ database ดิบ | มี free tier ใช้งานได้จริงสำหรับโปรเจกต์เล็ก |
 
+**รูปแบบ connection string จริงของแต่ละ provider (documented — เพื่อเทียบให้เห็นว่าต่างจาก Part 70 แค่ตรง
+hostname/พารามิเตอร์เสริมเท่านั้น)**:
+
+```bash
+# AWS RDS — hostname เป็น endpoint ที่ RDS สร้างให้อัตโนมัติตอนสร้าง instance
+DATABASE_URL="postgres://appuser:password@library-mini.xxxxxxxx.ap-southeast-1.rds.amazonaws.com:5432/library_mini"
+
+# GCP Cloud SQL — ถ้าต่อผ่าน public IP ตรง ๆ (ต้องเปิด Authorized Network ก่อน) หรือผ่าน Cloud SQL Auth Proxy
+# ที่รันเป็น sidecar แล้วต่อ localhost แทน (แนะนำกว่าเพราะไม่ต้องเปิด public IP เลย)
+DATABASE_URL="postgres://appuser:password@127.0.0.1:5432/library_mini"   # ผ่าน Cloud SQL Auth Proxy
+
+# Fly Postgres — hostname เป็นชื่อ internal ของ Fly.io private network (.internal)
+# ทำงานได้เฉพาะจาก Machine อื่นใน organization เดียวกันบน Fly.io เท่านั้น ไม่ expose สู่ public internet เลย
+DATABASE_URL="postgres://appuser:password@library-api-mini-db.internal:5432/library_mini"
+
+# Neon — มี query parameter "sslmode=require" เสมอ (บังคับเชื่อมต่อผ่าน TLS เท่านั้น ไม่มีโหมดไม่เข้ารหัสให้เลือก)
+DATABASE_URL="postgres://appuser:password@ep-cool-name-123456.ap-southeast-1.aws.neon.tech/library_mini?sslmode=require"
+```
+
+สังเกตว่า **`sqlx::PgPool::connect(&database_url)` ที่ Part 70 สอนไม่ต้องแก้โค้ดแม้แต่บรรทัดเดียวสำหรับทั้ง
+สี่ provider นี้** เพราะทั้งหมดพูด wire protocol ของ PostgreSQL มาตรฐานเดียวกัน — ความต่างมีแค่ hostname/
+query parameter ที่อยู่ใน connection string เท่านั้น ซึ่งเป็นสิ่งที่ environment-variable-based config
+(ตามหลักการของ Part 96 หัวข้อ 96.8 และหัวข้อ 101.8 ของบทนี้) ถูกออกแบบมาให้จัดการเรื่องนี้อยู่แล้วโดยธรรมชาติ
+
 **หลักการเลือก**: ถ้า deploy อยู่บน AWS/GCP อยู่แล้ว (ECS/Lambda หรือ Cloud Run) การใช้ RDS/Cloud SQL ตามลำดับ
 มักคุ้มที่สุดเพราะ **latency ต่ำสุด** (database อยู่ VPC/network เดียวกับแอป ไม่ต้องออกไปนอก network) และ
 **integrate กับระบบสิทธิ์ (IAM) ของ platform เดียวกัน** ได้แน่นกว่า — ถ้า deploy บน Fly.io การใช้ Fly Postgres
@@ -681,6 +1076,37 @@ database service** ที่ provider จัดการ operational work ทั
 database ทั้งชุดแบบ copy-on-write ในไม่กี่วินาทีสำหรับแต่ละ PR/feature branch) Neon เป็นตัวเลือกที่ได้รับ
 ความนิยมสูงมากในช่วงหลัง — ส่วน Supabase เหมาะกับโปรเจกต์ที่ต้องการ feature เสริมรอบ ๆ database (auth,
 realtime) มากกว่าแค่ PostgreSQL ดิบ ๆ
+
+**Connection Pooling — ทำไม managed database มักมี "proxy" ตัวเพิ่มเติมเสมอ**: Part 70 สอนให้สร้าง
+`PgPool` ด้วย `PgPoolOptions::new().max_connections(N)` — บนเครื่อง dev ที่มี PostgreSQL instance เดียวและ
+แอปเดียวต่ออยู่ N connection ไม่เคยเป็นปัญหา แต่พอ deploy จริงที่ **scale เป็นหลาย Machine/Task/instance
+พร้อมกัน** (ตามที่ rolling deployment ของหัวข้อ 101.10 อาจมี Machine เก่า+ใหม่วิ่งซ้อนกันชั่วขณะ หรือแค่
+ตั้ง `min_machines_running = 3` ปกติ) **จำนวน connection รวมของทุก instance คูณกันเข้า อาจชนเพดานที่
+PostgreSQL รับได้จริง** (PostgreSQL เพดาน default คือ `max_connections = 100` และแต่ละ connection ใช้ memory
+ของ server ฝั่ง database เองด้วย ไม่ใช่ทรัพยากรที่ไม่มีเพดาน) — ถ้า 5 Machine ตั้ง pool ละ 20 connection คือ
+100 connection พอดีเต็มเพดาน ไม่มีเหลือให้ connection อื่น (เช่น admin tool ที่ต้องต่อเข้าไปดูข้อมูล) เลย
+
+ทางแก้ที่ทุก managed provider หลักมีให้คือ **connection pooler แยกชั้น** ที่อยู่ระหว่างแอปกับ database จริง
+ทำหน้าที่ "รวม" connection จากแอปหลาย instance เข้าเป็น connection จำนวนน้อยกว่าไปยัง database จริงอีกที (คล้าย
+หลักการ multiplexing):
+
+- **RDS Proxy** (AWS) — proxy ที่ตั้งแยกจาก RDS instance เอง แอปต่อไปที่ RDS Proxy endpoint แทนต่อ RDS
+  ตรง ๆ
+- **Cloud SQL Auth Proxy** (GCP) — รันเป็น sidecar/local process ข้าง ๆ แอป (หรือใน container เดียวกัน) ทำ
+  หน้าที่ authenticate ผ่าน IAM แทน password ตรง ๆ ด้วย พร้อม pooling
+- **Fly Proxy สำหรับ Fly Postgres** — Fly Postgres มี built-in connection pooler (PgBouncer ภายใน) ให้เลือก
+  ต่อผ่าน port ที่ pool ไว้แล้วแทนต่อ PostgreSQL ตรง ๆ
+- **PgBouncer** — ตัวเลือกแบบ self-hosted ที่ใช้ได้กับ PostgreSQL ทุกที่ (ไม่ผูกกับ cloud provider ใด) นิยม
+  ตั้งเป็น sidecar container คู่กับแอปหรือแยกเป็น service กลางที่หลายแอปต่อร่วมกัน — Neon ก็ built-in
+  PgBouncer-compatible pooling ไว้ในโหมด "pooled connection string" ที่ให้เลือกใช้แทน direct connection
+  string ได้เลย
+
+**ผลต่อโค้ดแอป**: connection string ที่เปลี่ยนไปต่อผ่าน pooler มักมี**รูปแบบเดียวกันเป๊ะ** กับที่ Part 70 สอน
+(`postgres://user:pass@pooler-host:port/db`) เปลี่ยนแค่ hostname/port — โค้ด `sqlx::PgPool::connect` ไม่ต้อง
+แก้เลย แต่ต้อง**ปรับขนาด `max_connections` ของ `PgPoolOptions` ในแอปให้เหมาะกับสถานการณ์ที่มี pooler อยู่แล้ว**
+(บางครั้งตั้ง pool ในแอปให้เล็กลง เพราะ pooler ด้านหลังทำหน้าที่ "กันชน" ให้แล้ว ไม่ต้องให้แอปเปิด connection
+มากเกินจำเป็นซ้ำอีกชั้น) — นี่คือรายละเอียดที่ต้องอ่านเอกสารของ pooler แต่ละตัวเพิ่มเติมตอน tune production
+จริง ไม่ใช่ค่าที่ตั้งครั้งเดียวแล้วใช้ได้ตลอดไปโดยไม่ต้องคิดอะไรเพิ่ม
 
 **เกี่ยวกับการตรวจสอบจริง**: สภาพแวดล้อมที่เขียนบทนี้ไม่มี connection string ของ managed database ใด ๆ ที่
 verified มาจาก Part ก่อนหน้า (Part 70/96 ใช้ PostgreSQL ที่รันเองผ่าน `docker-compose` ในเครื่อง ไม่ใช่ managed
@@ -732,6 +1158,19 @@ deployment: **"process กำลังรัน" ไม่เท่ากับ 
 - **Cloud Run** — จัดการ rolling deployment ให้อัตโนมัติทั้งหมดโดยไม่ต้องตั้งค่าอะไรเพิ่ม (เพราะ Cloud Run
   เป็น managed service ระดับสูงกว่า ECS/Fly.io ในแง่นี้ — เทรดออฟคือควบคุมรายละเอียดได้น้อยกว่า)
 
+**Connection Draining — รายละเอียดที่มักถูกมองข้ามของขั้นตอน "หยุด instance เก่า"**: กลับไปที่ขั้นตอนที่ 4
+ของ rolling deployment ("หยุด instance เก่าตัวหนึ่ง") — ถ้า request ที่กำลังประมวลผลอยู่ ณ ขณะนั้น (เช่น
+query ที่ query ช้าไปที่ database, หรือ transaction ที่ยังไม่ commit ตามหลัก `sqlx::Transaction` ที่ Part 70
+สอน) ถูก "ตัดตอน" ทันทีที่ instance เก่าถูก `SIGKILL` ผู้ใช้ที่กำลังรอ response นั้นจะได้ error แม้ระบบ
+โดยรวมจะดู "zero-downtime" แล้วก็ตาม (เพราะ instance ใหม่พร้อมรับ request ใหม่แล้วจริง แต่ request เก่าที่
+กำลังทำอยู่ค้างอยู่ตรงกลาง) — **connection draining** คือขั้นตอนเสริมที่แก้ปัญหานี้: ก่อนส่ง `SIGKILL` ให้
+instance เก่า ระบบจะ **หยุดส่ง traffic ใหม่ไปที่ instance นั้น (ถอนออกจาก load balancer/target group ก่อน)
+แต่ยังปล่อยให้ request ที่กำลังทำอยู่ทำต่อจนเสร็จ** ภายในเวลาที่กำหนด (grace period) ก่อนค่อยส่ง kill signal
+จริง — ตรงกับ `kill_signal`/`kill_timeout` ของ `fly.toml` ที่หัวข้อ 101.3 อธิบายไว้แล้ว (`SIGINT` ให้เวลา
+process จัดการ cleanup เอง เช่นรอ request ที่ทำอยู่เสร็จก่อนค่อยยอม exit จริง) — ฝั่งแอปเองก็ต้องรองรับด้วย
+graceful shutdown handler (axum ที่ Part 60+ สอนรองรับผ่าน `axum::serve(...).with_graceful_shutdown(...)`)
+ไม่ใช่แค่แพลตฟอร์ม deploy ให้เวลามาเฉย ๆ แล้วแอปไม่สนใจ signal ที่ส่งมาเลย
+
 ### 101.11 DNS, Custom Domain, และ TLS ในบริบท Managed Platform
 
 Part 100 หัวข้อ 100.8 สอนวิธีตั้งค่า TLS **เองด้วยมือ** ผ่าน `rustls`/`axum-server` (โหลด certificate/key จาก
@@ -772,6 +1211,25 @@ Cloud Run มีกลไกคล้ายกันผ่าน `gcloud run dom
 ความรับผิดชอบเรื่อง certificate ออกจากแอปโดยสิ้นเชิง** ต่างจาก Part 100 ที่สอนให้แอปรับผิดชอบเองทั้งหมด
 (เหมาะกับกรณี deploy บน VM ดิบที่ไม่มี managed proxy ชั้นหน้า)
 
+**DNS record type ที่ต้องรู้จักตอนผูก custom domain**: DNS (Domain Name System) แปลงชื่อ domain ที่มนุษย์
+อ่านง่าย (`api.example.com`) เป็น IP address ที่เครื่องใช้จริง — record type หลักที่เจอบ่อยตอนผูก domain
+เข้ากับ managed platform:
+
+| Record type | ใช้ทำอะไร | ใช้กับ managed platform อย่างไร |
+|---|---|---|
+| **A** | ชี้ hostname ไปยัง IPv4 address ตรง ๆ | Fly.io ให้ IPv4 address คงที่มาผูกกับ apex domain (`example.com` ไม่มี subdomain) ได้ |
+| **AAAA** | เหมือน A แต่เป็น IPv6 address | เช่นเดียวกับ A แต่สำหรับ IPv6 — Fly.io/Cloudflare ให้ทั้งคู่เสมอเพื่อรองรับ dual-stack |
+| **CNAME** | ชี้ hostname ไปยัง hostname อื่น (ไม่ใช่ IP ตรง ๆ) | ใช้กับ subdomain (`api.example.com` → `library-api-mini.fly.dev`) — **ใช้กับ apex domain ไม่ได้ตาม RFC ของ DNS เอง** (ข้อจำกัดที่ DNS provider บางตัวแก้ด้วย record พิเศษของตัวเอง เช่น `ALIAS`/`ANAME` ของ Cloudflare/Route 53) |
+| **TXT** | เก็บข้อมูล text ใด ๆ | ใช้ยืนยันความเป็นเจ้าของ domain ตอน ACME challenge บางรูปแบบ (`dns-01` challenge ของ Let's Encrypt ที่ Part 100 พูดถึง ต้องพิสูจน์ผ่าน DNS ไม่ใช่ผ่าน HTTP) |
+
+**DNS propagation delay**: การเปลี่ยน DNS record ไม่มีผลทันทีทั่วโลก เพราะ DNS resolver (ของ ISP/browser/OS)
+**cache** ผลลัพธ์ไว้ตามค่า **TTL (Time To Live)** ที่ record นั้นตั้งไว้ (หน่วยเป็นวินาที เช่น TTL 300 วินาที
+= cache ไว้ 5 นาทีก่อน resolver จะ query ใหม่) — ถ้าเพิ่งเปลี่ยน record ผลลัพธ์อาจ**ไม่ตรงกันในแต่ละที่**
+ชั่วขณะ (บางคนเห็นค่าใหม่ บางคนยังเห็นค่าเก่าที่ resolver ของเขา cache ไว้) จนกว่า TTL เดิมจะหมดอายุทั่วโลก —
+เป็นเหตุผลที่คำแนะนำทั่วไปคือ **ลด TTL ลงล่วงหน้าก่อนวันที่วางแผนเปลี่ยน record สำคัญ** (เช่นเปลี่ยนจาก 3600
+เป็น 300 ก่อนสองสามวัน) เพื่อให้การเปลี่ยนแปลงจริงมีผลเร็วขึ้นตอนถึงเวลาจริง — ไม่เกี่ยวกับ managed platform
+ที่เลือกเลย เป็นธรรมชาติของ DNS protocol เองที่ทุกแพลตฟอร์มต้องเจอเหมือนกัน
+
 ### 101.12 Cost Awareness: ลำดับขนาดของค่าใช้จ่าย (Order of Magnitude)
 
 ตัวเลขในหัวข้อนี้เป็น**การประมาณระดับลำดับขนาด** (order of magnitude) จาก public pricing page ของแต่ละ
@@ -788,6 +1246,20 @@ provider ณ ช่วงที่เขียนบทนี้ **ไม่ใ�
 | EC2 `t3.micro`/`t3.small` รันตลอด 24/7 | **หลักสิบดอลลาร์ (~$8-15)** | ยังไม่รวมค่า EBS storage/data transfer/load balancer แยก |
 | Managed PostgreSQL ระดับเล็กสุด (RDS/Cloud SQL) | **หลักสิบดอลลาร์ (~$15-30)** | Fly Postgres/Neon free tier มักถูกกว่านี้มากสำหรับโปรเจกต์เล็ก (Neon free tier ใช้งานได้จริงที่ $0) |
 | Kubernetes managed control plane (EKS/GKE) | **หลักสิบดอลลาร์ (~$70-75) แค่ค่า control plane** | ยังไม่รวมค่า worker node (EC2/GCE instance) ที่ต้องจ่ายเพิ่มแยกทั้งหมด — เป็นเหตุผลว่าทำไม K8s ไม่คุ้มสำหรับโปรเจกต์เล็ก |
+
+**ตัวอย่างการคำนวณแบบง่าย — เปรียบเทียบ Lambda กับเครื่องที่รันตลอด**: เพื่อให้เห็นภาพลำดับขนาดชัดขึ้น ลอง
+ประมาณการแบบคร่าว ๆ (ตัวเลขนี้เป็นการประมาณเพื่อการศึกษา ไม่ใช่ราคาที่ยืนยันแล้ว) สำหรับ Lambda function ที่
+ทำงานเฉลี่ย 50ms ต่อ invocation, memory 256MB, เรียก 100,000 ครั้ง/เดือน — เทียบราคาต่อ GB-second ระดับที่
+AWS ประกาศไว้บน pricing page ณ ช่วงที่เขียนบทนี้ (หลักการคำนวณคือ `จำนวน invocation × ระยะเวลาเฉลี่ย ×
+memory ที่จอง (แปลงเป็น GB) × ราคาต่อ GB-second` บวกค่า request แยกอีกเล็กน้อย) ผลลัพธ์ที่ได้อยู่ใน**ระดับ
+เกือบ $0** เพราะ AWS มี free tier ถาวรที่ครอบคลุมปริมาณการใช้งานระดับนี้ทั้งหมด (ไม่ต้องคำนวณละเอียดเพราะยัง
+อยู่ในฟรี tier) — ในขณะที่ EC2 `t3.micro` ที่รันตลอด 24 ชั่วโมง × 30 วัน (720 ชั่วโมง) คูณด้วยราคาต่อชั่วโมง
+ระดับ $0.01-0.02 ต่อชั่วโมง จะอยู่ที่**ประมาณ $8-15 ไม่ว่าจะมี traffic เข้ามาจริง 100,000 ครั้งหรือ 0 ครั้ง
+เลยก็ตาม** เพราะรูปแบบ billing ของ EC2 ไม่สนใจว่ามี traffic จริงหรือไม่ — **นี่คือตัวอย่างที่ชัดที่สุดว่าทำไม
+traffic pattern ที่ไม่สม่ำเสมอ (โดยเฉพาะระดับ MVP/side project ที่ traffic ยังน้อย) เหมาะกับ Serverless
+มากกว่า VM ที่รันตลอด** แม้ราคาต่อหน่วยงานของ Lambda (คิดเป็น $ ต่อ GB-second) อาจดูสูงกว่าราคาต่อหน่วยงาน
+ของ EC2 (คิดเป็น $ ต่อ vCPU-hour) เมื่อเทียบตรง ๆ ก็ตาม เพราะจุดสำคัญไม่ใช่ "ราคาต่อหน่วยงาน" แต่คือ **"จำนวน
+หน่วยงานที่เกิดขึ้นจริง" กับ "ค่าใช้จ่ายตอนไม่มีงานเกิดขึ้นเลย"**
 
 **ข้อสังเกตที่สำคัญกว่าตัวเลข**: รูปแบบ billing มีสองแบบหลักที่ต่างกันโดยพื้นฐาน — **"จ่ายตามเวลาที่เครื่อง
 รันอยู่"** (EC2, Fargate ถ้าไม่ scale เป็น 0, RDS/Cloud SQL) กับ **"จ่ายตามการใช้งานจริง"** (Lambda ตาม
@@ -904,6 +1376,27 @@ fly logs
   หรือไม่ (ต้องมี `flyctl`+account จริงยืนยันด้วย `fly config validate`/`fly deploy`), พฤติกรรมจริงของ
   `fly deploy`/rolling deployment/health check cutover บน infrastructure จริงของ Fly.io, ราคาที่เกิดขึ้น
   จริงหลัง deploy
+
+**Checklist หลัง deploy ครั้งแรก — ตรวจอะไรก่อนบอกว่า "deploy สำเร็จแล้ว"**: อย่าถือว่า deployment สำเร็จ
+แค่เพราะคำสั่ง `fly deploy`/`aws ecs update-service`/`gcloud run deploy` คืน exit code 0 — ต้องตรวจต่อไปนี้
+ให้ครบก่อนสรุปว่าระบบพร้อมรับผู้ใช้จริง (สังเคราะห์จากทุกหัวข้อของบทนี้):
+
+1. **Health check ผ่านจริง** — `fly status`/AWS Console (ECS Service Events tab)/`gcloud run services
+   describe` ต้องแสดงสถานะ "healthy"/"steady state" ไม่ใช่แค่ "running" (ตามหลัก health-check-gated cutover
+   ของหัวข้อ 101.10 — "process รันอยู่" ไม่เท่ากับ "พร้อมรับ traffic")
+2. **Log ไม่มี error ที่ผิดปกติ** — `fly logs`/CloudWatch Logs (สำหรับ ECS/Lambda)/Cloud Logging (สำหรับ
+   Cloud Run) — ทุกแพลตฟอร์มมีระบบรวบรวม log จาก stdout/stderr ของ container ให้อัตโนมัติ (ไม่ต้องตั้งค่า
+   log shipping เองเหมือน VM ดิบที่ต้องพึ่งเครื่องมือแยก เช่น Fluentd/Vector) — ตรวจว่าไม่มี panic/connection
+   error ซ้ำ ๆ ที่บ่งบอกว่า Machine "healthy" แค่ผ่าน HTTP check แต่ยังมีปัญหาซ่อนอยู่ (เช่น database
+   connection pool เต็มบ่อย ๆ)
+3. **Secret ครบและถูกต้อง** — ยืนยันว่า endpoint ที่ต้องพึ่ง database (เช่น `/health` ที่เช็ค `database:
+   "ok"` ตามที่ Part 96 หัวข้อ 96.10 ออกแบบไว้) คืนค่าถูกต้องจริง ไม่ใช่แค่ HTTP 200 เปล่า ๆ ที่ไม่ได้เช็ค
+   dependency ภายในเลย (ย้อนกลับไปหลักการ "readiness ต้องเช็คสิ่งที่แอปพึ่งพาจริง" ของ Part 81)
+4. **TLS certificate ออกสำเร็จแล้ว** (ถ้าผูก custom domain ตามหัวข้อ 101.11) — เช็คด้วย `curl -vI
+   https://<custom-domain>` ว่า handshake สำเร็จและ certificate ไม่ใช่ self-signed/expired
+5. **Rollback plan พร้อมใช้** — รู้ว่าคำสั่ง rollback ของแพลตฟอร์มนั้นคืออะไร (`fly deploy` เวอร์ชันก่อนหน้า
+   ซ้ำ, ECS "roll back to previous task definition revision", Lambda "point alias ไปเวอร์ชันก่อนหน้า") ก่อน
+   ที่จะต้องใช้จริงตอนมีปัญหาฉุกเฉิน ไม่ใช่มาหาวิธีตอนเกิดปัญหาแล้ว
 
 การแยกสถานะแบบนี้คือสิ่งที่บทนี้ต้องการให้ผู้เรียนติดเป็นนิสัย: **เมื่อไรก็ตามที่ทำงานในสภาพแวดล้อมที่ไม่มี
 credential จริงของ cloud provider (เช่น CI runner ที่ยังไม่ผูก secret, sandbox สำหรับพัฒนา, เครื่องส่วนตัวที่
@@ -1044,6 +1537,31 @@ go: github.com/superfly/flyctl@latest: github.com/superfly/flyctl@v0.4.108 requi
 เครื่องมือ Go ที่ publish source ให้ build จาก module proxy ได้) มีโอกาสติดตั้งสำเร็จสูงกว่า "เครื่องมือที่
 แจกจ่าย binary ผ่าน CDN/release page ของตัวเอง" มาก — เป็นเกณฑ์หนึ่งที่ควรพิจารณาตอนเลือกเครื่องมือสำหรับทีม
 ที่ทำงานในสภาพแวดล้อมที่ควบคุม network เข้มงวดแบบนี้
+
+**6. `cargo lambda invoke --data-example` ใช้ไม่ได้ในสภาพแวดล้อมที่ network ถูกจำกัด เพราะดึง example
+payload จาก server ภายนอก**
+
+พบจริงตอนทดสอบ `lambda_http` ในหัวข้อ 101.6 — flag ที่ดูสะดวกที่สุดสำหรับทดสอบ event จริงของ AWS
+(`--data-example apigw-request`) กลับใช้ไม่ได้ในสภาพแวดล้อมที่เขียนบทนี้:
+
+```
+$ cargo lambda invoke --data-example apigw-request
+Error:   × error dowloading example data
+  ├─▶ error sending request for url (https://event-examples.cargo-lambda.info/example-apigw-request.json)
+  ├─▶ client error (Connect)
+  ╰─▶ unsuccessful tunnel
+```
+
+**เหตุผล**: `--data-example` ไม่ได้ฝัง example payload มาในตัว `cargo-lambda` เอง แต่**ดึงจาก server ของ
+โปรเจกต์ `cargo-lambda` เองทาง `event-examples.cargo-lambda.info`** ทุกครั้งที่เรียกใช้ — เป็น domain ที่ไม่
+อยู่ใน allowlist ของสภาพแวดล้อมนี้ (ต่างจากตัว `cargo-lambda` binary เองที่ pip ดึงจาก `pypi.org` ที่อยู่ใน
+allowlist) **วิธีแก้**: เขียน event payload เองเป็นไฟล์ JSON ตรงตาม schema ที่ AWS เอกสารไว้ (เช่น
+API Gateway HTTP API payload format version 2.0 ตามตัวอย่างในหัวข้อ 101.6) แล้วใช้ `--data-file` แทน — ใช้
+งานได้แน่นอนกว่าเพราะไม่ต้องพึ่ง network ภายนอกเลย และยังเป็นวิธีที่แนะนำสำหรับ CI pipeline ที่ทดสอบ Lambda
+function อัตโนมัติ (เก็บ fixture event ไว้ใน repository เอง ไม่ต้องดึงจากที่ไหนทุกครั้งที่รัน test) —
+บทเรียนที่กว้างกว่า: **ต้องรู้ว่า flag/feature ไหนของเครื่องมือ "ทำงานแบบ offline จริง" กับไหน "ยังต้องพึ่ง
+network เพิ่มเติมที่ไม่ใช่ตัวติดตั้งเครื่องมือเอง"** เพราะสองอย่างนี้มีพฤติกรรมต่างกันมากในสภาพแวดล้อมที่
+ควบคุม network เข้มงวด แม้จะมาจากเครื่องมือตัวเดียวกันก็ตาม
 
 ## แบบฝึกหัด (Exercises)
 

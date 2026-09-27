@@ -1310,6 +1310,419 @@ server (ที่สร้างด้วย Tonic ซึ่งพูด HTTP/2 
 
 **Load Balancing**: ในระบบ microservices จริง (Part 81) มักมี service instance เดียวกันหลายตัวรันพร้อมกัน (สำหรับ scale และ fault tolerance) — Tonic รองรับ client-side load balancing แบบพื้นฐานผ่าน feature `channel` ที่ดึง `tower::balance` เข้ามา (สังเกตได้จาก `Cargo.toml` ของ `tonic` ที่ประกาศ `"tower?/balance"` ไว้ในนิยามของ feature `channel`) แต่ในระบบจริงขนาดใหญ่ทีมส่วนมากเลือกใช้ **service mesh** (เช่น Istio/Linkerd ที่ทำงานร่วมกับ Envoy proxy) จัดการเรื่อง load balancing, retry, circuit breaking ที่ระดับ infrastructure แทนที่จะทำในโค้ด Rust เอง — Part 81 จะพูดถึงแนวคิดนี้ต่อในบริบทของการออกแบบระบบ microservices แบบเต็มรูปแบบ
 
+### 80.12 ภาคผนวก: โค้ดฉบับสมบูรณ์ที่ใช้ทดสอบทุกตัวอย่างในบทนี้
+
+หัวข้อก่อนหน้าตัดโค้ดมาแสดงเป็นส่วน ๆ ตามประเด็นที่อธิบาย — ภาคผนวกนี้รวบรวม**โค้ดฉบับสมบูรณ์ทั้งหมด**ของทั้ง 3 ไฟล์หลักที่ใช้รันและ capture output จริงทุกจุดในบทนี้ไว้ในที่เดียว เพื่อให้คัดลอกไปรันตามได้ครบทุกบรรทัดโดยไม่ต้องประกอบเอง
+
+**`Cargo.toml`:**
+
+```toml
+[package]
+name = "grpc_demo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[dependencies]
+prost = "0.14.4"
+tokio = { version = "1.53.1", features = ["full"] }
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-reflection = "0.14.6"
+futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3.6"
+bytes = "1.12.1"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+```
+
+**`src/lib.rs`** (module `book` ที่ include โค้ดที่ generate จาก `.proto` และ `BookStore`):
+
+```rust
+pub mod book {
+    tonic::include_proto!("library.v1");
+
+    pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("book_descriptor");
+}
+
+use book::Book;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub struct BookStore {
+    books: Mutex<HashMap<i64, Book>>,
+    next_id: Mutex<i64>,
+}
+
+impl BookStore {
+    pub fn new() -> Self {
+        let mut seed = HashMap::new();
+        seed.insert(1, Book {
+            id: 1,
+            title: "The Rust Programming Language".to_string(),
+            author: "Steve Klabnik & Carol Nichols".to_string(),
+            year: 2019,
+            price: 39.99,
+        });
+        seed.insert(2, Book {
+            id: 2,
+            title: "Programming Rust".to_string(),
+            author: "Jim Blandy & Jason Orendorff".to_string(),
+            year: 2021,
+            price: 44.99,
+        });
+        seed.insert(3, Book {
+            id: 3,
+            title: "Zero To Production In Rust".to_string(),
+            author: "Luca Palmieri".to_string(),
+            year: 2022,
+            price: 29.99,
+        });
+        BookStore { books: Mutex::new(seed), next_id: Mutex::new(4) }
+    }
+
+    pub fn get(&self, id: i64) -> Option<Book> {
+        self.books.lock().unwrap().get(&id).cloned()
+    }
+
+    pub fn list(&self) -> Vec<Book> {
+        let mut items: Vec<Book> = self.books.lock().unwrap().values().cloned().collect();
+        items.sort_by_key(|b| b.id);
+        items
+    }
+
+    pub fn create(&self, title: String, author: String, year: i32, price: f64) -> Book {
+        let mut next_id = self.next_id.lock().unwrap();
+        let id = *next_id;
+        *next_id += 1;
+        let book = Book { id, title, author, year, price };
+        self.books.lock().unwrap().insert(id, book.clone());
+        book
+    }
+}
+
+impl Default for BookStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+```
+
+**`src/bin/server.rs`** (ครบทุก RPC: unary ×2, server streaming, client streaming, bidirectional streaming, interceptor, reflection):
+
+```rust
+use futures::Stream;
+use grpc_demo::book::book_service_server::{BookService, BookServiceServer};
+use grpc_demo::book::{
+    AvailabilityUpdate, Book, CreateBookRequest, GetBookRequest, ListBooksRequest, UploadSummary,
+};
+use grpc_demo::BookStore;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use tonic::{transport::Server, Request, Response, Status, Streaming};
+
+pub struct MyBookService {
+    store: Arc<BookStore>,
+}
+
+const VALID_TOKEN: &str = "Bearer secret-token-123";
+
+#[tonic::async_trait]
+impl BookService for MyBookService {
+    async fn get_book(&self, request: Request<GetBookRequest>) -> Result<Response<Book>, Status> {
+        let id = request.into_inner().id;
+        println!("[server] GetBook id={id}");
+        if id == 42 {
+            // จำลอง query ที่ช้าผิดปกติ สำหรับสาธิต deadline (กับดักข้อ 6)
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        match self.store.get(id) {
+            Some(book) => Ok(Response::new(book)),
+            None => Err(Status::not_found(format!("ไม่พบหนังสือ id={id}"))),
+        }
+    }
+
+    async fn create_book(
+        &self,
+        request: Request<CreateBookRequest>,
+    ) -> Result<Response<Book>, Status> {
+        let req = request.into_inner();
+        println!("[server] CreateBook title={}", req.title);
+
+        if req.title.trim().is_empty() {
+            return Err(Status::invalid_argument("title ต้องไม่เป็นค่าว่าง"));
+        }
+        if req.price < 0.0 {
+            return Err(Status::invalid_argument(format!(
+                "price ต้องไม่ติดลบ (ได้รับ {})",
+                req.price
+            )));
+        }
+        if req.title == "Banned Book" {
+            let mut metadata = tonic::metadata::MetadataMap::new();
+            metadata.insert("x-error-reason", "title-blocklisted".parse().unwrap());
+            return Err(Status::with_details_and_metadata(
+                tonic::Code::PermissionDenied,
+                "หนังสือชื่อนี้ถูกระงับการเพิ่มโดยนโยบายเนื้อหา",
+                bytes::Bytes::from_static(b"policy_id=CONTENT_BLOCKLIST_7"),
+                metadata,
+            ));
+        }
+
+        let book = self.store.create(req.title, req.author, req.year, req.price);
+        Ok(Response::new(book))
+    }
+
+    type ListBooksStream = Pin<Box<dyn Stream<Item = Result<Book, Status>> + Send + 'static>>;
+
+    async fn list_books(
+        &self,
+        request: Request<ListBooksRequest>,
+    ) -> Result<Response<Self::ListBooksStream>, Status> {
+        let page_size = request.into_inner().page_size.max(1) as usize;
+        let books = self.store.list();
+        println!(
+            "[server] ListBooks page_size={page_size} (มีทั้งหมด {} เล่ม)",
+            books.len()
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            for chunk in books.chunks(page_size) {
+                for book in chunk {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    if tx.send(Ok(book.clone())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream) as Self::ListBooksStream))
+    }
+
+    async fn upload_books(
+        &self,
+        request: Request<Streaming<CreateBookRequest>>,
+    ) -> Result<Response<UploadSummary>, Status> {
+        let mut stream = request.into_inner();
+        let mut total_received = 0;
+        let mut total_created = 0;
+        let mut errors = Vec::new();
+
+        while let Some(item) = stream.message().await? {
+            total_received += 1;
+            println!("[server] UploadBooks รับ #{total_received}: {}", item.title);
+            if item.title.trim().is_empty() {
+                errors.push(format!("รายการที่ {total_received}: title ว่าง — ข้าม"));
+                continue;
+            }
+            self.store.create(item.title, item.author, item.year, item.price);
+            total_created += 1;
+        }
+
+        println!(
+            "[server] UploadBooks จบ: received={total_received} created={total_created} errors={}",
+            errors.len()
+        );
+
+        Ok(Response::new(UploadSummary { total_received, total_created, errors }))
+    }
+
+    type WatchAvailabilityStream =
+        Pin<Box<dyn Stream<Item = Result<AvailabilityUpdate, Status>> + Send + 'static>>;
+
+    async fn watch_availability(
+        &self,
+        request: Request<Streaming<AvailabilityUpdate>>,
+    ) -> Result<Response<Self::WatchAvailabilityStream>, Status> {
+        let mut in_stream = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+        tokio::spawn(async move {
+            while let Some(result) = in_stream.message().await.transpose() {
+                match result {
+                    Ok(update) => {
+                        println!(
+                            "[server] WatchAvailability รับอัปเดตจาก client: book_id={} copies={}",
+                            update.book_id, update.copies_available
+                        );
+                        let ack = AvailabilityUpdate {
+                            book_id: update.book_id,
+                            copies_available: update.copies_available,
+                        };
+                        if tx.send(Ok(ack)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        return;
+                    }
+                }
+            }
+            println!("[server] WatchAvailability: client ปิด stream ฝั่งส่งแล้ว");
+        });
+
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream) as Self::WatchAvailabilityStream))
+    }
+}
+
+fn check_auth(req: Request<()>) -> Result<Request<()>, Status> {
+    match req.metadata().get("authorization") {
+        Some(value) if value.to_str().unwrap_or("") == VALID_TOKEN => Ok(req),
+        Some(_) => Err(Status::unauthenticated("token ไม่ถูกต้อง")),
+        None => Err(Status::unauthenticated("ไม่พบ authorization metadata")),
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = "127.0.0.1:50051".parse()?;
+    let store = Arc::new(BookStore::new());
+    let book_service = MyBookService { store };
+
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(grpc_demo::book::FILE_DESCRIPTOR_SET)
+        .build_v1()?;
+
+    println!("BookService gRPC server listening on {addr}");
+
+    Server::builder()
+        .add_service(reflection_service)
+        .add_service(BookServiceServer::with_interceptor(book_service, check_auth))
+        .serve(addr)
+        .await?;
+
+    Ok(())
+}
+```
+
+**`src/bin/client.rs`** (ครบทั้ง 8 สถานการณ์ที่สาธิตในบทนี้ รันแล้ว capture output จริงตามที่แสดงไว้ในแต่ละหัวข้อ):
+
+```rust
+use grpc_demo::book::book_service_client::BookServiceClient;
+use grpc_demo::book::{AvailabilityUpdate, CreateBookRequest, GetBookRequest, ListBooksRequest};
+use tonic::Request;
+
+const VALID_TOKEN: &str = "Bearer secret-token-123";
+
+fn with_auth<T>(msg: T) -> Request<T> {
+    let mut req = Request::new(msg);
+    req.metadata_mut().insert("authorization", VALID_TOKEN.parse().unwrap());
+    req
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = BookServiceClient::connect("http://127.0.0.1:50051").await?;
+
+    // 1) unary สำเร็จ
+    let resp = client.get_book(with_auth(GetBookRequest { id: 1 })).await?;
+    println!("ได้รับ: {:?}", resp.into_inner());
+
+    // 2) unary -> NOT_FOUND
+    if let Err(status) = client.get_book(with_auth(GetBookRequest { id: 999 })).await {
+        println!("code={:?} message={:?}", status.code(), status.message());
+    }
+
+    // 3) unary ไม่แนบ token -> UNAUTHENTICATED (interceptor บล็อก)
+    if let Err(status) = client.get_book(Request::new(GetBookRequest { id: 1 })).await {
+        println!("code={:?} message={:?}", status.code(), status.message());
+    }
+
+    // 4) unary CreateBook สำเร็จ
+    let created = client.create_book(with_auth(CreateBookRequest {
+        title: "Rust for Rustaceans".to_string(),
+        author: "Jon Gjengset".to_string(),
+        year: 2021,
+        price: 34.99,
+    })).await?;
+    println!("สร้างสำเร็จ: {:?}", created.into_inner());
+
+    // 5) unary CreateBook -> INVALID_ARGUMENT
+    if let Err(status) = client.create_book(with_auth(CreateBookRequest {
+        title: "Broken Book".to_string(),
+        author: "Nobody".to_string(),
+        year: 2024,
+        price: -10.0,
+    })).await {
+        println!("code={:?} message={:?}", status.code(), status.message());
+    }
+
+    // 5b) unary CreateBook -> PERMISSION_DENIED พร้อม details/metadata
+    if let Err(status) = client.create_book(with_auth(CreateBookRequest {
+        title: "Banned Book".to_string(),
+        author: "Someone".to_string(),
+        year: 2024,
+        price: 10.0,
+    })).await {
+        println!(
+            "code={:?} details={:?} metadata={:?}",
+            status.code(),
+            String::from_utf8_lossy(status.details()),
+            status.metadata().get("x-error-reason")
+        );
+    }
+
+    // 6) server streaming: ListBooks
+    let mut stream = client
+        .list_books(with_auth(ListBooksRequest { page_size: 2 }))
+        .await?.into_inner();
+    while let Some(book) = stream.message().await? {
+        println!("stream chunk -> {}", book.title);
+    }
+
+    // 7) client streaming: UploadBooks
+    let uploads = vec![
+        CreateBookRequest { title: "Async Rust".to_string(), author: "Multiple Authors".to_string(), year: 2023, price: 19.99 },
+        CreateBookRequest { title: "".to_string(), author: "Ghost".to_string(), year: 2023, price: 9.99 },
+        CreateBookRequest { title: "Effective Rust".to_string(), author: "David Drysdale".to_string(), year: 2024, price: 24.99 },
+        CreateBookRequest { title: "Rust Atomics and Locks".to_string(), author: "Mara Bos".to_string(), year: 2023, price: 22.5 },
+    ];
+    let outbound = tokio_stream::iter(uploads);
+    let summary = client.upload_books(with_auth(outbound)).await?.into_inner();
+    println!(
+        "summary: received={} created={} errors={:?}",
+        summary.total_received, summary.total_created, summary.errors
+    );
+
+    // 8) bidirectional streaming: WatchAvailability
+    let outbound_updates = async_stream::stream! {
+        let updates = vec![
+            AvailabilityUpdate { book_id: 1, copies_available: 5 },
+            AvailabilityUpdate { book_id: 2, copies_available: 0 },
+            AvailabilityUpdate { book_id: 1, copies_available: 4 },
+        ];
+        for u in updates {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            yield u;
+        }
+    };
+    let response = client.watch_availability(with_auth(outbound_updates)).await?;
+    let mut inbound = response.into_inner();
+    while let Some(update) = inbound.message().await? {
+        println!("ack -> book_id={} copies={}", update.book_id, update.copies_available);
+    }
+
+    Ok(())
+}
+```
+
+**วิธีรันตามภาคผนวกนี้ให้ครบ**: `cargo run --release --bin server` ใน terminal หนึ่ง แล้ว `cargo run --release --bin client` ใน terminal อีกตัว (ต้องมี `proto/book.proto` และ `build.rs` ตามหัวข้อ 80.2-80.3 อยู่ในโปรเจกต์ด้วย และต้องมี `protoc` ติดตั้งไว้ในเครื่องตามที่อธิบายไว้ก่อนหน้า)
+
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
 ### 1. ลืมติดตั้ง `protoc` — build script fail ทันที

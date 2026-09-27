@@ -113,8 +113,8 @@
 | 81 | Microservices Architecture ด้วย Rust | ⏳ |
 | 82 | Message Queues: RabbitMQ/Kafka Integration | ⏳ |
 | 83 | Caching ด้วย Redis | ⏳ |
-| 84 | Background Jobs และ Task Queues | ⏳ |
-| 85 | API Documentation ด้วย OpenAPI/Swagger (utoipa) | ⏳ |
+| 84 | Background Jobs และ Task Queues | ✅ |
+| 85 | API Documentation ด้วย OpenAPI/Swagger (utoipa) | ✅ |
 
 ## โมดูล 5: Full-Stack และ WebAssembly — Part 86–95
 

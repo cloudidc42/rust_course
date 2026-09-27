@@ -448,6 +448,24 @@ logic ของแอปไม่ต้องรู้เลยว่ามี�
 รันไม่เห็นผลอะไรเป็นชิ้นเป็นอันจนกว่าจะมี**อะไรสักอย่างที่รับ OTLP อยู่ที่ `localhost:4317` จริง** — นั่นคือ
 สิ่งที่หัวข้อถัดไปจะทำ
 
+#### ทางเลือก: ตั้งค่าผ่าน Environment Variable แทนการ Hardcode ในโค้ด
+
+ตัวอย่างข้างบน hardcode ค่า `service_name`/`endpoint` ไว้ในโค้ดเพื่อความชัดเจนตอนเรียน — ในระบบจริง OTel SDK
+มาตรฐานรองรับการตั้งค่าผ่าน **environment variable ที่เป็นมาตรฐานเดียวกันทุกภาษา** (ไม่ใช่แค่ Rust) ทำให้ค่า
+พวกนี้ปรับได้ตอน deploy โดยไม่ต้อง compile ใหม่ (แนวคิดเดียวกับ `RUST_LOG` ของ Part 60 หัวข้อ 60.3 เป๊ะ — แค่
+คนละ ecosystem):
+
+| Environment Variable | บทบาท | ตรงกับอะไรในโค้ดตัวอย่างข้างบน |
+|---|---|---|
+| `OTEL_SERVICE_NAME` | ชื่อ service ที่ปรากฏใน Jaeger UI | `Resource::builder().with_service_name(...)` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | ปลายทาง OTLP | `.with_endpoint("http://localhost:4317")` |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | สูตร sampling (หัวข้อ 99.7) เช่น `traceidratio` + `0.2` | `Sampler::TraceIdRatioBased(0.2)` |
+
+ข้อควรระวัง: การอ่าน environment variable เหล่านี้อัตโนมัติ**ไม่ใช่พฤติกรรมเริ่มต้นของทุก SDK เสมอไป** —
+`opentelemetry_sdk` เวอร์ชันที่บทนี้ใช้ยังต้องเขียนโค้ดอ่านค่าด้วยตัวเอง (เช่น
+`std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")`) แล้วส่งต่อให้ builder เอง ไม่ได้ auto-detect ให้ทั้งหมดแบบ
+บาง SDK ภาษาอื่น — หัวข้อ 99.10 (capstone) จะแสดงตัวอย่างการอ่านค่าด้วยมือแบบนี้ให้เห็นจริง
+
 ### 99.5 รัน Jaeger จริงด้วย Docker แล้ว Export Span จริง
 
 Jaeger คือ backend โอเพนซอร์สคลาสสิกสำหรับ distributed tracing (เดิมพัฒนาโดย Uber แล้วบริจาคให้ CNCF) — เวอร์ชัน

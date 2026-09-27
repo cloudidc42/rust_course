@@ -1118,6 +1118,55 @@ site-addr = "127.0.0.1:3000"
 env = "DEV"
 ```
 
+#### แอปหลายหน้าด้วย `leptos_router`
+
+ตัวอย่างในหัวข้อ 89.8 มีแค่หน้าเดียว (`generate_route_list(App)` จึงสร้าง route แค่ตัวเดียวคือ `/`) แอปจริงมักมีหลายหน้าและต้องมี URL แยกกัน (เช่น `/books` แสดงรายการ, `/books/:id` แสดงรายละเอียด) — `leptos_router` (crate แยกที่ผูกกับ Leptos โดยเฉพาะ) จัดการเรื่องนี้ ทดสอบเขียนจริงและ build เป็น WASM รันในเบราว์เซอร์จริง:
+
+```rust
+use leptos::prelude::*;
+use leptos_router::components::*;
+use leptos_router::path;
+use leptos_router::hooks::use_params_map;
+
+#[component]
+fn BookList() -> impl IntoView {
+    view! { <p>"รายการหนังสือทั้งหมด"</p> }
+}
+
+#[component]
+fn BookDetail() -> impl IntoView {
+    // use_params_map() อ่าน dynamic segment จาก URL ปัจจุบัน (":id" ในตัวอย่างนี้)
+    let params = use_params_map();
+    let id = move || params.read().get("id").unwrap_or_default();
+    view! { <p>"หนังสือ id = " {id}</p> }
+}
+
+#[component]
+fn App() -> impl IntoView {
+    view! {
+        // <Router> ครอบทั้งแอปเพื่อเปิดใช้ client-side navigation
+        <Router>
+            <main>
+                // <Routes> นิยาม route ทั้งหมดพร้อม fallback สำหรับ path ที่ไม่ match
+                <Routes fallback=|| "ไม่พบหน้านี้">
+                    <Route path=path!("/books") view=BookList />
+                    <Route path=path!("/books/:id") view=BookDetail />
+                </Routes>
+            </main>
+        </Router>
+    }
+}
+```
+
+`path!("/books/:id")` คือ macro ที่ประกาศ path pattern พร้อม dynamic segment (`:id`) — ตรงกับ concept เดียวกับ path parameter ที่ Part 62-63 สอนไว้สำหรับ Axum (`/books/{id}`) เพียงแต่คนละ syntax เพราะเป็น router คนละตัวที่ทำงานคนละฝั่ง (ฝั่งนี้คือ client-side router ที่ทำงานใน WASM ไม่เกี่ยวกับ Axum router ฝั่ง server เลย — ทั้งสองระบบแค่บังเอิญมีแนวคิด "path parameter" คล้ายกัน) build เป็น WASM จริงแล้วเปิดสอง URL ด้วยเบราว์เซอร์จริง (ผ่าน static server ที่ทำ SPA fallback ให้ ส่ง `index.html` เดียวกันไม่ว่า path ไหน แล้วให้ `leptos_router` เป็นคนตัดสินใจว่าจะ render component ไหนจาก URL ที่เห็นฝั่ง client) ได้ผลลัพธ์จริงตรงตามที่ตั้งใจ:
+
+```
+at /books: รายการหนังสือทั้งหมด
+at /books/42: หนังสือ id = 42
+```
+
+ข้อควรระวังเชิง infrastructure ที่พบระหว่างทดสอบจริง (เจอ error จริงตอนแรก): เว็บเซิร์ฟเวอร์ที่เสิร์ฟไฟล์ static ต้อง **ส่ง `index.html` กลับมาสำหรับทุก path ที่ไม่ตรงกับไฟล์จริง** (เรียกว่า SPA fallback) เพราะ `leptos_router` ใช้ HTML5 History API (`pushState`) ควบคุม URL โดยไม่ reload หน้าจริง — ถ้าผู้ใช้กด refresh หรือพิมพ์ URL `/books/42` ตรง ๆ ใน address bar โดยที่ server ไม่มี SPA fallback server จะตอบ `404 Not Found` เพราะไม่มีไฟล์ชื่อ `books/42` อยู่จริงในระบบไฟล์ (ระหว่างทดสอบเจอ error `net::ERR_CONNECTION_REFUSED`/`404` จริงจนกว่าจะเพิ่ม fallback ให้เว็บเซิร์ฟเวอร์ที่ใช้ทดสอบ) — นี่ไม่ใช่ปัญหาเฉพาะ Leptos แต่เป็นข้อกำหนดของ client-side routing ทุกแบบ (Yew ที่ใช้ `yew-router` ใน Part 88 ก็ต้องการ SPA fallback แบบเดียวกัน) ในโปรเจกต์ SSR (หัวข้อ 89.8) ปัญหานี้หายไปเองเพราะทุก path ที่ `generate_route_list` รู้จักจะมี handler ฝั่ง Axum ตอบให้ตรง ๆ อยู่แล้ว ไม่ต้องพึ่ง fallback แบบ static file server
+
 ### 89.9 Islands Architecture: Partial Hydration (แนวคิดขั้นสูง)
 
 หัวข้อ SSR ในหัวข้อ 89.7-89.8 มีข้อจำกัดหนึ่งที่ต้องพูดตรง ๆ: แม้ SSR จะทำให้ HTML แรกมาเร็ว แต่ **WASM bundle ทั้งก้อนยังต้องถูกส่งไปให้ client เพื่อ hydrate ทั้งหน้า** แม้หน้านั้นจะมีส่วน interactive อยู่นิดเดียว (เช่นปุ่มกดเดียวท่ามกลางเนื้อหา static เป็นพันบรรทัด) นี่คือปัญหาที่ **islands architecture** ถูกออกแบบมาแก้ — แนวคิดคือ: มีแค่ "island" (ส่วนที่ต้อง interactive จริง ๆ) เท่านั้นที่ compile เป็น WASM แล้วส่งไปให้ client ส่วนที่เหลือของหน้ายังคงเป็น static HTML ล้วน ๆ ไม่มี JS/WASM ห่อหุ้มเลย
@@ -1158,7 +1207,7 @@ pub fn BookingIsland(
 
 ข้อจำกัดที่เอกสารเดียวกันระบุไว้ตรง ๆ (ไม่ปิดบัง): `children` ที่ส่งเข้า island จะถูกมองเป็น "opaque" ทั้งหมด (ถูกมัดรวมเป็น element เดียวชื่อ `<leptos-children>` ใน HTML) — คุณ**ไม่สามารถ iterate หรือแสดงแบบมีเงื่อนไข**ด้วย `<Show>`/control flow ปกติกับ children ของ island ได้ ถ้าต้องการซ่อน/แสดงแบบมีเงื่อนไขต้องใช้ CSS (`display: none`) เพราะ children ไม่ได้ถูก serialize เป็นข้อมูลจริง มันถูกส่งไปเป็น HTML ดิบเท่านั้น — ถ้า HTML นั้นไม่ปรากฏใน DOM เลย (ไม่ใช่แค่ซ่อนด้วย CSS) มันจะไม่ถูกส่งไปให้ client เลยด้วยซ้ำ
 
-**บทนี้ให้แค่ความเข้าใจระดับแนวคิดสำหรับ islands** เพราะการตั้งโปรเจกต์ให้ mix `#[component]` (server-only) กับ `#[island]` (client+server) ในโปรเจกต์เดียวต้องพึ่งพา build pipeline ของ `cargo-leptos` แบบเต็มรูปแบบ (feature `islands` ต้องเปิดพร้อมกับ `experimental-islands` ในหลาย config) ซึ่งซับซ้อนกว่าสโคปของบทนี้ที่โฟกัสที่ server function เป็นหลัก — สิ่งที่ควรจำจากหัวข้อนี้คือ **islands คือคำตอบของ Leptos ต่อคำถาม "SSR ทำให้ HTML แรกมาเร็ว แต่จะลด WASM ที่ต้องส่งไปทั้งหน้าได้อย่างไร"** และมันคือทิศทางที่ full-stack framework รุ่นใหม่หลายตัว (ไม่จำกัดแค่ในโลก Rust) กำลังเดินไปทางเดียวกัน
+**บทนี้ให้แค่ความเข้าใจระดับแนวคิดสำหรับ islands** เพราะการตั้งโปรเจกต์ให้ mix `#[component]` (server-only) กับ `#[island]` (client+server) ในโปรเจกต์เดียวต้องพึ่งพา build pipeline ของ `cargo-leptos` แบบเต็มรูปแบบ ซึ่งซับซ้อนกว่าสโคปของบทนี้ที่โฟกัสที่ server function เป็นหลัก — ยืนยันได้ว่านี่เป็น feature จริงที่มีอยู่ใน crate (ไม่ใช่แค่แผนในอนาคต) จาก list feature ที่ `cargo add leptos` แสดงจริงตอนติดตั้งในหัวข้อ 89.2 ซึ่งมีทั้ง `islands` และ `islands-router` อยู่ในนั้นด้วย สิ่งที่ควรจำจากหัวข้อนี้คือ **islands คือคำตอบของ Leptos ต่อคำถาม "SSR ทำให้ HTML แรกมาเร็ว แต่จะลด WASM ที่ต้องส่งไปทั้งหน้าได้อย่างไร"** และมันคือทิศทางที่ full-stack framework รุ่นใหม่หลายตัว (ไม่จำกัดแค่ในโลก Rust) กำลังเดินไปทางเดียวกัน
 
 ### 89.10 Leptos vs Yew: เปรียบเทียบตรงไปตรงมา
 
@@ -1175,6 +1224,8 @@ pub fn BookingIsland(
 | ความเก่า/ความอิ่มตัวของ ecosystem | เก่ากว่า (เริ่มก่อน) — คู่มือ/ตัวอย่าง third-party มากกว่า | ใหม่กว่า — API เปลี่ยนบ่อยกว่า (ตามที่เห็นเรื่อง `create_signal`→`signal()`) เอกสาร third-party น้อยกว่า |
 | Learning curve | ใกล้เคียง React มากกว่า (คนที่มาจาก React เข้าใจเร็ว) | ใกล้เคียง SolidJS มากกว่า — mental model "component รันครั้งเดียว" ต้องปรับตัวถ้าคุ้นเคยกับ React มาก่อน |
 | ความเสี่ยงเรื่อง breaking change | ต่ำกว่า (API เสถียรกว่า) | สูงกว่า (เพิ่งเจอ deprecation ของฟังก์ชันพื้นฐานอย่าง `create_signal` เมื่อไม่นาน) |
+| การจัดการ error ข้าม client-server | ต้องออกแบบเองทั้งหมด (error code ฝั่ง server, parse error ฝั่ง client เอง) | มี `ServerFnError` กลางให้ครอบคลุม failure mode ของ "การเรียกข้าม network" โดยอัตโนมัติ (หัวข้อ 89.6) |
+| การทดสอบ logic ฝั่ง "API" | ต้องทดสอบผ่าน HTTP client จริงเสมอ (endpoint คือของจริงที่แยกจากโค้ด Rust ธรรมดา) | เรียก server function ตรง ๆ ใน `#[tokio::test]` ได้เหมือนฟังก์ชันธรรมดา (หัวข้อ 89.6) เพราะมันเป็น async fn จริง ๆ ตอน compile ด้วย feature `ssr` |
 
 ข้อสรุปที่ให้ได้ ณ จุดนี้ (ยังไม่ใช่ข้อสรุปสุดท้าย เพราะยังไม่ได้เห็น Dioxus): ถ้าโปรเจกต์ของคุณต้องการ **full-stack story ที่แน่นและ SSR/server function เป็นหัวใจของแอป** (เช่นแอปที่ต้อง query ฐานข้อมูลจากหลายหน้าตลอดเวลา และอยากลดงาน "เขียน API แยกจาก UI") Leptos ให้ประโยชน์ที่จับต้องได้จริงตามที่พิสูจน์ในหัวข้อ 89.6-89.8 แต่ต้องแลกกับ mental model ที่ต่างจาก React/Yew มากกว่า และ API ที่ยังเปลี่ยนได้เร็วกว่า ถ้าโปรเจกต์เป็น SPA ล้วน ๆ ที่ไม่ต้องพึ่ง SSR/server function เลย ความต่างระหว่างสองตัวจะแคบลงมาก และ Yew ที่เสถียรกว่าอาจเป็นตัวเลือกที่ปลอดภัยกว่าในเชิงความเสี่ยงระยะยาว — Part 90 จะนำ Dioxus เข้ามาเป็นตัวเลือกที่สาม (framework ที่พยายามผสมข้อดีของทั้งสองแนวทาง พร้อมเรื่อง cross-platform ที่ Yew/Leptos ไม่ได้โฟกัส) ก่อนที่บทเปรียบเทียบสุดท้ายจะสรุปทั้งสามตัวเข้าด้วยกัน
 
@@ -1239,6 +1290,22 @@ spawn_local(async move {
     set_result.set(Some(r)); // ตอนนี้ UI ที่อ่าน result จะอัปเดตจริง
 });
 ```
+
+**5. Cargo.toml ระบุเวอร์ชัน `leptos` และ `leptos_axum`/`leptos_router` ไม่ตรงกัน — compile error ที่อ่านแล้วงงว่าเกิดอะไรขึ้น**
+
+ระบุ `leptos = "0.7"` คู่กับ `leptos_axum = "0.8.10"` ในโปรเจกต์เดียวกัน (เผลอทำตามตัวอย่างเก่าที่ pin เวอร์ชันไว้ไม่ตรงกับที่เขียนในบทนี้) จะได้ compile error ที่ดูไม่เกี่ยวกับ "เวอร์ชันไม่ตรงกัน" เลยในตอนแรก — ทดสอบจริงด้วยการปรับ `Cargo.toml` ให้เวอร์ชันไม่ตรงกันแล้ว `cargo build` ได้ error จริงตามนี้:
+
+```
+error[E0308]: mismatched types
+   --> src/main.rs:128:21
+    |
+128 |         .with_state(leptos_options);
+    |          ---------- ^^^^^^^^^^^^^^ expected `leptos_config::LeptosOptions`, found `LeptosOptions`
+    |
+note: there are multiple different versions of crate `leptos_config` in the dependency graph
+```
+
+สาเหตุคือ `leptos = "0.7"` ดึง `leptos_config` เวอร์ชัน `0.7.8` เข้ามา ในขณะที่ `leptos_axum = "0.8.10"` ต้องการ `leptos_config` เวอร์ชัน `0.8.x` — Cargo ยอมให้ทั้งสองเวอร์ชันอยู่ใน dependency graph เดียวกันได้ (เพราะเป็น crate คนละ semver major) แต่ `LeptosOptions` ของทั้งสองเวอร์ชันเป็น**type คนละตัวกัน**ในมุมมองของ type system แม้จะหน้าตาเหมือนกันทุกอย่างก็ตาม — วิธีแก้คือตรวจสอบให้ `leptos`, `leptos_axum`, `leptos_router`, `leptos_meta` ทุกตัวในโปรเจกต์เดียวกันใช้เวอร์ชัน**สายเดียวกันเสมอ** (เช่นทั้งหมด `"0.8"`) วิธีที่ปลอดภัยที่สุดคือปล่อยให้ `cargo add` เลือกเวอร์ชันล่าสุดให้ทุกตัวพร้อมกันในครั้งเดียว แทนการ pin เวอร์ชันแต่ละตัวด้วยมือแยกกัน
 
 ## แบบฝึกหัด (Exercises)
 

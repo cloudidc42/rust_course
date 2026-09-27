@@ -754,6 +754,18 @@ async fn books_handler(State(pool): State<PgPool>, req: Request<Body>) -> Respon
 }
 ```
 
+สังเกตสองจุดในโค้ดนี้ที่ควรอธิบายเพิ่ม: (1) `books.into_iter().map(|b| view! {...}).collect_view()` —
+`collect_view()` คือเมธอดที่ Leptos เติมให้กับ `Iterator` ใด ๆ ที่ item เป็น `impl IntoView` ผ่าน trait
+extension (คล้ายกับที่ `Iterator::collect()` ปกติต้องมี target type ที่ implement `FromIterator` — Part 26
+สอนไว้แล้วว่า `collect()` ทำงานอย่างไรกับ type ปลายทางต่าง ๆ กัน) `collect_view()` ทำหน้าที่แปลง iterator
+ของ view หลาย ๆ ตัวให้กลายเป็น view เดียวที่ render ต่อกันเป็นลิสต์ — ถ้าไม่มีเมธอดนี้ต้อง handle การรวม
+`Vec<impl IntoView>` เป็น view เดียวเอง (2) `use_context::<Vec<Book>>()` ในการอ่านค่าคืนรูปแบบเดียวกันกับที่
+Part 89 หัวข้อ 89.6 ใช้อ่าน `PgPool` ออกจาก context ของ server function — `provide_context`/`use_context`
+เป็น mechanism กลางของ Leptos ที่ไม่ได้ผูกกับ SSR หรือ server function อย่างใดอย่างหนึ่งเท่านั้น มันคือวิธี
+"ส่งค่าจากที่หนึ่งลงไปให้ลูกหลานในต้นไม้ component อ่านได้ โดยไม่ต้องส่งผ่าน prop ทุกชั้น" (เทียบเคียงได้กับ
+`Context` API ของ React ถ้าคุณคุ้นเคยกับ ecosystem นั้น) ในกรณีนี้ context ถูก provide ที่ระดับ handler
+(นอกต้นไม้ component เลยด้วยซ้ำ) แล้ว component (`BooksShell`) อ่านออกมาใช้ตรง ๆ
+
 รัน server จริง (`cargo run` ธรรมดา ไม่ต้องพึ่ง `cargo-leptos` เลย เพราะ route นี้ไม่มี hydrate/WASM ให้จัดการ)
 แล้ว `curl` ทันที — นี่คือ HTML **ดิบ** ที่ได้จริง ก่อนที่ JavaScript ตัวไหนจะได้รันแม้แต่บรรทัดเดียว (เพราะ
 `curl` ไม่รัน JavaScript เลย):
@@ -1088,6 +1100,14 @@ execute ไฟล์ WASM เหมือนเดิม — **ปุ่มบ�
 ระยะเวลารอ TTI จึงใกล้เคียงกันมาก (แถมยิ่งซับซ้อนกว่าเดิมนิดหน่อยฝั่ง SSR เพราะต้องมีขั้นตอน hydration ที่
 ตรวจสอบ DOM เดิมด้วย ไม่ใช่แค่สร้าง DOM ใหม่แบบ CSR)
 
+ถ้าเคยใช้เครื่องมือวัด performance อย่าง Lighthouse หรือ Chrome DevTools' Performance panel จะคุ้นกับชื่อ
+metric มาตรฐานที่ Google เรียกว่า **Core Web Vitals** — **Largest Contentful Paint (LCP)** คือตัวที่ตรงกับ
+สิ่งที่ SSR ช่วยได้ตรง ๆ (เวลาที่ "ก้อนเนื้อหาที่ใหญ่ที่สุดที่มองเห็นได้" ปรากฏบนหน้าจอ) ส่วน **Total Blocking
+Time (TBT)**/**Interaction to Next Paint (INP)** คือตัวที่สะท้อนปัญหาฝั่ง TTI/hydration cost ที่ SSR ช่วย
+ไม่ได้เลย — เวลาเปิดโปรเจกต์จริงแล้ววัดด้วยเครื่องมือเหล่านี้ ควรอ่านผลแยกสอง metric นี้ให้ชัดเสมอ ไม่ใช่ดูแค่
+ตัวเลขคะแนนรวม (Performance score) ตัวเดียว เพราะคะแนนรวมของ SSR app ที่มี WASM bundle ใหญ่มาก อาจ**ดูดีด้าน
+LCP แต่แย่ด้าน TBT** พร้อมกันได้ในหน้าเดียว — ซึ่งเป็นสัญญาณตรงตามที่บทนี้อธิบายไว้ทุกประการ
+
 สรุปให้แม่นยำที่สุด: **SSR ปรับปรุง "เวลาที่ผู้ใช้เห็นเนื้อหาที่มีความหมาย" (คล้าย First Contentful Paint)
 แต่ไม่ได้ลดเวลาที่ต้องใช้ในการดาวน์โหลด/parse/execute WASM bundle เพื่อให้หน้าโต้ตอบได้ (Time-to-Interactive)
 เลยแม้แต่นิดเดียว** — ทั้งสองอย่างเป็นปัญหาคนละเรื่อง ต้องแก้คนละวิธี (SSR แก้เรื่องแรก, การลดขนาด WASM
@@ -1262,6 +1282,17 @@ route รันอยู่ใน **Axum process เดียวกัน ใช
 จากหัวข้อ 91.5 ก็ได้ เช่น หน้ารายละเอียดหนังสือที่ title/author render แบบ static แต่ availability ห่อด้วย
 `<Suspense>` fetch สดทุกครั้ง)
 
+ต้องซื่อสัตย์ว่าเทคนิคที่ใช้ใน `/about` ("render ครั้งเดียวตอน process start แล้ว cache ไว้ในหน่วยความจำ")
+**ไม่ใช่ SSG แบบเดียวกับที่ `mdBook` ทำ** เป๊ะ ๆ (ที่หัวข้อ 91.1 พูดถึงไปแล้ว) — `mdBook build` render ไฟล์
+`.html` ออกมาเป็น**ไฟล์จริงบนดิสก์** ตอน build time (แยกขั้นตอนจาก process ที่เสิร์ฟ request โดยสิ้นเชิง
+อาจไม่มี process รันอยู่เลยตอนเสิร์ฟจริงถ้าใช้ static host) ในขณะที่เทคนิคของบทนี้ render เก็บไว้เป็น `String`
+**ในหน่วยความจำของ process เดียวกันที่เสิร์ฟ SSR route อื่น ๆ ด้วย** — ถ้า process ตายแล้วเริ่มใหม่ ต้อง
+render ใหม่ทุกครั้ง (ต่างจากไฟล์ `.html` ของ `mdBook` ที่อยู่ถาวรบนดิสก์ไม่ว่า process จะเปิด-ปิดกี่รอบ)
+บทนี้เลือกสาธิตด้วยวิธีนี้เพราะมันแสดงหลักการ "render ครั้งเดียว เสิร์ฟซ้ำ" ได้ชัดโดยไม่ต้องแยกขั้นตอน build
+ออกจาก Axum process เลย — เหมาะกับการเรียนรู้แนวคิด แต่ในระบบ production จริงที่ต้องการ SSG แท้ ๆ (เช่น
+เอกสารที่ deploy บน CDN แยกจาก backend เลย) ควรแยก build step ออกมาต่างหากจริง ๆ ไม่ใช่ฝากไว้ใน `main()`
+ของ server แบบนี้
+
 ข้อควรระวังของแนวทางนี้ในโลกจริง: cache ที่ทำแบบ manual นี้ **ไม่มีวัน invalidate เองอัตโนมัติ** — ถ้าข้อมูล
 ที่ใช้สร้างหน้า "เกี่ยวกับ" เปลี่ยนจริง ๆ (เช่นเปลี่ยนชื่อห้องสมุด) วิธีเดียวที่จะอัปเดตคือ **restart server**
 ระบบ SSG ระดับ production จริง (เช่น Next.js ISR, หรือ build pipeline ที่ trigger rebuild อัตโนมัติเมื่อ
@@ -1383,20 +1414,42 @@ error[E0282]: type annotations needed
 เสมอ หรือใช้ `cargo sqlx prepare` เพื่อสร้าง query cache แบบ offline (ไม่ต้องต่อฐานข้อมูลตอน build ในเครื่อง
 อื่น เช่นตอน build บน CI/CD — Part 96 จะพูดถึงเรื่องนี้อีกครั้งตอนตั้ง Docker build pipeline)
 
+**6. ลืมเรียก `provide_meta_context()` ก่อนใช้ `<Title>`/`<Meta>`**
+
+ตัวอย่างในหัวข้อ 91.4 เรียก `provide_meta_context()` เป็นบรรทัดแรกในทุก component ที่ใช้ `<Title>`/`<Meta>`
+เสมอ — ถ้าลืมเรียกไม่ได้แปลว่า compile ไม่ผ่านหรือ panic ทันที (เพราะ `use_head()` ที่ `<Title>`/`<Meta>`
+เรียกใช้ภายในมี fallback สร้าง `MetaContext` ใหม่ให้เองถ้ายังไม่มี) แต่จะได้ debug warning จริงแบบนี้ (จาก
+ซอร์สโค้ดของ `leptos_meta-0.8.7/src/lib.rs`):
+
+```
+use_head() is being called without a MetaContext being provided. We'll
+automatically create and provide one, but if this is being called in a
+child route it may cause bugs. To be safe, you should provide_meta_context()
+somewhere in the root of the app.
+```
+
+ปัญหาจริงที่ตามมาไม่ใช่ error ทันที แต่คือ **ถ้ามีมากกว่าหนึ่ง component เรียก `use_head()` แบบไม่มี
+`MetaContext` ที่ provide ไว้ร่วมกัน แต่ละ component จะได้ `MetaContext` คนละตัว** — `<Title>` จาก component
+หนึ่งจะไม่เห็น `<Meta>` จากอีก component เลย ทำให้ meta tag บางตัวหายไปจาก `<head>` แบบหาสาเหตุยาก วิธีแก้คือ
+เรียก `provide_meta_context()` ที่ root component ของแอปเพียงครั้งเดียว (ไม่ใช่ในทุก component ลูกที่ใช้
+`<Title>`/`<Meta>`) เพื่อการันตีว่าทุกจุดใน tree ใช้ `MetaContext` ตัวเดียวกัน
+
 ## แบบฝึกหัด (Exercises)
 
 1. **(ง่าย)** เพิ่ม route `/books/:id` ในโปรเจกต์ `books_app` (หัวข้อ 91.4) ที่แสดงรายละเอียดหนังสือเล่มเดียว
    ตาม `id` ที่ส่งมาใน URL พร้อมตั้ง `<Title>`/`<Meta name="description">` ให้เปลี่ยนตามชื่อหนังสือเล่มนั้น
    (เช่น title = "{ชื่อหนังสือ} - ห้องสมุด Rust Course") พิสูจน์ด้วย `curl` ว่าหนังสือคนละเล่มให้ `<title>`
    คนละค่ากันจริง — *Hint*: ใช้ `axum::extract::Path<i64>` ดึง `id` จาก URL แล้ว query แค่แถวเดียวด้วย
-   `WHERE id = $1` ก่อนส่งเข้า `provide_context()` เหมือนหัวข้อ 91.4
+   `WHERE id = $1` ก่อนส่งเข้า `provide_context()` เหมือนหัวข้อ 91.4 ระวังกรณี `id` ที่ไม่มีในฐานข้อมูล —
+   ควรตอบ HTTP 404 กลับไปแทนที่จะ panic ตอน `.fetch_one()` ล้มเหลว
 
 2. **(กลาง)** สร้าง hydration mismatch แบบใหม่ที่ต่างจากหัวข้อ 91.2 โดยตั้งใจให้ฝั่ง client render **list ที่
    มีจำนวน item ต่างจากฝั่ง server** (เช่น server render หนังสือ 4 เล่ม แต่ client คำนวณแค่ 3 เล่มเพราะเงื่อนไข
    `#[cfg]` ที่กรองบางเล่มออก) เปิดด้วย Playwright แล้วดูว่า console.error ที่ได้ต่างจากหัวข้อ 91.2 อย่างไร
    (เป็น "element/text mismatch" แบบเดียวกัน หรือเป็นคนละแบบ) — *Hint*: ความยาวของ list ที่ต่างกันจะทำให้
    cursor เดินไปเจอ node ที่ "ไม่มีอยู่จริง" (เกิน bound ของ children ที่ DOM มี) ลองดูว่า error message พูด
-   ถึง "expected... but found" อะไร
+   ถึง "expected... but found" อะไร และตำแหน่งไฟล์/บรรทัดที่มันรายงานตรงกับตำแหน่งจริงของ `<li>` ที่มีปัญหา
+   หรือไม่ — บันทึกผลที่ได้เทียบกับสมมติฐานของคุณก่อนลงมือทำด้วย
 
 3. **(ยาก)** ทำ streaming SSR ในหัวข้อ 91.5 ให้มี **สอง `<Suspense>` ที่ resolve ไม่พร้อมกัน** (เช่น
    `Resource` แรก sleep 1 วินาที, `Resource` ที่สอง sleep 3 วินาที) แล้ววัดด้วย `curl` (หรือเขียนสคริปต์อ่าน
@@ -1433,6 +1486,15 @@ streaming SSR, SEO meta tags, และรูปแบบ hybrid SSG/SSR — ค
 server function ที่บทนี้ปูพื้นไว้ และ Part 94 จะเติมส่วนที่เหลือให้เป็นระบบสมบูรณ์พร้อม deploy — ซึ่ง Part 96
 (Docker และการ Deploy จริง) จะสอนว่าต้องเอา Axum/Leptos SSR process ที่เราสร้างและทดสอบไว้ตลอดบทนี้ไป
 package และรันบน production อย่างไรให้ปลอดภัยและ scale ได้จริง
+
+ก่อนไปต่อ ควรจำหลักการสามข้อที่บทนี้พิสูจน์ด้วยการรันจริงทั้งหมด ไม่ใช่แค่คำอธิบายเชิงทฤษฎี: (1) hydration
+mismatch ไม่ใช่ "error เสมอ" — บางแบบเงียบสนิท บางแบบ panic ดัง ๆ ขึ้นอยู่กับว่าต่างกันที่ "ชนิดของ node" หรือ
+"identity ของ tag ภายในชนิดเดียวกัน" (2) SSR ปรับปรุงสิ่งที่ผู้ใช้*เห็น*ได้เร็วขึ้น แต่ไม่ได้ทำให้สิ่งที่ผู้ใช้
+*กดได้*เร็วขึ้นเลยแม้แต่นิดเดียว เพราะต้นทุนของ WASM bundle ยังเท่าเดิมไม่ว่าจะ SSR หรือ CSR (3) SSG/SSR/CSR
+เป็นตัวเลือกที่ตัดสินใจได้ **ระดับรายหน้า** ไม่ใช่ระดับทั้งแอป — คำถามที่ควรถามเสมอคือ "ใครจะเห็นหน้านี้ ทำไม
+และเปลี่ยนบ่อยแค่ไหน" ไม่ใช่ "framework นี้ควรใช้ SSR หรือ CSR"
+
+จำสามข้อนี้ไว้ให้แม่น เพราะ Part 92-94 จะอ้างอิงกลับมาที่หลักการเหล่านี้ตลอดทั้งสามบท
 
 ---
 

@@ -929,49 +929,83 @@ JS (ที่แปลงมาจาก `rsx!` เหมือนกับท�
 dx build --platform desktop
 ```
 
-**รายงานผลตรงไปตรงมาจากสภาพแวดล้อมจริงที่ใช้เขียนบทนี้**: container ที่ใช้ตรวจสอบบทนี้เป็น sandbox แบบ
-headless — ตอนเริ่มต้นไม่มี `libwebkit2gtk` ติดตั้งในระบบ ต้องติดตั้งเพิ่มด้วย `apt-get install
-libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev` ก่อน `cargo build`
-(ส่วนของ desktop) จะ link ผ่านได้ — นี่คือหลักฐานที่ยืนยันข้อความข้างบนตรง ๆ ว่า **desktop build ไม่ใช่
-"เขียนโค้ด Rust เพียว ๆ แล้วรันได้ทุกที่" แบบเดียวกับ WASM** มันมี system dependency ระดับ OS ที่ต้อง
-ติดตั้งก่อนจริง ๆ
-
-หลังติดตั้ง dependency ที่จำเป็นแล้ว `dx build --platform desktop` คอมไพล์โค้ดเดียวกันจากหัวข้อ 90.4/90.5
-เป็น native binary (`x86_64-unknown-linux-gnu`) สำเร็จ ได้ไฟล์ executable ในโฟลเดอร์ `dist/` — **นี่คือ
-สิ่งที่ตรวจสอบได้จริงในสภาพแวดล้อมนี้: การคอมไพล์ (compilation) ผ่าน**
-
-แต่ต้องซื่อสัตย์ต่อไปอีกขั้นในส่วนที่สำคัญที่สุด: **การรันแอป desktop จริงต้องเปิดหน้าต่าง native ซึ่งต้อง
-พึ่งพา display server (X11 หรือ Wayland)** — container ที่ใช้เขียนบทนี้เป็น headless container ที่**ไม่มี
-display server ติดตั้งไว้เลย** เมื่อรัน binary ที่ build ได้ตรง ๆ (`./dist/ticket_booking`) โปรแกรมจะพยายาม
-เปิดหน้าต่างผ่าน `tao`/`wry` และล้มเหลวด้วย error ทำนอง:
+**รายงานผลตรงไปตรงมาที่สุดจากสภาพแวดล้อมจริงที่ใช้เขียนบทนี้ — รวมถึงความพยายามที่ไม่สำเร็จด้วย**: สั่ง
+`dx build --platform desktop` กับโค้ด component **ตัวเดียวกัน** จากหัวข้อ 90.5 ทันที (ก่อนติดตั้งอะไรเพิ่ม)
+ได้ผลลัพธ์จริงดังนี้ — คอมไพล์ dependency ไปได้เกือบ 120 crate จาก 502 crate แล้วล้มเหลวตรง crate
+`gdk-sys` (crate ที่ผูก GTK's GDK library เข้ากับ Rust ซึ่ง `wry`/`tao` ต้องใช้บน Linux):
 
 ```
-thread 'main' panicked at 'Failed to create window: OsError(...)':
-  Error: Could not connect to display
+14.10s WARN error: failed to run custom build command for `gdk-sys v0.18.2`
+14.10s WARN --- stderr
+14.10s WARN pkg-config exited with status code 1
+14.10s WARN pkg-config output:
+14.10s WARN   Package gdk-3.0 was not found in the pkg-config search path.
+14.10s WARN   Perhaps you should add the directory containing `gdk-3.0.pc'
+14.10s WARN   to the PKG_CONFIG_PATH environment variable
+14.10s WARN   Package 'gdk-3.0', required by 'virtual:world', not found
+14.10s WARN The system library `gdk-3.0` required by crate `gdk-sys` was not found.
+
+ERROR dx build: cargo build finished with errors for target: ticket_booking [x86_64-unknown-linux-gnu]
 ```
 
-(ข้อความ error ที่แน่นอนต่างกันไปตามเวอร์ชันของ `tao` และว่าใช้ X11 หรือ Wayland backend แต่สาเหตุหลักคือ
-"ไม่มี display server ให้เชื่อมต่อ" เสมอ) ทางเลือกในการรันแอป GUI แบบ headless ที่มีอยู่จริงคือใช้
-**`xvfb`** (X Virtual FrameBuffer — จำลอง X11 display server ไว้ใน memory โดยไม่มีการแสดงผลจริงบนจอ) ซึ่ง
-พบว่ามีการติดตั้งไว้ในสภาพแวดล้อมนี้แล้ว (สำหรับ headless-browser testing) — การรันผ่าน `xvfb-run` ทำให้
-กระบวนการ `tao` เปิดหน้าต่างได้สำเร็จโดยไม่ error แต่ **สิ่งที่ตรวจสอบได้ด้วยวิธีนี้จำกัดอยู่ที่ "process
-เริ่มทำงานได้และไม่ crash" เท่านั้น** — การตรวจสอบว่า webview ข้างในหน้าต่างนั้น render markup ของเราถูกต้อง
-จริง (เหมือนที่พิสูจน์ได้กับ headless Chromium ในหัวข้อ 90.5 ที่อ่าน DOM/text content ได้ตรง ๆ) **ไม่มี
-เครื่องมือที่เทียบเท่ากันสำหรับ native webview ในสภาพแวดล้อมนี้** เพราะ Playwright/headless-Chromium ที่ใช้
-ตรวจสอบเว็บนั้นคุยกับ Chromium ผ่าน DevTools Protocol โดยตรง แต่ `WebKitGTK` ที่ `wry` ฝังไว้ในหน้าต่าง
-desktop ไม่ได้ expose protocol เดียวกันแบบง่าย ๆ ให้เครื่องมือทดสอบภายนอกเชื่อมต่อได้ในสภาพแวดล้อมนี้
+นี่คือการยืนยันข้อความข้างบนตรง ๆ ด้วยหลักฐานจริง: **desktop build ไม่ใช่ "เขียนโค้ด Rust เพียว ๆ แล้วคอมไพล์
+ได้ทุกที่" แบบเดียวกับ WASM** มันต้องมี **native development library ของ GTK/WebKit ติดตั้งในระบบก่อนขั้น
+compile ด้วยซ้ำ** (ไม่ใช่แค่ตอน link หรือตอนรัน) — เหตุผลคือ `gdk-sys`/`gtk-sys`/`webkit2gtk-sys` (ที่ `tao`/
+`wry` พึ่งพา) ใช้ `pkg-config` ค้นหาไฟล์ `.pc` ของ library เหล่านี้ตอน **build script** รันในขั้นตอน
+`cargo build` เพื่อ generate FFI binding ที่ตรงกับเวอร์ชัน library จริงบนเครื่อง — ถ้าไม่มี `.pc` ไฟล์เลย
+build script จะ error ทันที ก่อนจะไปถึงขั้นคอมไพล์โค้ด Rust ของเราเองด้วยซ้ำ
 
-**สรุปตรง ๆ ไม่ปั้นแต่ง**: บทนี้ยืนยันได้จริงว่า **1) โค้ดคอมไพล์เป็น native binary สำหรับ desktop สำเร็จ
-เมื่อมี system dependency ครบ (`libwebkit2gtk`) และ 2) โค้ด component logic เดียวกันกับที่ใช้บนเว็บ
-คอมไพล์ผ่านสำหรับเป้าหมาย desktop โดยไม่ต้องแก้ไขแม้แต่บรรทัดเดียว** แต่ **ไม่สามารถยืนยันด้วยภาพหรือ
-interaction จริงว่าหน้าต่าง desktop ที่ render ออกมาหน้าตาเป็นอย่างไร หรือคลิกปุ่มแล้วอัปเดตถูกต้องหรือไม่**
-เพราะสภาพแวดล้อม sandbox นี้ไม่มี display server จริงและไม่มีเครื่องมือ inspect native webview จากภายนอก
-— นี่ต่างจากหัวข้อ 90.5 ที่พิสูจน์ได้ครบทั้งการ build **และ** การ interact จริงผ่าน headless Chromium
+ขั้นต่อไปคือพยายามติดตั้ง dependency ที่ขาดด้วย `apt-get install libwebkit2gtk-4.1-dev libgtk-3-dev
+libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev` ตามที่เอกสาร
+ทางการของ Tauri/wry แนะนำไว้สำหรับ Linux (Dioxus พึ่งพา `wry` ตัวเดียวกับ Tauri จึงมี system dependency
+รายการเดียวกันเป๊ะ) — **ผลลัพธ์คือ apt ก็ล้มเหลวเช่นกัน** ด้วยเหตุผลเชิงเครือข่ายของ sandbox นี้ที่ต่างจาก
+ปัญหาเรื่อง Dioxus โดยตรง: mirror ของ Ubuntu APT ที่ประกาศไว้ในระบบ (`archive.ubuntu.com`,
+`security.ubuntu.com`) ใช้ URL แบบ `http://` (plain HTTP บน port 80) ซึ่ง network policy ของ sandbox นี้
+ไม่อนุญาตให้ต่อออกไปนอกเครื่องผ่าน HTTP ธรรมดา (อนุญาตแค่ HTTPS ที่ต้องวิ่งผ่าน proxy พิเศษของสภาพแวดล้อม
+เท่านั้น) ทำให้ทุกแพ็กเกจ fetch ไม่ผ่านด้วย error ทำนอง `Connection timed out` ทั้งหมด ลองแก้ไขต่อด้วยการ
+สลับ mirror ในระบบให้เป็น `https://` แทน (ยังคง sandbox เดิม ไม่แก้ไขอะไรในโค้ด/repo ของหลักสูตรนี้) ก็ยัง
+เจอปัญหาอีกชั้น: เครื่องมือตรวจสอบลายเซ็น GPG (`gpgv`) ไม่ได้ติดตั้งไว้ในระบบตั้งแต่ต้น ทำให้ apt ปฏิเสธที่จะ
+เชื่อ repository index แม้จะเชื่อมต่อได้แล้ว และแม้สั่งข้ามการตรวจสอบด้วย `--allow-unauthenticated` ตัว
+`apt-get install` ก็ยังค้าง/ทำงานช้าเกินกว่าจะเสร็จภายในเวลาที่เหมาะสม (เกิน 500 วินาทีโดยไม่จบ)
+
+**สรุปตรง ๆ ไม่ปั้นแต่งและไม่บิดเบือนผลลัพธ์**: ในสภาพแวดล้อม sandbox headless เฉพาะเจาะจงที่ใช้เขียนและ
+ตรวจสอบบทนี้ **เราไม่สามารถ build เป้าหมาย desktop ให้ผ่านขั้น compile ได้เลย** — ไม่ใช่เพราะโค้ด Dioxus/
+Rust ของเราเองมีปัญหา (ตัว `ticket_booking` crate เองยังไม่ถูกคอมไพล์ด้วยซ้ำตอนที่ error เกิดขึ้น เพราะ
+`gdk-sys` เป็น dependency ที่ต้องคอมไพล์ก่อน) แต่เพราะข้อจำกัดเรื่อง**เครือข่ายของ sandbox นี้เอง**ที่ทำให้
+ติดตั้ง system package (`libgtk-3-dev`, `libwebkit2gtk-4.1-dev` และพวก) ไม่ได้ นี่คือขอบเขตการตรวจสอบที่
+ซื่อสัตย์ที่สุดที่ให้ได้ในบทนี้: **ยืนยันได้แค่ว่า dependency graph ของฝั่ง Rust ล้วน ๆ (crate ที่ไม่พึ่ง
+native library) คอมไพล์ผ่านไปได้ปกติ (119 จาก 502 crate ก่อนจะชนกำแพง `gdk-sys`) แต่ไม่สามารถยืนยันได้เลย
+ว่า `dx build --platform desktop` จะสำเร็จหรือแอปจะรันได้จริงในเครื่องที่มี system dependency ครบ** เพราะ
+ไม่มีเครื่องแบบนั้นให้ทดสอบใน sandbox นี้
+
+สิ่งที่ยืนยันได้แน่ ๆ จากซอร์สโค้ด (ไม่ใช่การรันจริง) และเอกสารทางการของทั้ง Dioxus และ Tauri/wry คือ: **ถ้า
+ระบบมี `libwebkit2gtk-4.1-dev`/`libgtk-3-dev` ครบ การคอมไพล์ควรผ่านได้ตามปกติ** (เพราะไม่มีสิ่งใดในโค้ด
+`gdk-sys`/`wry`/`tao` ที่บอกว่าจะ error ด้วยเหตุผลอื่น) และแม้คอมไพล์ผ่านแล้ว **การรันแอปจริงก็ยังต้องมี
+display server (X11 หรือ Wayland) เชื่อมต่ออยู่เสมอ** เพราะ `tao` ต้องเปิดหน้าต่าง native จริง — ถ้าไม่มี
+display server จะได้ error ทำนอง `Could not connect to display` หรือ panic คล้ายกันตอนพยายามสร้างหน้าต่าง
+ทางเลือกในการจำลอง display server แบบ headless ที่มีอยู่จริงคือ **`xvfb-run`** (X Virtual FrameBuffer ซึ่ง
+มีติดตั้งอยู่ในสภาพแวดล้อมนี้แล้วสำหรับ headless-browser testing) แต่ต่อให้หน้าต่างเปิดได้ผ่าน `xvfb-run`
+สิ่งที่ตรวจสอบได้ก็จำกัดอยู่ที่ "process เริ่มทำงานได้และไม่ crash" เท่านั้น เพราะ Playwright/headless-
+Chromium ที่ใช้ตรวจสอบเว็บได้ในหัวข้อ 90.5 คุยกับ Chromium ผ่าน DevTools Protocol โดยตรง แต่ไม่มีเครื่องมือ
+เทียบเท่ากันสำหรับ native webview (`WebKitGTK`) ในสภาพแวดล้อมนี้ — **แต่ประเด็นนี้เป็นเรื่องรอง** เพราะในบท
+นี้ยังไปไม่ถึงจุดที่มีหน้าต่างให้ทดสอบด้วยซ้ำ
+
+บทเรียนที่สำคัญที่สุดจากความล้มเหลวนี้ (ที่มีค่าไม่น้อยกว่าความสำเร็จ) คือ: **การ "verify" อะไรสักอย่างใน
+สภาพแวดล้อมจำลอง/sandbox ไม่ได้แปลว่าจะทำได้เสมอ** แม้ตัวเฟรมเวิร์กเองจะออกแบบมาให้ทำงานได้ดีบนเครื่องจริง
+ทั่วไปก็ตาม — sandbox ที่ตัดการเข้าถึงเครือข่ายบางส่วนออกไป (เพื่อความปลอดภัย) ก็ตัดความสามารถในการติดตั้ง
+system dependency ไปด้วย ซึ่งเป็นข้อจำกัดที่ไม่เกี่ยวกับคุณภาพของโค้ดหรือของ Dioxus เองเลย — นี่คือเหตุผลที่
+บทนี้เลือกรายงานผลตรง ๆ ตามที่เกิดขึ้นจริง แทนที่จะสมมติว่า "น่าจะสำเร็จ" แล้วเขียนบรรยายภาพหน้าต่างที่ไม่ได้
+เห็นด้วยตาตัวเอง
 
 ### 90.7 พิสูจน์การแชร์โค้ดข้ามแพลตฟอร์มแบบ side-by-side
 
 ทีนี้มาดูให้ชัดเจนที่สุดว่า "โค้ดที่แชร์กันได้จริง" กับ "โค้ดที่ต้องต่างกัน" ระหว่างเป้าหมายเว็บและ desktop
-คืออะไรบ้าง โดยเทียบทั้งสองไฟล์เต็ม ๆ
+คืออะไรบ้าง โดยเทียบทั้งสองไฟล์เต็ม ๆ — **ข้อจำกัดที่ต้องระบุไว้ตรง ๆ ก่อนเข้าหัวข้อนี้**: จากหัวข้อ 90.6
+เราไม่สามารถ build เป้าหมาย desktop ให้ผ่านขั้น compile ได้จริงใน sandbox นี้ (เพราะติดตั้ง
+`libgtk-3-dev`/`libwebkit2gtk-4.1-dev` ไม่ได้) สิ่งที่หัวข้อนี้พิสูจน์ได้จึงเป็น**การแชร์กันได้ในระดับ source
+code และการออกแบบ Cargo feature** (ซึ่งตรวจสอบได้จากการอ่านโค้ดและ `Cargo.toml` ตรง ๆ โดยไม่ต้องรอผล
+compile) ไม่ใช่การพิสูจน์ว่า `cargo build --features desktop` ผ่านจริงในเครื่องนี้ — ถ้าต้องการพิสูจน์ขั้น
+compile ให้ครบ ต้องทำบนเครื่อง (หรือ CI) ที่ติดตั้ง system dependency ของ `wry`/`tao` ได้ครบตามหัวข้อ 90.6
 
 **ไฟล์ `src/main.rs` — เหมือนกัน 100% ทั้งสองเป้าหมาย** (คือไฟล์เดียวกับหัวข้อ 90.4 ทุกตัวอักษร ไม่มีการแก้
 เลยแม้แต่บรรทัดเดียว):

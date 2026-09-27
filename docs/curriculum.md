@@ -145,10 +145,10 @@
 | 103 | Game Development ด้วย Bevy Engine เบื้องต้น | ✅ |
 | 104 | Blockchain และ Smart Contracts ด้วย Rust | ✅ |
 | 105 | Contributing to Open Source Rust Projects | ✅ |
-| 106 | Rust Design Patterns สำหรับ Enterprise Applications | ⏳ |
-| 107 | Capstone: Building a Production-Grade CLI Tool | ⏳ |
-| 108 | Capstone: Building a Production-Grade Web Service | ⏳ |
-| 109 | Code Review, Refactoring และ Clean Code ใน Rust | ⏳ |
+| 106 | Rust Design Patterns สำหรับ Enterprise Applications | ✅ |
+| 107 | Capstone: Building a Production-Grade CLI Tool | ✅ |
+| 108 | Capstone: Building a Production-Grade Web Service | ✅ |
+| 109 | Code Review, Refactoring และ Clean Code ใน Rust | ✅ |
 | 110 | เตรียมตัวสัมภาษณ์งาน Rust Developer และแนวทางอาชีพ | ✅ |
 
 ---

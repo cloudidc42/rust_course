@@ -883,6 +883,20 @@ error message จริงอยู่ในหัวข้อ "กับดั�
 `mpsc::Receiver` ตัวเดียวใน Part 38 ที่ข้อความถูก "กิน" ไปเมื่อมีใครอ่านสำเร็จแล้ว — mental model ของ
 `Message` ใกล้เคียงกับ broadcast channel มากกว่า mpsc ตัวเดียว)
 
+#### ข้อความไม่คงอยู่ตลอดไป: double-buffering และเมื่อไหร่ที่ข้อความจะถูกล้าง
+
+รายละเอียดที่ควรรู้อีกจุดคือ: message ที่ไม่มีใครอ่านจะ **ไม่คงอยู่ตลอดไป** — เราตรวจสอบ source code ของ
+`bevy_ecs` พบว่า `Messages<T>` ภายในใช้กลยุทธ์ **double buffering** (มี comment ในซอร์สโค้ดยืนยันตรง ๆ ว่า
+"Messages are stored in a double buffered queue that switches each frame") หมายความว่าข้อความที่เขียนเข้าไป
+ในเฟรมหนึ่ง จะยังอ่านได้ในเฟรมถัดไปด้วย แต่ถ้าไม่มี system ไหนอ่านมันภายใน **2 เฟรม** ข้อความนั้นจะถูกล้างออก
+จากคิวไปเลย (ไม่ค้างอยู่ในหน่วยความจำตลอดไปแบบไม่มีที่สิ้นสุด ซึ่งจะเป็นปัญหา memory leak ถ้า Bevy ไม่จัดการ
+เรื่องนี้ให้)
+
+ผลเชิงปฏิบัติของเรื่องนี้คือ: **ถ้า system ที่ควรอ่าน message ไม่ได้ถูกเรียกทุกเฟรม** (เช่น system นั้นถูกใส่ไว้
+ใน schedule ที่มีเงื่อนไข run condition บางอย่างที่บางเฟรมจะ skip ไป) มีความเป็นไปได้ที่ message จะถูกล้างไป
+ก่อนที่ระบบนั้นจะได้อ่านมันเลย นี่ไม่ใช่ปัญหาสำหรับ pattern ปกติที่ system อ่าน message ทุกเฟรมอยู่แล้ว
+(แบบตัวอย่างทั้งหมดในบทนี้) แต่เป็นเรื่องที่ควรรู้ไว้ถ้าจะออกแบบระบบที่ซับซ้อนขึ้นในอนาคต
+
 ### 103.7 Rendering เบื้องต้น: Camera และ Sprite
 
 #### สปอนเสาร์ Camera2d และ Sprite
@@ -1522,6 +1536,15 @@ serialization, networking multiplayer, และการ optimize สำหร�
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 
+กับดักทั้ง 7 ข้อด้านล่างนี้ทุกข้อผ่านการทดสอบจริงระหว่างตรวจสอบเนื้อหาบทนี้ — เราตั้งใจเขียนโค้ดที่ผิดแต่ละแบบ
+ขึ้นมาจริง แล้ว compile/run เพื่อ capture ข้อความ error ตัวจริงจาก compiler หรือ runtime panic ของ Bevy 0.19.1
+มาแสดงให้เห็น (ไม่ใช่ error message ที่เดาหรือจำจากความรู้ทั่วไป) สังเกตว่ากับดักครึ่งแรก (ข้อ 1, 4, 5, 7) เป็น
+เรื่อง type system ที่ compiler จับได้ตั้งแต่ก่อนรันโปรแกรม ส่วนครึ่งหลัง (ข้อ 2, 3) เป็นเรื่องที่ compiler จับ
+ไม่ได้ (เพราะ Bevy ตรวจสอบความถูกต้องบางอย่าง เช่นการลงทะเบียน message type หรือความขัดแย้งของ query เอาไว้ที่
+runtime/schedule-build-time แทน ไม่ใช่ compile time เต็มรูปแบบ) — เป็นตัวอย่างที่ดีว่าถึงแม้ Rust's type system
+จะช่วยจับ bug ได้มากแค่ไหน ก็ยังมีบางเรื่องที่ ECS framework ต้องตรวจสอบเองตอน runtime อยู่ดี เพราะข้อมูลบางอย่าง
+(เช่น "message type นี้ถูกลงทะเบียนไว้หรือยัง") ไม่ได้อยู่ใน type system ของ Rust โดยตรง
+
 **1. ลืม `#[derive(Component)]` แล้ว spawn struct นั้นตรง ๆ**
 
 ```rust,ignore
@@ -1608,8 +1631,35 @@ conflicting Queries into a `ParamSet`. See: https://bevy.org/learn/errors/b0001
 
 วิธีแก้ตามที่ error message บอกไว้ตรง ๆ: ใช้ `Without<T>` ทำให้สอง query แยกกันเด็ดขาดในระดับ type (เช่น
 เปลี่ยน query ที่สองเป็น `Query<&mut Position, Without<Player>>`) หรือถ้าจำเป็นต้องเข้าถึง component ชุด
-เดียวกันแบบซ้อนทับจริง ๆ ให้รวมเป็น `ParamSet` ซึ่งบอก Bevy อย่างชัดเจนว่า "สอง query นี้จะไม่ถูกใช้พร้อมกัน
-ในช่วงเวลาเดียวกันแน่นอน" (Bevy บทนี้ไม่ได้ลงรายละเอียด `ParamSet` เต็มรูปแบบ — ดูเพิ่มใน official docs)
+เดียวกันแบบซ้อนทับจริง ๆ (เช่นตั้งใจให้ query แรกแก้ไข "เฉพาะผู้เล่น" และ query ที่สองแก้ไข "ทุกคนรวมผู้เล่น
+ด้วย" ซึ่งไม่มีทางใช้ `Without` แยกได้เพราะมันตั้งใจให้ทับกันจริง ๆ) ให้ใช้ `ParamSet` ซึ่งบอก Bevy อย่างชัดเจน
+ว่า "ฉันรับรองว่าจะไม่เข้าถึงสอง query นี้พร้อมกันในโค้ดของฉันเอง ให้ฉันสลับใช้ทีละตัวได้":
+
+```rust
+use bevy::prelude::*;
+
+# #[derive(Component)]
+# struct Position { x: f32 }
+# #[derive(Component)]
+# struct Player;
+#
+fn param_set_system(
+    mut set: ParamSet<(Query<&mut Position, With<Player>>, Query<&mut Position>)>,
+) {
+    for mut p in set.p0().iter_mut() {
+        p.x += 1.0; // เข้าถึงผ่าน .p0() ก่อน
+    }
+    for mut p in set.p1().iter_mut() {
+        p.x += 100.0; // แล้วเข้าถึงผ่าน .p1() ทีหลัง คนละช่วงเวลากัน ไม่ทับกันจริง
+    }
+}
+```
+
+เราคอมไพล์และรันโค้ดนี้จริง — ไม่มี panic B0001 เหมือนก่อนหน้า เพราะ `ParamSet` บอก Bevy ว่า "สอง query นี้จะไม่
+ถูกยืมออกมาพร้อมกัน" ทำให้ Bevy ยอมให้ query ที่ทับกันในระดับ component อยู่ในระบบเดียวกันได้ โดยแลกกับการที่
+เราต้องเรียก `.p0()`/`.p1()` แทนการใช้ตัวแปรตรง ๆ (ข้อแลกเปลี่ยน: `ParamSet` ทำให้ compiler ช่วยตรวจสอบความ
+ปลอดภัยของการยืมได้น้อยลงกว่าการแยก query ด้วย `Without` ตั้งแต่แรก — ควรใช้ `Without` เป็นตัวเลือกแรกเสมอถ้า
+ทำได้ และใช้ `ParamSet` เฉพาะกรณีที่ตั้งใจให้ query ทับกันจริง ๆ เท่านั้น)
 
 **4. ใช้ `Res<T>` แล้วพยายามแก้ไขค่าข้างในตรง ๆ (ต้องใช้ `ResMut<T>`)**
 
@@ -1672,36 +1722,83 @@ libbevy_dylib....so: cannot open shared object file: No such file or directory`)
 (`cargo run --features bevy/dynamic_linking`) เฉพาะตอน dev เท่านั้น แล้วตรวจสอบก่อน release เสมอว่า
 `cargo build --release` ไม่มี feature นี้ติดไปด้วย
 
+**7. ปิด `default-features` ของ `bevy` เพื่อลด compile time (ตามหัวข้อ 103.7) แล้วลืมว่า type ที่ต้องใช้หายไป
+ด้วย**
+
+```rust,ignore
+// Cargo.toml: bevy = { version = "0.19.1", default-features = false,
+//                       features = ["default_app", "multi_threaded"] }
+// (ไม่มี feature "2d"/"2d_api" ที่ให้ type Camera2d)
+use bevy::prelude::*;
+
+fn setup(mut commands: Commands) {
+    commands.spawn(Camera2d);
+}
+```
+
+Error จริงจาก compiler:
+
+```
+error[E0425]: cannot find value `Camera2d` in this scope
+ --> src/main.rs:4:20
+  |
+4 |     commands.spawn(Camera2d);
+  |                    ^^^^^^^^ not found in this scope
+```
+
+ข้อความ error แบบนี้ (`cannot find value/type ... in this scope`) มักทำให้เข้าใจผิดว่าลืม `use` หรือพิมพ์ชื่อ
+ผิด แต่ถ้าคุณแน่ใจว่าเขียนชื่อถูกและ `use bevy::prelude::*;` ไว้แล้ว สาเหตุที่พบบ่อยที่สุดคือ **feature ของ
+crate `bevy` ที่เปิดไว้ใน `Cargo.toml` ไม่ครอบคลุม type นั้น** (เพราะปิด `default-features` ไว้เพื่อลดเวลา
+compile ตามที่หัวข้อ 103.7 สอน) วิธีแก้: เพิ่ม feature ที่มี type นั้นกลับเข้าไป (สำหรับ `Camera2d`/`Sprite`
+คือ feature `2d` เต็มรูปแบบถ้าต้องการ render จริง หรือ `2d_api` ถ้าต้องการแค่ชนิดข้อมูลแบบในหัวข้อ 103.7) หรือ
+ถ้าไม่ได้ตั้งใจปิด default features เพื่อ optimize อะไรเป็นพิเศษ ทางที่ปลอดภัยที่สุดคือใช้
+`bevy = "0.19.1"` เฉย ๆ (เปิด default features ตามปกติ) แล้วค่อยมาปิดทีละส่วนตอนที่เข้าใจ feature graph ของ
+Bevy ดีขึ้นแล้ว
+
 ## แบบฝึกหัด (Exercises)
 
 1. **(ง่าย)** เขียน component `Health { current: i32, max: i32 }` และ system `regen_system` ที่เพิ่ม
    `current` ขึ้น 1 หน่วยทุกเฟรม แต่ไม่ให้เกิน `max` (ใช้ `Query<&mut Health>`) ทดสอบด้วยการ spawn entity
    ที่มี `Health { current: 50, max: 100 }` แล้วรัน `app.update()` แบบ headless (ใช้ `MinimalPlugins`
-   เหมือนตัวอย่างในบท) 60 ครั้ง แล้ว assert ว่า `current == 100` (ไม่ใช่ 110)
-   *Hint*: ใช้ `.min(max)` หรือ `if` เช็คก่อนบวก
+   เหมือนตัวอย่างในบท) 60 ครั้ง แล้ว assert ว่า `current == 100` (ไม่ใช่ 110) โจทย์นี้ฝึกพื้นฐานที่สุดของบท:
+   เขียน component เอง, เขียน system ที่ query แบบ mutable, และตรวจสอบผลลัพธ์แบบ headless ด้วย
+   `app.world_mut().query::<&Health>()` ตามที่หัวข้อ 103.12 สอนไว้
+   *Hint*: ใช้ `.min(max)` หรือ `if` เช็คก่อนบวก — ระวังโจทย์แบบนี้เป็นกับดักคลาสสิกที่มักลืมเช็คเพดานแล้วปล่อยให้
+   ค่าทะลุ `max` ไปเรื่อย ๆ
 
 2. **(กลาง)** ขยายมินิเกมจากหัวข้อ 103.11 ให้มีสิ่งกีดขวางได้ **หลายตัวพร้อมกัน** (spawn 3 obstacle ที่ตำแหน่ง
    x ต่างกันใน `setup`) และเพิ่ม system ใหม่ที่ despawn (ลบ) obstacle ที่ตกต่ำกว่า `y = -10` ไปแล้ว (ใช้
-   `commands.entity(entity).despawn()` — ต้อง query แบบที่ได้ `Entity` ID มาด้วย ไม่ใช่แค่ component)
-   *Hint*: `Query<(Entity, &Position), With<Obstacle>>` จะให้ทั้ง `Entity` ID และ component ในลูปเดียวกัน
+   `commands.entity(entity).despawn()` — ต้อง query แบบที่ได้ `Entity` ID มาด้วย ไม่ใช่แค่ component) โจทย์นี้
+   ฝึกการจัดการ entity หลายตัวที่มีชนิดเดียวกันพร้อมกัน (ต่างจากตัวอย่างในบทที่มี obstacle แค่ตัวเดียวเพื่อความ
+   ง่าย) และฝึกการลบ entity ผ่าน `Commands` ซึ่งบทนี้ยังไม่ได้สอนตรง ๆ มาก่อน
+   *Hint*: `Query<(Entity, &Position), With<Obstacle>>` จะให้ทั้ง `Entity` ID และ component ในลูปเดียวกัน —
+   ระวังอย่าเรียก `despawn()` ขณะกำลังวน loop บน `Query` ตัวเดียวกันตรง ๆ (เพราะ `Commands` defer การเปลี่ยน
+   โครงสร้างไว้ก่อนตามที่หัวข้อ 103.2 อธิบาย จึงปลอดภัยที่จะเรียกกลางลูปได้โดยไม่ error แต่การเปลี่ยนแปลงจะ
+   เกิดขึ้นจริงตอนจบเฟรมเท่านั้น ไม่ใช่ทันที)
 
 3. **(ยาก)** เพิ่มระบบ "ด่าน" ให้มินิเกม: ใช้ `Resource` ใหม่ชื่อ `Wave(u32)` เก็บว่าอยู่ด่านที่เท่าไหร่ เมื่อ
    `Score` ถึงเกณฑ์ที่กำหนด (เช่นทุก ๆ 50 แต้ม) ให้เพิ่ม `Wave` ขึ้น 1 และ spawn obstacle ใหม่เพิ่มเข้ามาอีก 1
    ตัวที่ตำแหน่งสุ่ม (ใช้ message ชนิดใหม่ `WaveUpEvent` ส่งสัญญาณระหว่าง `scoring_system` กับ system ที่
    spawn obstacle ใหม่ เพื่อรักษาการ decouple ตามหัวข้อ 103.6) ทดสอบแบบ headless ว่าหลังจากคะแนนถึง 50 แล้ว
-   จำนวน entity ที่มี `Obstacle` component เพิ่มขึ้นจริง
+   จำนวน entity ที่มี `Obstacle` component เพิ่มขึ้นจริง โจทย์นี้ฝึกการออกแบบ message ของตัวเองตั้งแต่ต้น
+   (ไม่ใช่แค่ใช้ตามตัวอย่างในบท) และฝึกผสาน resource ใหม่ (`Wave`) เข้ากับ resource เดิม (`Score`) โดยไม่ทำให้
+   ระบบเดิมพัง
    *Hint*: การสุ่มตำแหน่งต้องใช้ crate `rand` (จาก **Part 13/54** ที่เคยใช้) ไม่ใช่ของ Bevy เอง — Bevy ไม่มี
-   random number generator ของตัวเองแบบ built-in ใน core ECS
+   random number generator ของตัวเองแบบ built-in ใน core ECS (มี crate เสริมชื่อ `bevy_rand` จากชุมชนถ้าอยาก
+   ได้ random ที่ integrate กับ ECS โดยตรง แต่โจทย์นี้ใช้ `rand` ธรรมดาก็เพียงพอ)
 
 4. **(ประยุกต์ใช้งานจริง)** สร้างระบบ "high score" ที่ใช้ `Resource` เก็บคะแนนสูงสุดที่เคยทำได้ (คงอยู่แม้เกม
    จบแล้วเริ่มใหม่ — ต้องแยก `Resource` ตัวนี้ออกจาก `Score` ที่ reset ทุกครั้งเริ่มเกมใหม่) และเขียน
    `MessageReader`/`MessageWriter` คู่ใหม่ชื่อ `GameRestartEvent` ที่เมื่อได้รับ (จำลองด้วยการกด `KeyCode::KeyR`
    ตอน `GameState::GameOver`) จะ reset `Score` และ entity ทั้งหมดกลับไปที่ตำแหน่งเริ่มต้น แต่ **ไม่แก้ไข**
    high score resource เลย เขียน headless test จำลองว่าเล่นจบเกมสองรอบ (คะแนนรอบแรกน้อยกว่ารอบสอง) แล้ว
-   assert ว่า high score หลังจบรอบสองตรงกับคะแนนรอบสองพอดี (ไม่ใช่รอบแรก)
+   assert ว่า high score หลังจบรอบสองตรงกับคะแนนรอบสองพอดี (ไม่ใช่รอบแรก) โจทย์นี้รวมทุกอย่างที่บทนี้สอนเข้า
+   ด้วยกัน (component, resource หลายตัวที่มี lifetime ต่างกัน, message, state transition) และใกล้เคียงกับ
+   ฟีเจอร์ที่เกมจริงส่วนใหญ่ต้องมี
    *Hint*: logic การเปรียบเทียบ "ถ้าคะแนนใหม่มากกว่า high score เดิม ให้อัปเดต" ควรอยู่ใน system ที่ทำงานตอน
    `game_over_system` เปลี่ยน state เป็น `GameOver` (เชื่อมกับ message เดิมที่มีอยู่แล้วได้ ไม่ต้องสร้าง
-   message ใหม่สำหรับส่วนนี้)
+   message ใหม่สำหรับส่วนนี้) — ลองพิจารณาด้วยว่าถ้าใช้ `States`/`OnEnter` เต็มรูปแบบตามหัวข้อ 103.10 แทน
+   `enum` ที่เก็บใน `Resource` ธรรมดา โค้ดจะดูสะอาดขึ้นหรือไม่อย่างไร
 
 ## สรุป
 

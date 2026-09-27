@@ -20,6 +20,9 @@
 - ตั้งค่า config/secret ของแอปที่ deploy อยู่บนคลาวด์ตามหลัก environment-variable-based config (ต่อยอดจาก
   Part 96 หัวข้อ 96.8) และรู้ syntax ของคำสั่ง CLI ของแต่ละแพลตฟอร์มที่ใช้ตั้งค่าเหล่านี้ (`fly secrets set`,
   AWS Systems Manager Parameter Store, Cloud Run `--set-env-vars`) เป็นข้อมูลอ้างอิง
+- เปรียบเทียบตัวเลือก managed database hosting (RDS, Cloud SQL, Fly Postgres, Neon, Supabase) และรู้ว่าเมื่อ
+  ไรควรใช้ connection pooler ชั้นเพิ่มเติม (RDS Proxy, Cloud SQL Auth Proxy, PgBouncer) ระหว่างแอปกับ database
+  จริง
 - อธิบายกลไก zero-downtime deployment (rolling deployment, health-check-gated cutover) และการตั้งค่า
   DNS/TLS ผ่านแพลตฟอร์ม managed ได้ พร้อมประกอบ `fly.toml` + `Dockerfile` ฉบับสมบูรณ์สำหรับ deploy แอป
   capstone จาก Part 92-96 จริง โดยรู้ชัดเจนว่าส่วนไหนตรวจสอบจริงในเครื่อง ส่วนไหนอ้างอิงจากเอกสารทางการ
@@ -73,6 +76,7 @@ account จริง (`cargo lambda deploy`, `fly deploy`, `aws ecs create-servi
 | `cargo-lambda` ติดตั้งจริง, `cargo lambda build`/`watch`/`invoke` | ✅ รันจริง มี output จริงทั้งหมด |
 | `fly.toml` schema/field ต่าง ๆ | 📖 อ้างอิงจากเอกสาร Fly.io — TOML syntax ตรวจสอบผ่าน parser จริง (Python `tomllib`) |
 | `flyctl` command syntax (`fly launch`, `fly deploy`, `fly secrets set` ฯลฯ) | 📖 อ้างอิงจากเอกสาร Fly.io เท่านั้น (ติดตั้ง binary จริงไม่ได้ในสภาพแวดล้อมนี้) |
+| GitHub Actions workflow YAML / Kubernetes manifest YAML (ตัวอย่างในหัวข้อ 101.4/101.10) | ✅ syntax ตรวจสอบจริงด้วย `PyYAML` — พฤติกรรมจริงบน GitHub Actions/Kubernetes cluster เป็นเอกสารอ้างอิง |
 | ตาราง AWS/GCP/managed database comparison | 📖 ข้อมูลเชิงแนวคิด ไม่ต้อง login |
 | ราคา/cost order-of-magnitude | 📖 ประมาณการจาก public pricing page ณ ช่วงที่เขียนบทนี้ อาจเปลี่ยนแปลงได้ |
 
@@ -209,6 +213,15 @@ container image มาตรฐาน, health check, environment variable config
 Kubernetes ได้ตรง ๆ** ถ้าผู้เรียนต้องเรียน Kubernetes ต่อในอนาคต แค่ต้องเรียนรู้ syntax/object ใหม่ ไม่ต้อง
 เรียน concept ใหม่ทั้งหมด
 
+**ระบบจริงส่วนใหญ่ผสมหลายระดับเข้าด้วยกัน ไม่ได้เลือกแค่ระดับเดียว**: ควรรู้ไว้ว่าตารางตัดสินใจข้างบนเป็น
+กรอบคิดสำหรับ "งานหนึ่งชิ้น" ไม่ใช่ "องค์กรทั้งองค์กรต้องเลือกทางเดียว" — บริษัทจำนวนมากในโลกจริงใช้**หลาย
+ระดับผสมกัน**ตามความเหมาะสมของแต่ละงาน: web service หลักอาจอยู่บน Kubernetes (เพราะทีม Platform Engineering
+ดูแลอยู่แล้ว), งาน batch/image-processing ที่เกิดไม่สม่ำเสมออาจอยู่บน Lambda (ประหยัดกว่ามากสำหรับ pattern
+แบบนั้นตามหัวข้อ 101.12), ส่วน internal tool/dashboard ที่ทีมเล็กดูแลเองอาจอยู่บน Fly.io/Railway (ไม่อยากให้
+ทีมเล็กต้องเรียนรู้ Kubernetes manifest ของทีมกลาง) — **ไม่มีกฎว่าต้องเลือกแพลตฟอร์มเดียวสำหรับทุกอย่างในองค์กร
+เดียวกัน** ตราบใดที่แต่ละ service ยังคง deploy ผ่าน container image มาตรฐาน (ตามที่ Part 96 สอน) การสลับ/ผสม
+ระดับ deployment ในอนาคตยังทำได้เสมอโดยไม่ต้องเขียนแอปใหม่
+
 ### 101.2 Fly.io และ `flyctl`: แนวคิดของ Fly.io ในฐานะ PaaS ที่ใช้ Container Image มาตรฐาน
 
 **Fly.io ทำงานต่างจาก Heroku แบบเดิมอย่างไร**: Heroku (PaaS รุ่นบุกเบิก) ใช้ "buildpack" ที่ตรวจจับภาษา
@@ -227,6 +240,14 @@ environment-variable config) **ใช้ได้ตรงกับ Fly.io โ�
 กับ VM) หนึ่ง App สามารถมีหลาย Machine กระจายอยู่คนละ **Region** (ศูนย์ข้อมูลทั่วโลก เช่น `sin` = สิงคโปร์,
 `nrt` = โตเกียว, `iad` = Virginia สหรัฐฯ) เพื่อให้ traffic จากผู้ใช้ในภูมิภาคต่าง ๆ ได้ latency ต่ำ — Fly.io
 มี load balancer ระดับ network (Anycast) ที่ route request ไปยัง Machine ที่ใกล้ที่สุดโดยอัตโนมัติ
+
+**Organization และ App — ลำดับชั้นก่อนถึงระดับ Machine**: ก่อนมี App ต้องมี **Organization** ก่อนเสมอ (Fly.io
+สร้าง "personal" organization ให้อัตโนมัติตอนสมัคร account ใหม่ — ใช้ personal organization นี้ได้เลยสำหรับ
+โปรเจกต์เดี่ยว ไม่ต้องสร้าง organization แยกจนกว่าจะทำงานเป็นทีมที่ต้องแบ่งสิทธิ์เข้าถึงกันหลายคน) — App ทุก
+App ต้องอยู่ใต้ organization ใดองค์กรหนึ่งเสมอ (กำหนดตอน `fly launch`/`fly apps create` ผ่าน flag `--org`)
+และชื่อ App ต้อง unique **ทั่วทั้งระบบ Fly.io ไม่ใช่แค่ในองค์กรของตัวเอง** (เพราะชื่อ App กลายเป็นส่วนหนึ่งของ
+hostname สาธารณะ `<app-name>.fly.dev` ตามที่อธิบายไว้แล้ว — สองคนที่ต่างองค์กรกันแย่งชื่อ `library-api-mini`
+กันไม่ได้ทั้งคู่)
 
 **`flyctl` คือ CLI หลักในการควบคุมทุกอย่าง**: คำสั่งทุกตัวที่จะเห็นในหัวข้อถัดไป (`fly launch`, `fly deploy`,
 `fly secrets set` ฯลฯ) มาจาก binary ชื่อ `flyctl` (บางที่เรียกสั้น ๆ ว่า `fly`) — ตามที่อธิบายไว้ใน "หมายเหตุ
@@ -593,6 +614,18 @@ workload ที่คงที่มากจนการใช้ Reserved Inst
 เสมอไป** — AWS/GCP ก็มีชั้น PaaS ของตัวเองที่ใช้ container image เดียวกับที่ deploy บน Fly.io/ECS/Kubernetes
 ได้ ต่างกันแค่ว่าอยู่ใน ecosystem ไหนและควบคุมรายละเอียดได้มาก-น้อยแค่ไหน
 
+**ข้อจำกัดสำคัญที่ทำให้ Lambda ไม่เหมาะกับทุก workload — execution timeout 15 นาที**: ตารางเปรียบเทียบด้าน
+บนพูดถึง "cold start" เป็นความต่างหลัก แต่มีข้อจำกัดอีกข้อที่สำคัญไม่แพ้กันและมักถูกมองข้าม: **AWS Lambda
+จำกัดเวลาทำงานของ function ไว้สูงสุด 15 นาทีต่อ invocation เท่านั้น** (ตั้งค่าได้ตั้งแต่ 1 วินาทีถึง 900
+วินาที ไม่มีทางขยายเกินนี้ได้ไม่ว่าจะจ่ายเงินเพิ่มแค่ไหน) — ต่างจาก ECS/Fargate/EC2 ที่ **ไม่มีเพดานเวลาการ
+ทำงานเลย** (task/process รันได้นานเท่าที่ต้องการ) — ข้อจำกัดนี้ทำให้ Lambda **ไม่เหมาะกับงานที่ใช้เวลานาน
+โดยธรรมชาติ** เช่น batch job ประมวลผลข้อมูลขนาดใหญ่ที่ใช้เวลาเป็นชั่วโมง, WebSocket connection ที่ต้องเปิด
+ค้างไว้นาน ๆ, หรือ background worker ที่ประมวลผล queue อย่างต่อเนื่องไม่มีจุดจบ (สำหรับกรณีหลังนี้ ECS
+Fargate ที่รัน container เดิมตลอดไปเหมาะกว่ามาก) — เมื่อประกอบกับตารางเปรียบเทียบทั้งหมดของหัวข้อนี้ คำแนะนำ
+ที่ครบถ้วนคือ: **Lambda เหมาะกับงานที่ทั้ง "ไม่สม่ำเสมอ" และ "ใช้เวลาสั้น" พร้อมกันทั้งสองเงื่อนไข** ถ้ามีแค่
+เงื่อนไขแรกแต่ไม่มีเงื่อนไขที่สอง (traffic ไม่สม่ำเสมอ แต่แต่ละงานใช้เวลานาน) ECS Fargate ที่ scale จำนวน
+task ตาม queue depth มักเหมาะกว่า
+
 ### 101.6 AWS Lambda สำหรับ Rust: `cargo lambda` — ตรวจสอบจริงแบบ Local 100%
 
 Lambda คือบริการ **Function-as-a-Service (FaaS)** ของ AWS — อัปโหลด code (หรือ container image) ของ
@@ -949,6 +982,23 @@ variable) ที่ Part 96 หัวข้อ 96.8 สอนไว้แล้�
 พร้อม HTTPS endpoint อัตโนมัติ — ใกล้เคียงความเรียบง่ายของ `fly deploy` มากกว่า ECS/Fargate ที่ต้องตั้ง
 infrastructure หลายชิ้นเอง
 
+**Concurrency model ของ Cloud Run — จุดที่ต่างจาก Lambda อย่างชัดเจน**: Lambda (ตามหัวข้อ 101.6) ให้
+**หนึ่ง execution environment ต่อหนึ่ง invocation ในเวลาเดียวกันเสมอ** (ถ้ามี 100 request เข้ามาพร้อมกัน AWS
+จะสร้าง execution environment สูงสุด 100 ตัวคู่ขนานกัน แต่ละตัวจัดการ 1 request เท่านั้น) — **Cloud Run
+ตรงกันข้าม**: หนึ่ง container instance รับได้**หลาย concurrent request พร้อมกัน**จริง (ตั้งค่าได้ผ่าน
+`--concurrency` สูงสุดถึง 1000 default คือ 80) เพราะ Cloud Run ออกแบบมาให้แอปที่มี async runtime ในตัว
+(เหมือน axum/tokio ที่ Part 30+ สอน) จัดการ concurrent connection ได้เองอยู่แล้วโดยไม่ต้องพึ่ง 1
+instance = 1 request แบบ Lambda — นี่คือเหตุผลที่ Cloud Run "ประหยัด" กว่า Lambda ได้ในบาง workload
+(instance เดียวรับ traffic ได้มากกว่า ไม่ต้อง scale จำนวน instance ขึ้นเร็วเท่า Lambda สำหรับ traffic ระดับ
+เดียวกัน) แต่ก็หมายความว่าแอปต้องเขียนให้ thread-safe/handle concurrent request ถูกต้องจริง (ซึ่ง axum ทำให้
+โดยอัตโนมัติผ่าน type system ของ Rust ตามที่ Part 39/40 สอนเรื่อง `Send`/`Sync` — เป็นข้อได้เปรียบธรรมชาติของ
+Rust ในสถานการณ์นี้ เทียบกับภาษาที่ไม่มี compile-time guarantee เรื่อง thread safety)
+
+**Cloud Run Jobs — สำหรับงานที่ไม่ใช่ HTTP service**: นอกจาก Cloud Run "Services" (รับ HTTP request ตามที่
+อธิบายมาทั้งหมด) ยังมี **Cloud Run Jobs** สำหรับงานที่รันจบแล้วเสร็จ (batch job, migration script, cron
+task) ไม่ต้องฟัง HTTP port เลย — ใกล้เคียงกับแนวคิด `release_command` ของ Fly.io ที่หัวข้อ 101.3 พูดถึง
+(งานที่ต้องรันครั้งเดียวจบ แยกออกจากงานที่รับ traffic ต่อเนื่อง)
+
 ### 101.8 Config และ Secrets ในบริบท Cloud Deployment
 
 Part 96 หัวข้อ 96.8 สอนหลักการไว้แล้วว่า **config ที่ไม่ใช่ความลับใส่ environment variable ธรรมดาได้ (เช่น
@@ -956,6 +1006,26 @@ Part 96 หัวข้อ 96.8 สอนหลักการไว้แล้
 git เด็ดขาด** — หัวข้อนี้ขยายหลักการเดียวกันไปสู่บริบทที่มีหลายแพลตฟอร์ม โดยแต่ละแพลตฟอร์มมี**กลไกเก็บ secret
 ของตัวเอง** ที่ทำหน้าที่เดียวกัน (encrypt at rest, inject เป็น environment variable ตอน container start,
 ไม่แสดงค่าใน log/UI ปกติ) แต่ syntax คำสั่งต่างกัน:
+
+**สามชั้นของ config/secret ตลอด lifecycle ของโปรเจกต์ — เห็นภาพรวมก่อนลง syntax ของแต่ละแพลตฟอร์ม**: ก่อน
+ถึงคำสั่งของแต่ละ platform ควรเห็นภาพรวมว่า secret เดียวกัน (เช่น `DATABASE_URL`) เดินทางผ่านสามชั้นที่ต่างกัน
+ตลอด lifecycle ของการพัฒนา:
+
+1. **เครื่อง dev ส่วนตัว** — ไฟล์ `.env` ที่โหลดด้วย crate `dotenvy` (ตามที่ Part 70 แนะนำ) หรือ environment
+   variable ที่ export เองในเครื่อง — ไฟล์นี้ **ต้องอยู่ใน `.gitignore` เสมอ** (Part 17/70 เตือนไว้แล้ว) ไม่
+   commit ค่าจริงเข้า git แม้จะเป็น "แค่เครื่อง dev" ก็ตาม เพราะ history ของ git เก็บทุกอย่างไว้ตลอดไปแม้ลบ
+   ไฟล์ทีหลัง
+2. **CI/CD pipeline** — GitHub Actions secret (ตามที่ Part 97 สอน และหัวข้อ 101.4 ของบทนี้ใช้
+   `secrets.FLY_API_TOKEN`) — secret ชั้นนี้ใช้สำหรับ **credential ที่ pipeline ต้องใช้ตอน deploy** (เช่น
+   Fly.io API token, AWS access key สำหรับ `aws ecs` command) ไม่ใช่ secret ของตัวแอปเอง (`DATABASE_URL`/
+   `JWT_SECRET` มักไม่จำเป็นต้องอยู่ใน CI secret เลย เพราะ CI แค่สั่ง deploy ไม่ได้รันแอปจริงที่ต้องต่อ
+   database)
+3. **Cloud platform ที่ deploy จริง** — `fly secrets`/AWS Secrets Manager/GCP Secret Manager ตามที่หัวข้อนี้
+   อธิบาย — secret ชั้นนี้คือค่าที่**แอปจริงที่รันอยู่บนคลาวด์**อ่านมาใช้ตอน runtime
+
+สาม ชั้นนี้**แยกจากกันโดยเจตนา** และไม่ควรใช้ credential เดียวกันข้ามชั้น (เช่น ไม่ควรใช้ password
+PostgreSQL เดียวกันทั้งเครื่อง dev และ production — Part 70/100 เตือนหลักการนี้ไว้แล้วในบริบทอื่น) — ตอนนี้
+มาดู syntax ของชั้นที่ 3 (cloud platform) ของแต่ละแพลตฟอร์มโดยละเอียด:
 
 **Fly.io** — `fly secrets set KEY=value` (documented syntax, ไม่ได้รันจริงตามที่อธิบายไว้ต้นบท):
 
@@ -988,7 +1058,40 @@ aws ssm put-parameter --name "/library-api/DATABASE_URL" --value "postgres://...
 ความต่างสำคัญ: ECS Task Definition แยก field `environment` (ค่าธรรมดา, เห็นได้ผ่าน `describe-task-definition`)
 ออกจาก field `secrets` (ระบุ ARN ของ SSM parameter/Secrets Manager secret แทนค่าตรง ๆ) อย่างชัดเจนในระดับ
 schema เอง — บังคับให้แยก concept สองอย่างนี้ตั้งแต่ตอนเขียน infrastructure-as-code เลย ไม่ต้องพึ่งความ
-ระมัดระวังของ developer อย่างเดียว
+ระมัดระวังของ developer อย่างเดียว ตัวอย่าง Task Definition JSON แบบย่อ (documented ตาม schema ของ AWS
+เท่านั้น ไม่ได้สร้างจริง) แสดงให้เห็นการแยกสอง field นี้ชัด ๆ:
+
+```json
+{
+  "containerDefinitions": [
+    {
+      "name": "library-api-mini",
+      "image": "<account-id>.dkr.ecr.ap-southeast-1.amazonaws.com/library-api-mini:latest",
+      "portMappings": [{ "containerPort": 8080 }],
+      "environment": [
+        { "name": "BIND_ADDR", "value": "0.0.0.0:8080" },
+        { "name": "RUST_LOG", "value": "info" }
+      ],
+      "secrets": [
+        {
+          "name": "DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:ap-southeast-1:<account-id>:secret:library-api-mini/DATABASE_URL"
+        },
+        {
+          "name": "JWT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:ap-southeast-1:<account-id>:secret:library-api-mini/JWT_SECRET"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`environment` เป็น array ของ `{name, value}` ตรง ๆ ส่วน `secrets` เป็น array ของ `{name, valueFrom}` ที่ชี้
+ไป ARN แทนค่าจริง — ECS Agent ที่รันบนเครื่อง (Fargate จัดการให้อัตโนมัติ) จะ resolve ค่าจริงจาก Secrets
+Manager ตอน task start แล้ว inject เป็น environment variable ปกติให้ container เห็น ทำให้จากมุมของโค้ดแอป
+(`env::var("DATABASE_URL")`) **ไม่ต่างจากตอนอ่านจาก `[env]` ของ `fly.toml` เลยแม้แต่นิดเดียว** — ความต่างอยู่
+ที่ "ใครจัดการเก็บค่าจริงและ decrypt ให้" เท่านั้น
 
 **Lambda** — ตั้ง environment variable ของ function ผ่าน `--environment` flag ของ `aws lambda
 update-function-configuration` หรือผ่าน `cargo lambda deploy --env-var KEY=value` ตรง ๆ (สำหรับ config
@@ -1114,6 +1217,17 @@ service บนคลาวด์จริง) ตามเงื่อนไข�
 string อยู่แล้วจาก Part ก่อนหน้าเท่านั้น** — เนื้อหาของหัวข้อนี้จึงเป็นข้อมูลอ้างอิงเชิงเปรียบเทียบ (feature/
 free tier ตามที่แต่ละ provider ประกาศไว้บนเว็บไซต์ทางการ) ไม่ใช่ผลจากการต่อจริง
 
+**Backup และ Point-in-Time Recovery — เหตุผลสำคัญอีกข้อที่ทำให้ managed database คุ้มค่า**: การรัน
+PostgreSQL เองผ่าน `docker-compose` (แบบที่ Part 96 ทำสำหรับ dev/demo) ไม่มี backup อัตโนมัติใด ๆ เลย — ถ้า
+volume หาย ข้อมูลหายหมด — **managed database ทุกตัวที่กล่าวมาในหัวข้อนี้มี automated backup ให้เป็นค่า
+default** (RDS/Cloud SQL ทำ automated snapshot รายวันพร้อม **Point-in-Time Recovery** ที่กู้ข้อมูลกลับไปยัง
+วินาทีใดก็ได้ในช่วงเวลาที่กำหนดผ่าน transaction log — มีประโยชน์มากถ้าเผลอรัน migration ที่ลบข้อมูลผิดพลาด
+ตาม Part 71 ที่เตือนเรื่อง migration ที่ปลอดภัย) — Fly Postgres/Neon/Supabase ก็มี snapshot/backup อัตโนมัติ
+ให้เช่นกันแม้รายละเอียด retention period จะต่างกันตาม tier ราคาที่เลือก — **นี่คือเหตุผลเชิง operational
+ที่สำคัญไม่น้อยกว่าเหตุผลเรื่อง scaling**: ทีมเล็กที่ไม่มีคนดูแล backup strategy เองแบบมืออาชีพ ควรใช้ managed
+database เกือบทุกกรณี แม้ traffic จะน้อยจนดูเหมือนรันเองก็พอไหวก็ตาม เพราะความเสี่ยงจากการไม่มี backup ที่
+ทดสอบแล้วว่ากู้ได้จริง มีค่าเสียโอกาสสูงกว่าค่าใช้จ่ายรายเดือนของ managed service มาก
+
 ### 101.10 Zero-Downtime Deployment: Rolling Deployment และ Health-Check-Gated Cutover
 
 **ปัญหาที่ zero-downtime deployment แก้**: ถ้า deploy โค้ดใหม่ด้วยวิธีง่ายที่สุด (หยุด instance เก่าทั้งหมด
@@ -1154,7 +1268,52 @@ deployment: **"process กำลังรัน" ไม่เท่ากับ 
   ต้อง restart container หรือไม่ — readiness probe ใช้ตัดสินว่าจะ route traffic เข้าหรือไม่ เป็นสอง concept
   ที่แยกกันชัดเจนใน Kubernetes แม้ Fly.io/ECS จะรวมสองอย่างนี้เป็น health check เดียวก็ตาม) `Deployment`
   resource ของ Kubernetes มี field `maxUnavailable`/`maxSurge` ควบคุมว่า rolling update จะทดแทนทีละกี่ตัว
-  พร้อมกัน (คล้ายกับที่ Fly.io ทดแทนทีละ Machine ตาม default)
+  พร้อมกัน (คล้ายกับที่ Fly.io ทดแทนทีละ Machine ตาม default) — ตัวอย่าง manifest (awareness เท่านั้นตามที่
+  หัวข้อ 101.1 บอกไว้ ไม่ได้ apply จริงเพราะบทนี้ไม่มี cluster ให้ทดสอบ แต่ syntax YAML ตรวจสอบจริงแล้วด้วย
+  `PyYAML`) แสดงให้เห็นว่า concept เดียวกับ `fly.toml` ปรากฏในรูปแบบที่ verbose กว่ามาก:
+
+  ```yaml
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: library-api-mini
+  spec:
+    replicas: 3
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1   # ยอมให้ Pod ไม่พร้อมได้สูงสุด 1 ตัวขณะ rolling (คล้าย rolling ทีละ Machine ของ Fly.io)
+        maxSurge: 1         # สร้าง Pod ใหม่เกินจำนวน replicas ได้สูงสุด 1 ตัวชั่วคราวระหว่าง rolling
+    selector:
+      matchLabels:
+        app: library-api-mini
+    template:
+      metadata:
+        labels:
+          app: library-api-mini
+      spec:
+        containers:
+          - name: app
+            image: library-api-mini-musl:latest   # image เดียวกับที่ Part 96 หัวข้อ 96.10 build ไว้ได้ตรง ๆ
+            ports:
+              - containerPort: 8080
+            readinessProbe:            # ตัดสินว่าจะ route traffic เข้าหรือไม่ (คล้าย [[http_service.checks]])
+              httpGet:
+                path: /health
+                port: 8080
+              initialDelaySeconds: 10
+              periodSeconds: 15
+            livenessProbe:             # ตัดสินว่าต้อง restart container หรือไม่ (คนละหน้าที่จาก readinessProbe)
+              httpGet:
+                path: /health
+                port: 8080
+              initialDelaySeconds: 15
+              periodSeconds: 30
+  ```
+
+  สังเกตว่า `image: library-api-mini-musl:latest` คือ image เดียวกับที่ Part 96 หัวข้อ 96.10 build ไว้แล้ว —
+  ยืนยันอีกครั้งว่าหลักการ "container image มาตรฐานพกพาข้าม deployment target ได้" ของบทนี้เป็นจริงถึงระดับ
+  Kubernetes เองด้วย ไม่ใช่แค่ Fly.io/ECS/Cloud Run เท่านั้น
 - **Cloud Run** — จัดการ rolling deployment ให้อัตโนมัติทั้งหมดโดยไม่ต้องตั้งค่าอะไรเพิ่ม (เพราะ Cloud Run
   เป็น managed service ระดับสูงกว่า ECS/Fly.io ในแง่นี้ — เทรดออฟคือควบคุมรายละเอียดได้น้อยกว่า)
 
@@ -1260,6 +1419,17 @@ traffic pattern ที่ไม่สม่ำเสมอ (โดยเฉพ�
 มากกว่า VM ที่รันตลอด** แม้ราคาต่อหน่วยงานของ Lambda (คิดเป็น $ ต่อ GB-second) อาจดูสูงกว่าราคาต่อหน่วยงาน
 ของ EC2 (คิดเป็น $ ต่อ vCPU-hour) เมื่อเทียบตรง ๆ ก็ตาม เพราะจุดสำคัญไม่ใช่ "ราคาต่อหน่วยงาน" แต่คือ **"จำนวน
 หน่วยงานที่เกิดขึ้นจริง" กับ "ค่าใช้จ่ายตอนไม่มีงานเกิดขึ้นเลย"**
+
+**ความเชื่อมโยงกับ caching/rate limiting ที่เรียนมาแล้ว — ลด cost ผ่านการลด traffic ที่ไปถึง compute/database
+จริง**: Part 83 สอน Redis caching และ Part 78 สอน rate limiting ในบริบทของ "ป้องกันปัญหา" (ลด load, ป้องกัน
+abuse) — ทั้งสองเทคนิคนี้มีผลตรงต่อ **cost ของการ deploy** ด้วยเช่นกัน ไม่ใช่แค่เรื่อง performance: ทุก
+request ที่ตอบได้จาก Redis cache โดยไม่ต้อง query PostgreSQL คือ request ที่**ไม่กิน compute-second ของ
+managed database** (ที่บาง provider เช่น Neon คิดเงินตาม compute time จริงตามหัวข้อ 101.9), และทุก request
+ที่ rate limit ปฏิเสธไปตั้งแต่ต้นก่อนถึง handler จริง คือ request ที่**ไม่กิน invocation ของ Lambda/ไม่ต้อง
+scale ECS task เพิ่ม** — สำหรับ workload ที่ billing แบบ "จ่ายตามการใช้งานจริง" (Lambda, Fly.io ที่ตั้ง
+auto-stop, Neon) การลด traffic ที่ไม่จำเป็นด้วย caching/rate limiting **แปลงเป็นเงินที่ประหยัดได้ตรง ๆ** ไม่ใช่
+แค่ผลด้าน performance เพียงอย่างเดียวอีกต่อไป — นี่คือมุมมองเพิ่มเติมที่ควรนำกลับไปคิดตอนตัดสินใจว่าจะเพิ่ม
+caching layer หรือไม่ ในสถานการณ์ที่ deploy อยู่บน platform ที่ billing ตามการใช้งานจริง
 
 **ข้อสังเกตที่สำคัญกว่าตัวเลข**: รูปแบบ billing มีสองแบบหลักที่ต่างกันโดยพื้นฐาน — **"จ่ายตามเวลาที่เครื่อง
 รันอยู่"** (EC2, Fargate ถ้าไม่ scale เป็น 0, RDS/Cloud SQL) กับ **"จ่ายตามการใช้งานจริง"** (Lambda ตาม
@@ -1404,6 +1574,25 @@ credential จริงของ cloud provider (เช่น CI runner ที�
 test) และขั้นไหน "ต้องพึ่งเอกสารทางการ/ต้องทดสอบกับ account จริงก่อน production" — การปนสองอย่างนี้เข้าด้วย
 กันโดยไม่แยกแยะคือที่มาของ incident จำนวนมากในโลกจริงที่ "ทดสอบผ่านในเครื่อง" แต่ไม่เคยพิสูจน์กับ
 infrastructure จริงเลยก่อน deploy ครั้งแรก
+
+**คำแนะนำสุดท้ายสำหรับผู้เรียนที่จะ deploy จริงหลังจากบทนี้**: ถ้ามี Fly.io/AWS/GCP account จริงอยู่แล้ว
+วิธีที่ดีที่สุดในการยืนยันเนื้อหาของบทนี้คือ **ลองทำตามหัวข้อ 101.13 จริงด้วยตัวเอง** ทีละขั้น (`fly launch
+--no-deploy` → `fly secrets set` → `fly deploy` → `fly status`/`fly logs`) แล้วเทียบพฤติกรรมที่เห็นจริงกับ
+คำอธิบายในบทนี้ — ถ้าพบความต่าง (เช่น field ของ `fly.toml` ที่ schema เปลี่ยนไปจากที่บทนี้อธิบาย เพราะ Fly.io
+อาจปรับ API/schema ต่อไปในอนาคตหลังจากบทนี้เขียนเสร็จ) ให้เชื่อ**เอกสารทางการที่ปรากฏบน `fly.io/docs` ณ ตอน
+นั้นเป็นหลัก** เพราะแพลตฟอร์มคลาวด์เปลี่ยนแปลง schema/pricing/feature อยู่เสมอเร็วกว่าเนื้อหาเชิงเอกสารแบบนี้
+จะตามทันได้ทุกจุด — สิ่งที่ไม่เปลี่ยนคือ**หลักการ**ที่บทนี้สอน (container image มาตรฐาน, environment-variable
+config, health-check-gated cutover, แยก secret จาก config ทั่วไป) ซึ่งเป็นรากฐานที่ยืนอยู่ได้ไม่ว่า syntax
+ผิวเผินของ CLI จะเปลี่ยนไปแค่ไหนในอนาคต
+
+**ข้อควรจำก่อนปิดหัวข้อนี้ — `.dockerignore` ยังสำคัญเสมอไม่ว่าจะ deploy ไปที่ไหน**: ไม่ว่าจะ deploy ผ่าน
+`fly deploy` (ที่ build image ผ่าน remote builder ของ Fly.io) หรือผ่าน CI/CD ของ Part 97 (ที่ build image
+บน GitHub Actions runner) `.dockerignore` ที่ Part 96 สอนไว้ (กัน `target/`, `.git/`, ไฟล์ `.env` ไม่ให้เข้า
+build context) **ยังต้องมีอยู่เสมอ** — ถ้าลืม `.dockerignore` และมีไฟล์ `.env` ที่มี secret จริงอยู่ในโฟลเดอร์
+เดียวกับ `Dockerfile` โดยไม่ตั้งใจ, `COPY . .` แบบใน Dockerfile ของ Part 96 **จะฝัง secret นั้นเข้า image
+layer จริง** แม้จะลบไฟล์ในบรรทัดถัดไปก็ตาม (ตามที่ Part 96 หัวข้อ 96.8 กับดักพิสูจน์ไว้แล้วด้วยการกู้ข้อมูล
+จริงจาก image layer) — ข้อควรระวังนี้ไม่เปลี่ยนไปเลยไม่ว่าจะ deploy ไปคลาวด์ไหนก็ตาม เพราะเป็นปัญหาที่เกิด
+ขึ้น**ตอน build image** ซึ่งเกิดก่อนขั้นตอน deploy เสมอ
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

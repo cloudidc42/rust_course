@@ -122,6 +122,31 @@ WASM (บริบทของ Part 56/86) เหตุผลนี้สำค�
 machine, การคำนวณ) เขียนเป็น safe Rust ที่ borrow checker ตรวจให้เต็มรูปแบบ — สัดส่วนนี้คือสิ่งที่ทำให้บั๊ก
 memory-related ในโปรเจกต์ embedded Rust ลดลงอย่างมีนัยสำคัญเทียบกับโปรเจกต์ C ขนาดเท่ากัน
 
+#### 102.1.2 Bare-metal กับ RTOS: สองรูปแบบของ "ไม่มี OS เต็มรูปแบบ"
+
+คำว่า "ไม่มี OS" ในหัวข้อก่อนอาจทำให้เข้าใจผิดว่า embedded มีแค่รูปแบบเดียว — ในความเป็นจริงมีสอง**รูปแบบหลัก**
+ที่ต้องแยกให้ออก เพราะบทนี้เน้นรูปแบบแรกเท่านั้น (bare-metal) แต่โลก embedded จริงใช้ทั้งสองแบบขึ้นกับความ
+ซับซ้อนของงาน:
+
+| รูปแบบ | ลักษณะ | เหมาะกับงานแบบไหน | ตัวอย่างในบทนี้ |
+|---|---|---|---|
+| **Bare-metal** | ไม่มีตัวกลางใด ๆ เลยระหว่างโค้ดของเรากับ hardware — `#[entry]` ของเราคือจุดสูงสุดที่ควบคุมทุกอย่าง ไม่มีใคร schedule งานให้ | งานเดียว/ไม่กี่งานที่ไม่ซับซ้อนมาก, ต้องการควบคุม timing แบบเต็มรูปแบบ 100% (เช่น real-time control loop ของมอเตอร์) | ตัวอย่าง blink (102.6), SysTick/interrupt (102.9) |
+| **RTOS (Real-Time Operating System)** | มี "OS จิ๋ว" ที่ทำหน้าที่ scheduling ระหว่างหลาย "task" (คล้าย thread แต่เบากว่ามาก) ให้ — ตัวอย่างที่ดังที่สุดคือ **FreeRTOS** (เขียนด้วย C, มี Rust binding ให้เรียกใช้) และ **RTIC** (Real-Time Interrupt-driven Concurrency — เขียนด้วย Rust ล้วน ออกแบบมาเฉพาะสำหรับ Cortex-M) | งานที่มีหลาย task พร้อมกันจริงจัง ต้องการ priority/preemption ที่ชัดเจน (เช่น task วัดเซนเซอร์ priority ต่ำ, task ตอบสนอง emergency stop priority สูงสุด) | ไม่ได้สอนในบทนี้ (เกินขอบเขต "เบื้องต้น") |
+
+จุดที่ควรเข้าใจให้ชัด: **RTOS ไม่ใช่ "OS เต็มรูปแบบ" แบบ Linux/Windows** — มันไม่มี virtual memory, ไม่มี
+filesystem แบบเต็มรูปแบบ, ไม่มี process isolation ระดับ hardware (MMU) เสมอไป มันมีแค่ **scheduler** ที่สลับ
+ระหว่าง task ตาม priority และเวลา ซึ่งยังคงเป็นสภาพแวดล้อมที่ **ทรัพยากรจำกัดระดับกิโลไบต์เหมือนกัน** และยัง
+ต้องเขียนแบบ `#[no_std]` ในหลายกรณี (RTIC ทำงานบน `#[no_std]` เต็มรูปแบบ) — ความรู้เรื่อง `#[no_std]`, volatile
+register access, และ critical section ที่บทนี้สอนไว้ **ยังใช้ได้ทั้งหมดไม่ว่าจะเลือก bare-metal หรือ RTOS** —
+สิ่งที่ RTOS เพิ่มเข้ามาคือ**ชั้นของการจัดสรรเวลา CPU ระหว่างหลายงาน** ซึ่งเป็นปัญหาคนละระดับจากที่บทนี้ครอบคลุม
+(เทียบได้กับความต่างระหว่างการเขียนโปรแกรม single-thread ธรรมดา กับการเขียนโปรแกรมที่ต้อง manage หลาย thread
+พร้อม priority ที่ Part 39-40 แนะนำไว้ในระดับ OS thread — RTOS คือแนวคิดเดียวกันแต่ในระดับที่เบากว่าและควบคุม
+ได้แน่นอนกว่ามาก เพราะไม่มี OS scheduler ของ Linux/Windows ที่ไม่แน่นอนมาแทรกกลาง)
+
+`embassy` (หัวข้อ 102.10) เป็นทางเลือกที่สามที่ทันสมัยกว่า RTOS แบบดั้งเดิม: มันให้ผลลัพธ์คล้าย RTOS (จัดการ
+หลายงานพร้อมกันได้) แต่ใช้ async/await ของภาษาแทน task-based scheduler แบบ C — ไม่ต้องเลือกระหว่าง "bare-metal
+ล้วน ๆ" กับ "RTOS แบบเก่า" อีกต่อไปสำหรับโปรเจกต์ใหม่จำนวนมาก
+
 ### 102.2 ความซื่อตรงเรื่อง Sandbox: ไม่มี Microcontroller จริง และแนวทางตรวจสอบที่เลือกใช้
 
 ก่อนลงโค้ดตัวแรก ต้องพูดตรง ๆ ให้ชัดที่สุดเรื่องหนึ่ง: **สภาพแวดล้อมที่ใช้เขียนบทนี้ (sandbox แบบ cloud
@@ -269,6 +294,23 @@ mod tests {
 }
 ```
 
+ผล `cargo test` จริงบนเครื่อง host ที่เขียนบทนี้ (ไม่ต้องมี target embedded ใด ๆ เกี่ยวข้องเลยตอนรัน test
+เพราะ `#[cfg(test)]` เปิด `std` ให้ชั่วคราว):
+
+```
+running 3 tests
+test tests::average_of_empty_slice_is_none ... ok
+test tests::average_computed_correctly ... ok
+test tests::classify_normal_range ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+และเพื่อยืนยันว่า crate นี้เป็น `#![no_std]` จริง ไม่ได้แอบพึ่ง `std` ที่ไหนเลย ได้ลอง `cargo build --target
+thumbv7em-none-eabihf` จริงด้วย (build เป็น library สำหรับ ARM Cortex-M4 ตรง ๆ) ซึ่งผ่านสำเร็จโดยไม่มี error/
+warning ใด ๆ เกี่ยวกับ `std` เลย — พิสูจน์ได้ทั้งสองด้านพร้อมกัน: **test ได้บน host เพื่อความสะดวก และ compile
+ได้จริงสำหรับ MCU เพื่อความถูกต้อง**
+
 สังเกตสิ่งสำคัญ: `#[cfg(test)]` module ยังใช้งานได้ปกติ (เวลารัน `cargo test` บนเครื่อง host ปกติที่มี `std`
 มัน**เปิด `std` ให้ชั่วคราวสำหรับ test build เท่านั้น** — นี่คือ pattern ที่ crate `no_std` จริงในโลกทำกันทั่วไป
 เพื่อให้ยัง unit test ได้บนเครื่อง development ปกติโดยไม่ต้องรันบน MCU จริงทุกครั้งที่ทดสอบ logic) โค้ดส่วนที่
@@ -288,7 +330,44 @@ Part 56 หัวข้อ 56.7.1 อธิบายไว้แล้วว่�
 development ปกติ) — ด้วยเหตุนี้ โปรเจกต์ embedded Rust จำนวนมากเลือก**ไม่ใช้ heap เลย** (100% stack-based,
 ใช้ `heapless` crate ที่ให้ `Vec`/`String`/`HashMap` แบบมี capacity คงที่ตอน compile time แทน) — เราจะไม่ลง
 รายละเอียดของ `heapless` เต็มรูปแบบในบทนี้ (เป็นหัวข้อระดับ awareness เพิ่มเติมที่เกินขอบเขต "เบื้องต้น" ของ
-บทนี้) แต่ควรรู้จักชื่อไว้ว่ามีตัวเลือกนี้อยู่สำหรับกรณีที่ไม่อยากยุ่งกับ custom global allocator เลย
+บทนี้) แต่ควรรู้จักชื่อไว้ว่ามีตัวเลือกนี้อยู่สำหรับกรณีที่ไม่อยากยุ่งกับ custom global allocator เลย ตัวอย่าง
+ที่ cross-compile จริงสำเร็จในสภาพแวดล้อมเขียนบทนี้:
+
+```rust
+#![no_std]
+#![no_main]
+
+use cortex_m_rt::entry;
+use heapless::Vec as HeaplessVec;
+use panic_halt as _;
+
+#[entry]
+fn main() -> ! {
+    // capacity สูงสุด 8 ตัว กำหนดตอน compile time ผ่าน const generic (Part 18) -- ไม่มี heap
+    // allocation เกิดขึ้นเลย ข้อมูลทั้งหมดอยู่บน stack/static memory เท่านั้น ไม่ต้องมี
+    // #[global_allocator] เลยแม้แต่นิดเดียว เพราะ heapless::Vec ไม่ได้พึ่ง alloc crate
+    let mut readings: HeaplessVec<i32, 8> = HeaplessVec::new();
+    let _ = readings.push(100);
+    let _ = readings.push(200);
+
+    loop {}
+}
+```
+
+ผล `cargo build --target thumbv7em-none-eabihf` จริงในสภาพแวดล้อมเขียนบทนี้:
+
+```
+   Compiling heapless v0.8.0
+   ... (dependency อื่น ๆ)
+   Compiling heapless-demo v0.1.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.21s
+```
+
+และขนาด `.text` ที่วัดได้จริงด้วย `size` (debug build, ยังไม่ optimize): **2352 ไบต์** — `Vec<i32, 8>` แบบนี้
+มีต้นทุนแค่พื้นที่คงที่ (8 × 4 ไบต์ = 32 ไบต์สำหรับข้อมูล บวก field ติดตาม length) รู้ขนาดแน่นอนตั้งแต่
+compile time ไม่มีความเสี่ยงเรื่อง fragmentation หรือ allocation ล้มเหลวตอน runtime เลยแม้แต่กรณีเดียว
+ต่างจาก `alloc::vec::Vec<T>` ที่ขนาดโตได้เรื่อย ๆ ตาม runtime แต่ต้องแบกรับความเสี่ยงเรื่อง heap ที่อธิบาย
+ไว้ข้างต้น
 
 ### 102.4 ไม่มี `main()`: `#[no_main]`, Reset Vector, และ `#[entry]` จาก `cortex-m-rt`
 
@@ -463,6 +542,18 @@ pub fn blink_once<P: OutputPin>(led: &mut P) -> Result<(), P::Error> {
 รูปแบบ — สัดส่วนนี้คือคำตอบที่แม่นยำที่สุดต่อคำถามที่หัวข้อ 102.1 ทิ้งไว้: **"พื้นที่ unsafe เล็กลงมาก และถูก
 เขียนโดยคนที่เข้าใจ hardware จริง ๆ ครั้งเดียว แทนที่ทุกคนต้องเขียน raw pointer เองทุกที่"**
 
+**หมายเหตุเชิงเทคนิคที่สังเกตได้จริงจากการ build ในบทนี้**: ผลลัพธ์ `cargo build` ของหลายตัวอย่างในบทนี้ (ดู
+หัวข้อ 102.6, 102.9, 102.9.1) แสดง `Compiling embedded-hal v0.2.7` และ `Compiling embedded-hal v1.0.0` **พร้อม
+กันทั้งสองเวอร์ชัน** — นี่ไม่ใช่ความผิดพลาด แต่สะท้อนสถานะจริงของ ecosystem ในช่วงเปลี่ยนผ่าน: `embedded-hal
+1.0` (ออกปี 2024) ปรับ trait หลายตัวใหม่ทั้งหมดจาก `0.2` (เช่นลบ associated type ที่ไม่จำเป็น, รวม error
+handling ให้สอดคล้องกันมากขึ้น) แต่ crate จำนวนมากในระบบยังไม่อัปเดตไปใช้ `1.0` ทั้งหมด (โดยเฉพาะ crate รุ่น
+เก่าอย่าง `lm3s6965` ในหัวข้อ 102.9.1) — cargo จึงต้อง compile ทั้งสองเวอร์ชันไว้พร้อมกันในกราฟ dependency
+เดียว (คนละ crate ใน dependency tree อ้างอิงคนละเวอร์ชัน ซึ่งเป็นเรื่องปกติของ semver — Rust อนุญาตให้มีหลาย
+major version ของ crate เดียวกันอยู่ร่วมกันได้ตราบใดที่ไม่มีใครต้อง pass type ข้ามเวอร์ชันกันตรง ๆ) — บทเรียน
+เชิงปฏิบัติ: เวลาเลือก HAL crate สำหรับโปรเจกต์ใหม่ ควรตรวจสอบว่ามัน implement `embedded-hal` เวอร์ชันไหน
+เพราะโค้ด logic ที่เขียนอิง trait จาก `1.0` จะใช้กับ HAL ที่ยัง implement แค่ `0.2` ไม่ได้ตรง ๆ (ต้องมี
+compatibility shim คั่นกลาง)
+
 ### 102.6 ตัวอย่างจริง: Blink LED ด้วย Register-level Access (ยืนยันด้วย Cross-compilation)
 
 "Hello, world" ของโลก embedded ไม่ใช่การพิมพ์ข้อความ — มันคือการทำให้ **LED กระพริบ** เพราะเป็นตัวอย่างที่
@@ -517,6 +608,67 @@ fn main() -> ! {
 }
 ```
 
+โค้ดนี้เพียงไฟล์เดียวยังไม่พอที่จะ compile เป็น binary สำหรับ MCU ได้จริง — ต้องมีไฟล์สนับสนุนอีกสามไฟล์ที่
+บอก linker ว่า Flash/RAM ของชิปนี้อยู่ตรงไหน และบอก cargo ว่า target เริ่มต้นคืออะไร (โครงสร้างนี้เหมือนกับ
+ที่หัวข้อ 102.7 จะแสดงสำหรับ QEMU ทุกประการ เพียงแค่ตัวเลข memory address ต่างกันตามชิป):
+
+`memory.x` (Flash ของ STM32F401 เริ่มที่ `0x0800_0000` ตามสเปกของ ARM Cortex-M ที่ area นี้สงวนไว้สำหรับ
+โปรแกรมที่ฝังอยู่ใน Flash เสมอ, RAM เริ่มที่ `0x2000_0000` ตามสเปกเดียวกัน):
+
+```text
+MEMORY
+{
+  FLASH : ORIGIN = 0x08000000, LENGTH = 256K
+  RAM : ORIGIN = 0x20000000, LENGTH = 64K
+}
+```
+
+`build.rs` (คัดลอก `memory.x` เข้า `OUT_DIR` แล้วบอก linker ให้หาไฟล์นี้เจอ และสั่งใช้ linker script `link.x`
+ที่ `cortex-m-rt` เตรียมไว้ให้ — โครงสร้างนี้คือ pattern มาตรฐานของ `cortex-m-quickstart` template ที่โปรเจกต์
+embedded Rust ส่วนใหญ่ใช้กัน):
+
+```rust
+use std::env;
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
+
+fn main() {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    File::create(out_dir.join("memory.x"))
+        .unwrap()
+        .write_all(include_bytes!("memory.x"))
+        .unwrap();
+    println!("cargo:rustc-link-search={}", out_dir.display());
+    println!("cargo:rerun-if-changed=memory.x");
+    println!("cargo:rustc-link-arg=-Tlink.x");
+}
+```
+
+`.cargo/config.toml` (ตั้ง target เริ่มต้นให้ `cargo build` เปล่า ๆ ไม่ต้องพิมพ์ `--target` ซ้ำทุกครั้ง):
+
+```toml
+[build]
+target = "thumbv7em-none-eabihf"
+```
+
+`Cargo.toml`:
+
+```toml
+[package]
+name = "blink"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+
+[profile.release]
+panic = "abort"
+```
+
 โค้ดนี้แสดงรายละเอียดเชิงกลไกที่มักถูกมองข้ามในตัวอย่าง "blink" ที่เขียนสั้นเกินไป: **ต้องเปิด clock ของ
 peripheral ก่อนใช้งานเสมอ** — MCU ยุคใหม่ทุกตัวออกแบบมาให้**ประหยัดพลังงาน** โดย peripheral ทุกตัว (GPIO,
 timer, UART, ฯลฯ) จะ**ไม่มี clock จ่ายให้** ตั้งแต่เริ่ม (power-on) เพื่อลดการใช้พลังงานของวงจรที่ไม่ได้ใช้ —
@@ -530,11 +682,25 @@ peripheral ตัวนั้น — นี่คือกับดักที�
 อื่นพร้อมกันไม่ได้เลย — ประเด็นนี้จะเห็นชัดขึ้นในหัวข้อ interrupt และ async ถัดไป)
 
 **สถานะการยืนยัน**: ตัวอย่างนี้ผ่านการ cross-compile จริงด้วย `cargo build --target thumbv7em-none-eabihf`
-ในสภาพแวดล้อมของบทนี้ (ดูผลลัพธ์การ build จริงในหัวข้อ 102.11 ที่จะแสดง binary size ของตัวอย่างนี้ภายใต้การ
-optimize ระดับต่าง ๆ) — เนื่องจาก sandbox ไม่มี STM32F401 ตัวจริง (และ QEMU ไม่รองรับการจำลอง STM32F4 ในระดับ
-ที่สังเกตการ toggle ของ GPIO ได้จริงในสภาพแวดล้อมนี้) **การยืนยันของตัวอย่างนี้จึงอยู่ระดับ "compile ถูกต้อง
-สมบูรณ์ ยืนยันได้ว่าจะรันบน hardware จริงได้" แต่ไม่ได้รันจริงบน LED จริง** — บทนี้จะไม่กล่าวอ้างว่า "เห็น LED
-กระพริบจริง" เพราะไม่เป็นความจริงในสภาพแวดล้อมที่เขียนบทนี้
+ในสภาพแวดล้อมของบทนี้ (โครงสร้างโปรเจกต์เดียวกับที่แสดงไว้: `Cargo.toml` ตามที่กำหนด dependency ข้างบน,
+`memory.x` และ `build.rs` แบบเดียวกับที่หัวข้อ 102.7 จะแสดงเต็มรูปแบบ) ผลลัพธ์จริงของ `cargo build` (debug
+profile):
+
+```
+   Compiling cortex-m v0.7.9
+   ...
+   Compiling blink v0.1.0 (.../blink)
+   ...
+   Compiling cortex-m-rt-macros v0.7.7
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.16s
+```
+
+ไม่มี error หรือ warning ที่เกี่ยวข้องกับ target/linking เลยแม้แต่บรรทัดเดียว — ยืนยันว่าโค้ดถูกต้องตาม
+syntax, type, borrow checker, และรูปร่างของ binary ที่ linker คาดหวังสำหรับ ARM Cortex-M4 ครบทุกมิติ —
+เนื่องจาก sandbox ไม่มี STM32F401 ตัวจริง (และ QEMU ไม่รองรับการจำลอง STM32F4 ในระดับที่สังเกตการ toggle ของ
+GPIO ได้จริงในสภาพแวดล้อมนี้) **การยืนยันของตัวอย่างนี้จึงอยู่ระดับ "compile ถูกต้องสมบูรณ์ ยืนยันได้ว่าจะรัน
+บน hardware จริงได้" แต่ไม่ได้รันจริงบน LED จริง** — บทนี้จะไม่กล่าวอ้างว่า "เห็น LED กระพริบจริง" เพราะไม่เป็น
+ความจริงในสภาพแวดล้อมที่เขียนบทนี้
 
 ### 102.7 รันจริงบน QEMU: Semihosting บนบอร์ดจำลอง `lm3s6965evb`
 
@@ -624,11 +790,34 @@ DSP extension แบบ Cortex-M4 มี ต้องเลือก target ใ�
 (เลือก target ผิดกลุ่มจะได้ error ตอน link หรือแย่กว่านั้นคือได้ binary ที่ compile ผ่านแต่รันแล้ว crash
 เพราะ CPU จริงไม่รู้จักคำสั่งบางตัว — รายละเอียดนี้จะอยู่ในหัวข้อกับดักท้ายบทด้วย)
 
-**สถานะการยืนยัน (จะระบุผลจริงหลังขั้นตอนตรวจสอบท้ายบท)**: ตัวอย่างนี้คือจุดที่บทนี้จะพยายาม**รันจริงผ่าน
-`qemu-system-arm`** ถ้าเครื่องมือนี้มีอยู่ในสภาพแวดล้อม — ถ้าสำเร็จ ผลลัพธ์จริงที่ QEMU พิมพ์ออกมา (ข้อความ
-"Hello, embedded world!" และ "2 + 2 = 4") จะถูกนำมาแสดงในบทนี้แบบ**คัดลอกจากการรันจริง 100%** ไม่มีการ
-แต่งเติม — ถ้า `qemu-system-arm` ไม่มีในสภาพแวดล้อมนี้ บทนี้จะระบุไว้ตรงจุดนี้อย่างชัดเจนว่าตัวอย่างนี้ยืนยัน
-ได้แค่ระดับ cross-compilation เท่านั้น
+**สถานะการยืนยันจริง**: ตามที่ระบุไว้ในหัวข้อ 102.2 — `qemu-system-arm` **ไม่มีอยู่ในสภาพแวดล้อมที่เขียนบทนี้**
+แม้จะพยายามติดตั้งเพิ่มเติมด้วย `apt-get install -y qemu-system-arm` แล้วก็ตาม (การติดตั้งล้มเหลวเพราะ mirror
+package ที่ต้องดาวน์โหลด `qemu-system-arm` ตัวจริงถูกปฏิเสธ/timeout โดย proxy ของสภาพแวดล้อมนี้) — ดังนั้น
+ตัวอย่างนี้**ไม่ได้ถูกรันจริงผ่าน QEMU** ในบทนี้ สิ่งที่ยืนยันได้จริงคือระดับ cross-compilation เท่านั้น:
+โครงสร้างโปรเจกต์ทั้งหมด (`Cargo.toml`, `memory.x`, `build.rs`, `.cargo/config.toml`, `src/main.rs`) ตามที่
+แสดงไว้ข้างล่างถูกสร้างขึ้นจริงและ `cargo build` (target `thumbv7m-none-eabi`) ผ่านสำเร็จจริง ให้ผลลัพธ์:
+
+```
+    Updating crates.io index
+     Locking 24 packages to latest compatible versions
+      Adding cortex-m-semihosting v0.5.0 (available: v0.6.0)
+      Adding panic-halt v0.2.0 (available: v1.0.0)
+ Downloading crates ...
+  Downloaded cortex-m-semihosting v0.5.0
+   Compiling proc-macro2 v1.0.107
+   ...
+   Compiling qemu-hello v0.1.0 (.../qemu-hello)
+   Compiling panic-halt v0.2.0
+   ...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.86s
+```
+
+นี่คือหลักฐานที่แน่นหนาที่สุดที่ทำได้จริงในสภาพแวดล้อมนี้: โค้ด `hprintln!`/`debug::exit` ที่เรียก
+`cortex-m-semihosting` compile และ link ผ่านสมบูรณ์สำหรับ ARM Cortex-M3 (`thumbv7m-none-eabi`) ตรงตามที่
+บอร์ดจำลอง `lm3s6965evb` ต้องการ — **ถ้าคุณมีเครื่องที่เข้าถึง QEMU ได้จริง** คำสั่ง `cargo run` (ที่ runner
+ใน `.cargo/config.toml` ตั้งไว้ให้เรียก `qemu-system-arm` อัตโนมัติ) ควรให้ผลลัพธ์คือข้อความ "Hello, embedded
+world!" และ "2 + 2 = 4" ปรากฏที่ terminal ตามลำดับ แล้ว QEMU ปิดตัวเองด้วย exit code 0 — แต่บทนี้**จะไม่กล่าว
+อ้างว่าได้เห็นข้อความเหล่านั้นจริงในสภาพแวดล้อมนี้** เพราะไม่เป็นความจริง
 
 ### 102.8 Panic Handling ใน `#[no_std]`: ไม่มี Unwinding ไม่มี stderr
 
@@ -763,6 +952,22 @@ fn main() -> ! {
 }
 ```
 
+**สถานะการยืนยัน**: ตัวอย่างนี้ cross-compile จริงสำเร็จด้วย `cargo build --target thumbv7em-none-eabihf` ใน
+สภาพแวดล้อมเขียนบทนี้ (ใช้ `memory.x`/`build.rs` แบบเดียวกับหัวข้อ 102.6):
+
+```
+   Compiling cortex-m v0.7.9
+   ...
+   Compiling interrupts v0.1.0 (.../interrupts)
+   ...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.15s
+```
+
+ผ่านโดยไม่มี error เลย — ยืนยันว่า `#[exception] fn SysTick()`, `cortex_m::Peripherals::take()`, และการใช้
+`Mutex<RefCell<u32>>` ร่วมกับ `cortex_m::interrupt::free` ทั้งหมด compile ถูกต้องตาม API จริงของ `cortex-m`/
+`cortex-m-rt` เวอร์ชันปัจจุบัน (ไม่ใช่ API ที่ล้าสมัยหรือเขียนผิด signature) — เช่นเดิม การยืนยันนี้อยู่ระดับ
+cross-compilation เท่านั้น เพราะไม่มี hardware จริงหรือ QEMU ที่จำลอง SysTick แบบสังเกตผลได้ในสภาพแวดล้อมนี้
+
 จุดที่ควรเน้นให้ชัด: **`Mutex<RefCell<T>>` ในบริบทนี้ไม่ใช่ `std::sync::Mutex`** — มันคือ
 `cortex_m::interrupt::Mutex` ที่มีความหมายต่างไปโดยสิ้นเชิง: `std::sync::Mutex` (Part 39) ป้องกัน data race
 ระหว่าง **OS thread หลายตัว** ที่ CPU อาจรันพร้อมกันจริง (multi-core) หรือสลับกันรัน (time-slicing) โดย OS
@@ -783,6 +988,83 @@ interrupt ไปแล้ว การเข้าถึง `RefCell` ข้า�
 และภายใต้ RTOS) — แนวคิดเบื้องหลังเหมือนกันทุกประการกับตัวอย่างข้างบน เพียงแค่เปลี่ยนชื่อ type ที่ใช้ (จาก
 `cortex_m::interrupt::Mutex` เป็น `critical_section::Mutex`) — `embassy` framework ในหัวข้อถัดไปก็ใช้
 `critical-section` เป็นฐานเดียวกันนี้เช่นกัน
+
+#### 102.9.1 `#[interrupt]` ตัวจริง: ผูกกับชื่อ Interrupt Vector ของ PAC เฉพาะชิป
+
+ตัวอย่างข้างบนใช้ `#[exception]` สำหรับ `SysTick` เพราะเป็น exception ที่เป็นส่วนหนึ่งของสเปก ARM Cortex-M
+เอง ไม่ผูกกับชิปตัวใดตัวหนึ่ง — แต่ `#[interrupt]` ที่หัวข้อนี้ตั้งใจแสดงตั้งแต่ต้น**ต้องมีชื่อตรงกับ interrupt
+vector ที่มาจาก PAC ของชิปจริง** เสมอ (อธิบายไว้แล้วก่อนหน้านี้ในหัวข้อนี้) — มาดูตัวอย่างที่ผูกกับ interrupt
+`GPIOA` ของ PAC `lm3s6965` (crate เดียวกับที่ตรงกับบอร์ดจำลอง `lm3s6965evb` ในหัวข้อ 102.7) ซึ่งจำลองสถานการณ์
+"ปุ่มถูกกดบน GPIO port A แล้ว interrupt handler นับจำนวนครั้งที่ถูกกด":
+
+```rust
+#![no_std]
+#![no_main]
+
+use core::cell::Cell;
+use cortex_m::interrupt::Mutex;
+use cortex_m_rt::entry;
+use lm3s6965::interrupt; // #[interrupt] macro variant ที่รู้จักชื่อ interrupt ของชิปนี้โดยเฉพาะ
+                          // -- มาจาก PAC ไม่ใช่จาก cortex-m-rt ตรง ๆ (นี่คือความต่างจาก #[exception])
+use panic_halt as _;
+
+// ใช้ Cell<u32> แทน RefCell<u32> ได้เพราะ u32 เป็น Copy type -- ไม่ต้องมี borrow tracking แบบ
+// RefCell (Part 28) เลย แค่ .get()/.set() ธรรมดา -- เลือกใช้ตัวที่ตรงกับความต้องการจริง ไม่ใช่ RefCell
+// เสมอไปเมื่อไม่มีข้อมูลที่ซับซ้อนกว่า primitive type ที่ Copy ได้
+static BUTTON_PRESSES: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
+
+// ชื่อฟังก์ชันนี้ "GPIOA" ต้องตรงกับชื่อ interrupt วันที่ประกาศไว้ใน __INTERRUPTS ของ lm3s6965
+// เป๊ะทุกตัวอักษร (case-sensitive) -- ถ้าพิมพ์ผิดชื่อ compiler จะฟ้อง error ทันทีตอน compile
+// (ไม่ใช่ตอน link) เพราะ #[interrupt] macro ตรวจสอบชื่อกับ enum ที่ PAC ประกาศไว้ให้แล้ว
+#[interrupt]
+fn GPIOA() {
+    cortex_m::interrupt::free(|cs| {
+        let count = BUTTON_PRESSES.borrow(cs);
+        count.set(count.get() + 1);
+    });
+}
+
+#[entry]
+fn main() -> ! {
+    loop {
+        cortex_m::asm::nop();
+    }
+}
+```
+
+**สถานะการยืนยัน**: ตัวอย่างนี้ cross-compile จริงสำเร็จด้วย `cargo build --target thumbv7m-none-eabi` (ตรงกับ
+core Cortex-M3 ของ `lm3s6965evb`) ในสภาพแวดล้อมเขียนบทนี้ — หมายเหตุที่ต้องซื่อตรง: crate `lm3s6965` เวอร์ชัน
+ล่าสุดที่มี (0.1.3) ยัง pin ตัวเองไว้กับ `cortex-m`/`cortex-m-rt` รุ่น **0.6.x** (เก่ากว่ารุ่น 0.7.x ที่ใช้ใน
+ตัวอย่างอื่นทั้งหมดของบทนี้) — ครั้งแรกที่ลองประกาศ `cortex-m-rt = "0.7"` ในโปรเจกต์เดียวกัน cargo ปฏิเสธด้วย
+error จริง:
+
+```
+error: failed to select a version for `cortex-m-rt`.
+    ...
+package `cortex-m-rt` links to the native library `cortex-m-rt`, but it conflicts with a
+previous package which links to `cortex-m-rt` as well:
+package `cortex-m-rt v0.6.15`
+    ... which satisfies dependency `cortex-m-rt = "^0.6.5"` of package `lm3s6965 v0.1.0`
+```
+
+นี่คือปัญหา **`links` key ของ Cargo** (ระบุไว้ในหมายเหตุของ Cargo ว่า native library หนึ่งตัว link ซ้ำสอง
+เวอร์ชันไม่ได้ในไบนารีเดียว) — วิธีแก้คือปรับ `cortex-m`/`cortex-m-rt` ในโปรเจกต์นี้ลงมาที่ `"0.6"` ให้ตรงกับ
+ที่ `lm3s6965` ต้องการ หลังปรับแล้ว `cargo build` ผ่านสำเร็จสมบูรณ์:
+
+```
+      Adding cortex-m v0.6.7 (available: v0.7.9)
+      Adding cortex-m-rt v0.6.15 (available: v0.7.7)
+      Adding lm3s6965 v0.1.3 (available: v0.2.0)
+   Compiling lm3s6965 v0.1.3
+   Compiling interrupt-pac v0.1.0 (.../interrupt-pac)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.98s
+```
+
+บทเรียนเชิงปฏิบัติที่แท้จริงจากปัญหานี้ (ไม่ใช่แค่ทฤษฎี): **PAC/HAL crate ในโลก embedded มักตามหลังเวอร์ชัน
+ล่าสุดของ `cortex-m`/`cortex-m-rt` อยู่เสมอไม่มากก็น้อย** เพราะแต่ละ crate ต้อง maintained แยกกันโดยทีมต่างกัน
+— เวลาเลือก dependency สำหรับโปรเจกต์ embedded จริง ต้องเช็ค **compatibility matrix** ของ ecosystem ให้ตรงกัน
+ทั้งชุดเสมอ ไม่ใช่แค่อัปเดตทุก crate ไปที่เวอร์ชันล่าสุดแยกกันแบบสุ่ม ๆ (ปัญหานี้พบได้บ่อยกว่าในโลก embedded
+มากกว่าโลกเว็บทั่วไป เพราะ ecosystem เล็กกว่าและ crate หลักบางตัวไม่ได้อัปเดตตามกันเร็วเท่า)
 
 ### 102.10 Async บน Embedded: `embassy` — Executor ที่ไม่มี OS คอยรัน
 
@@ -809,8 +1091,11 @@ Part 30+ สอน async/await ของ Rust ไว้บนสมมติฐ�
 - **HAL crate เฉพาะชิป** (เช่น `embassy-stm32`, `embassy-nrf`) — ให้ driver แบบ async สำหรับ peripheral
   ต่าง ๆ (UART, I2C, SPI) ที่ทำงานร่วมกับ `embassy-executor` ได้ทันที
 
-ตัวอย่างโครงสร้างโค้ดที่แสดงรูปร่างของโปรแกรม `embassy` (ใช้ `embassy-executor` กับ `embassy-time` ซึ่งเป็น
-ส่วนที่ไม่ผูกกับชิปตัวใดตัวหนึ่ง — ส่วน HAL เฉพาะชิปจะเปลี่ยนไปตาม hardware ที่ใช้จริง):
+ตัวอย่างที่ **cross-compile จริงสำเร็จ** ในสภาพแวดล้อมเขียนบทนี้ (ต่างจากฉบับร่างแรกที่ลองแค่
+`embassy-executor`/`embassy-time` เปล่า ๆ แล้ว link ไม่ผ่าน — รายละเอียดอยู่ในหมายเหตุความซื่อตรงท้ายหัวข้อ)
+คือโปรแกรมสำหรับบอร์ด Nucleo-F401RE (ชิปตัวเดียวกับตัวอย่าง blink ในหัวข้อ 102.6) ที่ใช้ **`embassy-stm32`**
+เป็น HAL เฉพาะชิปเพื่อให้ `embassy-executor` มี critical-section implementation และ time driver ที่ใช้งานได้
+จริงครบชุด:
 
 ```rust
 #![no_std]
@@ -838,6 +1123,11 @@ async fn blink_task() {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    // embassy_stm32::init(...) เตรียม clock/RCC ให้ทั้งชิป (แทนที่การเขียน RCC_AHB1ENR ด้วยมือ
+    // แบบหัวข้อ 102.6 -- HAL ทำขั้นตอนที่มักถูกลืมนี้ให้ครบถ้วนอัตโนมัติ) และคืน struct ที่ถือ
+    // peripheral ทั้งหมดของบอร์ดไว้ให้หยิบไปใช้ต่อ
+    let _p = embassy_stm32::init(Default::default());
+
     // spawner.spawn(...) เพิ่มงานใหม่เข้าไปให้ executor ของ embassy คอย poll
     // -- แนวคิดเดียวกับ tokio::spawn() ของ Part 31 แต่ executor เป็นของ embassy เอง ไม่ใช่ Tokio
     spawner.spawn(blink_task()).unwrap();
@@ -846,6 +1136,22 @@ async fn main(spawner: Spawner) {
         Timer::after(Duration::from_secs(1)).await;
     }
 }
+```
+
+`Cargo.toml` ที่ทำให้ตัวอย่างนี้ link ผ่านจริง (จุดสำคัญคือ feature `critical-section-single-core` ของ
+`cortex-m` และการระบุชิปให้ `embassy-stm32` ผ่าน feature `stm32f401re`):
+
+```toml
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread"] }
+embassy-time = "0.4"
+embassy-stm32 = { version = "0.2", features = ["stm32f401re", "time-driver-any"] }
+
+[profile.release]
+panic = "abort"
 ```
 
 สิ่งที่ต้องเน้นให้ชัดเจนที่สุดในหัวข้อนี้คือ **ความต่างเชิงกลไกระหว่าง `cortex_m::asm::delay()` (busy-wait)
@@ -862,11 +1168,51 @@ interrupt handler จำนวนมากที่แชร์ state กัน�
 ที่ `embassy` ใช้อยู่ข้างใต้ (executor ของมันถูก "ปลุก" ด้วย interrupt จริง ๆ ) แต่โปรแกรมเมอร์ **ไม่ต้องเขียน
 `#[interrupt]` handler และ critical section ด้วยมือเองอีกต่อไป** — `embassy` จัดการชั้นนั้นให้หมดแล้ว
 
-**หมายเหตุความซื่อตรงเรื่องการตรวจสอบ**: ตัวอย่างนี้ซับซ้อนกว่าตัวอย่างก่อนหน้ามาก เพราะ `embassy-executor`
-ในโหมด `#[embassy_executor::main]` เต็มรูปแบบต้องพึ่ง feature flag ที่เจาะจงกับ architecture (เช่น
-`arch-cortex-m`) และมักต้องมี HAL เฉพาะชิปประกอบร่วมด้วยเพื่อให้ time driver ทำงานได้ครบ — ผลการ cross-
-compile จริงของตัวอย่างนี้ (สำเร็จหรือไม่ ต้องปรับ dependency อย่างไร) จะถูกรายงานตามจริงในหัวข้อ 102.11/
-รายงานท้ายบท ไม่มีการกล่าวอ้างว่า compile สำเร็จถ้าไม่ได้เกิดขึ้นจริง
+**หมายเหตุความซื่อตรงเรื่องการตรวจสอบ**: ความพยายามครั้งแรกในการเขียนตัวอย่างนี้ใช้แค่ `embassy-executor`
+กับ `embassy-time` เปล่า ๆ (ไม่มี HAL เฉพาะชิป) — ผลคือ **link ไม่ผ่าน** ด้วย error จริงจาก `rust-lld`:
+
+```
+error: linking with `rust-lld` failed: exit status: 1
+  ...
+  rust-lld: error: undefined symbol: _critical_section_1_0_release
+  rust-lld: error: undefined symbol: _critical_section_1_0_acquire
+  rust-lld: error: undefined symbol: _embassy_time_schedule_wake
+  rust-lld: error: undefined symbol: _embassy_time_now
+```
+
+สาเหตุคือ `embassy-executor`/`embassy-time` เป็นแค่ **ส่วนที่ไม่ผูกกับ hardware** (portable ข้ามชิป) — พวก
+มันเรียก symbol ที่ต้อง**มีคนมา implement ให้จริง** สองกลุ่ม: (1) `critical-section` implementation (ว่า
+"ปิด interrupt ยังไงจริง ๆ บนชิปนี้") และ (2) `embassy-time` driver (ว่า "อ่านเวลาปัจจุบันจาก hardware timer
+ตัวไหนจริง ๆ") — ทั้งสองอย่างนี้**ขึ้นกับชิปจริงเสมอ ไม่มีทางเป็น generic ข้ามชิปได้ในทางเทคนิค** เมื่อเพิ่ม
+`cortex-m` feature `critical-section-single-core` (แก้ปัญหาที่ 1) และ `embassy-stm32` พร้อม feature
+`stm32f401re`/`time-driver-any` (แก้ปัญหาที่ 2 — HAL ของชิปตัวนี้ implement ทั้ง critical-section ผ่าน
+`cortex-m` และ time driver ผ่าน hardware timer ของ STM32F401 เอง) ตัวอย่างจึง **compile และ link ผ่านสำเร็จ
+สมบูรณ์** ด้วย `cargo build --target thumbv7em-none-eabihf`:
+
+```
+   Compiling critical-section v1.2.0
+   ...
+   Compiling embassy-stm32 v0.2.0
+   ...
+   Compiling embassy-demo v0.1.0 (.../embassy-demo)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.37s
+```
+
+และ `cargo build --release` (ด้วย `panic = "abort"` ตาม `Cargo.toml` ข้างบน) วัดขนาดจริงด้วย `size` ได้:
+
+```
+   text	   data	    bss	    dec	    hex	filename
+  18716	     24	   4352	  23092	   5a34	embassy-demo (release)
+  59696	     24	   4352	  64072	   fa48	embassy-demo (debug)
+```
+
+ตัวเลข `.text` = 18,716 ไบต์ของ `release` build **ใหญ่กว่าตัวอย่าง blink แบบ register-level ในหัวข้อ 102.6
+(1,200 ไบต์ในรูปแบบ release เดียวกัน) ถึงเกือบ 16 เท่า** — นี่คือตัวเลขจริงที่แสดงต้นทุนของความสะดวกสบายที่
+`embassy` มอบให้ (executor, time driver, HAL abstraction เต็มรูปแบบ) เทียบกับการเขียน register ตรง ๆ ด้วยมือ
+— ต้นทุนนี้**คุ้มค่ามาก**สำหรับโปรแกรมที่มีงานพร้อมกันหลายงานจริง (ที่การเขียน register/interrupt handler
+ด้วยมือจะซับซ้อนกว่านี้มากเมื่อโปรแกรมโตขึ้น) แต่ **ไม่คุ้มค่าเลย**สำหรับ MCU ที่มี Flash เหลือน้อยมาก (เช่น
+มีแค่ 32-64 KB) หรือโปรแกรมที่ต้องการแค่ blink LED เดียวจริง ๆ — นี่คือตัวอย่างที่จับต้องได้ของการ trade-off
+ระหว่าง "ความสะดวกในการเขียนโค้ด" กับ "งบประมาณ Flash ที่มีจำกัดสุดขั้ว" ที่หัวข้อ 102.11 จะพูดถึงต่อ
 
 ### 102.11 ต่อสู้กับ Kilobytes: Binary Size Tuning ระดับสุดขั้ว
 
@@ -900,22 +1246,38 @@ strip = true            # ตัด debug symbol ทิ้งจาก binary �
                        # สำหรับตอน debug ด้วย gdb/probe-rs แยกไฟล์กัน)
 ```
 
-**ตัวเลขจริงจากการวัดในสภาพแวดล้อมเขียนบทนี้** (จากตัวอย่าง blink ในหัวข้อ 102.6 คอมไพล์ด้วย `--target
-thumbv7em-none-eabihf`) จะถูกใส่ในตารางนี้หลังขั้นตอนตรวจสอบท้ายบท — รูปแบบตารางที่จะใช้:
+**ตัวเลขจริงที่วัดได้ในสภาพแวดล้อมเขียนบทนี้** (จากตัวอย่าง blink ในหัวข้อ 102.6 คอมไพล์ด้วย `--target
+thumbv7em-none-eabihf` ด้วยคำสั่ง `size target/thumbv7em-none-eabihf/release/blink` จริงทุกแถว — `cargo-
+bloat` **ไม่มีอยู่**ในสภาพแวดล้อมนี้ เครื่องมือที่ใช้วัดได้จริงมีแค่ `size`):
 
 | การตั้งค่า | ขนาด `.text` (ไบต์) | ขนาดไฟล์ ELF ทั้งไฟล์ (ไบต์) |
 |---|---|---|
-| `dev` profile (ไม่ optimize เลย, debug build) | (วัดจริง) | (วัดจริง) |
-| `release` เริ่มต้น (`opt-level = 3`) | (วัดจริง) | (วัดจริง) |
-| `release` + `opt-level = "z"` | (วัดจริง) | (วัดจริง) |
-| `release` + `opt-level = "z"` + `lto = true` + `codegen-units = 1` | (วัดจริง) | (วัดจริง) |
-| ทั้งหมดข้างบน + `panic = "abort"` + `strip = true` | (วัดจริง) | (วัดจริง) |
+| `dev` profile (ไม่ optimize เลย, debug build) | 2,620 | 828,160 |
+| `release` เริ่มต้น (`opt-level = 3`, ไม่มี `lto`/`panic="abort"`/`strip`) | 1,200 | 70,148 |
+| `release` + `opt-level = "z"` | 1,208 | 70,244 |
+| `release` + `opt-level = "z"` + `lto = true` + `codegen-units = 1` | 1,208 | 68,932 |
+| ทั้งหมดข้างบน + `panic = "abort"` + `strip = true` | 1,208 | 67,488 |
 
-เครื่องมือที่ใช้วัด: `size` (จาก GNU Binutils, มีอยู่ในสภาพแวดล้อมเขียนบทนี้แน่นอน) อ่านขนาดของแต่ละ section
-(`.text` คือโค้ดจริงที่รัน, `.data`/`.bss` คือตัวแปร global ที่มีค่าเริ่มต้น/ไม่มีค่าเริ่มต้น) จาก object
-file ที่ compile ได้ — คำสั่งที่ใช้คือ `size target/thumbv7em-none-eabihf/release/<binary>` ถ้ามี `cargo-
-bloat` ติดตั้งอยู่ในสภาพแวดล้อมด้วย จะใช้เสริมเพื่อดูว่าฟังก์ชันไหนกิน Flash มากที่สุด (มีประโยชน์มากตอน
-ต้อง optimize โปรเจกต์จริงที่ใหญ่กว่าตัวอย่างในบทนี้มาก)
+**ต้องอธิบายตัวเลขเหล่านี้อย่างซื่อตรงเพราะมันขัดกับสัญชาตญาณเล็กน้อย**: `opt-level = "z"` ให้ `.text` **ใหญ่
+กว่า** `opt-level = 3` เล็กน้อย (1,208 เทียบกับ 1,200 ไบต์) ทั้งที่ `"z"` ควรจะ "เล็กกว่าเสมอ" ตามที่มักเข้าใจ
+กัน — เหตุผลคือตัวอย่าง blink ในบทนี้**เล็กมากจนเกือบทั้งหมดของ `.text` คือ startup code ตายตัวของ
+`cortex-m-rt`/`panic-halt`** (ไม่ใช่โค้ด logic ของเราเองที่มีพื้นที่ให้ optimizer เลือก trade-off ระหว่างขนาด
+กับความเร็วได้มากนัก) heuristic ของ `opt-level = "z"` บางครั้งเลือกวิธีสร้างโค้ดที่ "เล็กในภาพกว้าง" แต่ไม่
+ได้ชนะทุกฟังก์ชันเดี่ยว ๆ เสมอไป — **ความต่างที่ชัดเจนและสม่ำเสมอที่สุดในตารางนี้คือขนาดไฟล์ ELB ทั้งไฟล์**
+(ไม่ใช่ `.text` เดี่ยว ๆ ): จาก `dev` (828,160 ไบต์ เต็มไปด้วย debug info) เหลือแค่ราว 8.5% ของขนาดเดิมทันทีที่
+สลับไป `release` เปล่า ๆ (70,148 ไบต์) และลดต่อไปอีกได้ถึง 67,488 ไบต์ (ลดลงจาก `release` เริ่มต้นอีก ~3.8%)
+เมื่อเพิ่ม `lto`/`codegen-units=1`/`panic="abort"`/`strip` ครบชุด — **`strip = true` คือตัวที่มีผลชัดเจนที่สุด
+ต่อขนาดไฟล์ ELF โดยรวมในตัวอย่างเล็กขนาดนี้** เพราะมันตัด debug symbol table ทิ้งทั้งหมด (ซึ่งไม่กระทบขนาด
+`.text` ที่ flash ลงชิปจริงเลย — debug symbol ไม่ได้ถูก flash ไปด้วย แต่กระทบขนาดไฟล์ ELF ที่เก็บไว้บนเครื่อง
+development)
+
+ข้อสรุปที่ซื่อตรงที่สุดจากตัวเลขจริงชุดนี้คือ: **สำหรับโปรแกรมเล็กขนาด "blink" เดียว ผลของ `opt-level`/`lto`
+ต่อขนาด `.text` มีจำกัดมาก เพราะพื้นที่ส่วนใหญ่คือ runtime scaffolding ที่ optimize ไปได้ไม่มากอยู่แล้ว** —
+ผลของ flag เหล่านี้จะ**เด่นชัดขึ้นมากในโปรแกรมจริงที่มีโค้ด logic จำนวนมาก** (หลายพันบรรทัดขึ้นไป, ใช้ generic/
+trait object จำนวนมาก) ซึ่งตรงกับที่ตัวอย่าง `embassy-demo` ในหัวข้อ 102.10 แสดงให้เห็นแล้ว: `.text` ของมัน
+(18,716 ไบต์) มีพื้นที่ให้ optimizer ทำงานมากกว่าตัวอย่าง blink เปล่า ๆ มาก เพราะมีโค้ดของ executor/HAL/driver
+จำนวนมากกว่าเดิมหลายเท่า — บทเรียนสำคัญคือ**อย่าคาดเดาผลของการตั้งค่า optimization จากทฤษฎีอย่างเดียว ต้องวัด
+จริงกับโปรแกรมจริงของตัวเองเสมอ** (หลักการเดียวกับที่ Part 54/56 ปลูกฝังไว้ตลอดเรื่องประสิทธิภาพ)
 
 ### 102.12 ตำแหน่งของบทนี้ในเส้นทางเรียนรู้ และแหล่งข้อมูลสำหรับไปต่อ
 
@@ -968,11 +1330,8 @@ handler อยู่ที่ไหนจนกว่าจะถึงขั้
 error: `#[panic_handler]` function required, but not found
 ```
 
-หรือในบางกรณี (เมื่อไม่มี handler แต่ยัง link เข้ากับ crate อื่นที่ประกาศ panic handler ไว้ซ้ำสองที่):
-
-```
-error: found duplicate lang item `panic_impl`
-```
+(error นี้คัดลอกมาจากการรัน `cargo build --target thumbv7em-none-eabihf` จริงในสภาพแวดล้อมเขียนบทนี้ กับ
+โปรเจกต์ที่มี `#[entry] fn main()` ครบถ้วนทุกอย่างแต่ไม่มี panic handler ใด ๆ เลย)
 
 วิธีแก้: เพิ่ม `use panic_halt as _;` (หรือ crate panic handler อื่นที่เลือกใช้) ไว้ที่ระดับบนสุดของ crate
 เสมอ — สังเกตว่าใช้ `as _` เพราะเราไม่ได้เรียกใช้อะไรจาก crate นี้ตรง ๆ ในโค้ด (มันแค่ต้องถูก link เข้ามาเพื่อ
@@ -983,14 +1342,21 @@ error: found duplicate lang item `panic_impl`
 ### 2. ใช้ `Vec`/`String` โดยไม่เพิ่ม `extern crate alloc` และไม่มี global allocator
 
 มือใหม่ที่คุ้นกับ `Vec`/`String` มาตลอดหลักสูตร (Part 13-14) มักเขียนโค้ด `#[no_std]` ที่ใช้ `Vec<T>` ตรง ๆ
-โดยไม่รู้ว่าต้องเปิดใช้งาน `alloc` crate เองก่อน (ตามที่ Part 56 หัวข้อ 56.7.1 อธิบายไว้) จะได้ error:
+โดยไม่รู้ว่าต้องเปิดใช้งาน `alloc` crate เองก่อน (ตามที่ Part 56 หัวข้อ 56.7.1 อธิบายไว้) จะได้ error จริง
+(คัดลอกจากการรันในสภาพแวดล้อมเขียนบทนี้):
 
 ```
-error[E0433]: failed to resolve: use of undeclared crate or module `alloc`
+error[E0433]: cannot find module or crate `alloc` in this scope
+ --> src/main.rs:4:5
+  |
+4 | use alloc::vec::Vec;
+  |     ^^^^^ use of unresolved module or unlinked crate `alloc`
+  |
+  = help: add `extern crate alloc` to use the `alloc` crate
 ```
 
 หรือถ้าเพิ่ม `extern crate alloc;` แล้วแต่ยังไม่มี `#[global_allocator]` ประกาศไว้ในโปรแกรมสุดท้าย จะได้
-error ตอน link:
+error ตอน link แบบนี้แทน (คัดลอกจากการรันจริงเช่นกัน):
 
 ```
 error: no global memory allocator found but one is required; link to std or add
@@ -1004,12 +1370,40 @@ error: no global memory allocator found but one is required; link to std or add
 ### 3. เขียน register access แบบไม่ volatile แล้วโค้ดถูก compiler ตัดทิ้ง
 
 ตามที่อธิบายไว้เต็มรูปแบบในหัวข้อ 102.5.1: การเขียน `*ptr = value;` ตรง ๆ (ไม่ผ่าน `write_volatile`) กับ
-memory-mapped register **compile ผ่านเสมอโดยไม่มี warning หรือ error ใด ๆ เลย** — นี่คือกับดักที่อันตราย
-ที่สุดในบทนี้เพราะ**ไม่มีสัญญาณเตือนใด ๆ ตอน compile** อาการที่พบคือ hardware "ไม่ตอบสนอง" หรือ "ตอบสนองแค่
-บางครั้ง" ทั้งที่โค้ด logic ดูถูกต้องทุกอย่าง — วิธีป้องกันคือ**สร้างวินัยเขียนโค้ด**ให้เข้าถึง memory-mapped
-register ผ่าน `write_volatile`/`read_volatile` เสมอไม่มีข้อยกเว้น หรือดีกว่านั้นคือ**ใช้ PAC/HAL crate**
-(หัวข้อ 102.5.2) ที่ implement การเข้าถึงแบบ volatile ให้ถูกต้องไว้เรียบร้อยแล้ว แทนการเขียน raw pointer เอง
-ทุกจุด
+memory-mapped register **compile ผ่านเสมอโดยไม่มี warning หรือ error ใด ๆ เลย ถ้าอยู่ใน `unsafe` block แล้ว**
+— นี่คือกับดักที่อันตรายที่สุดในบทนี้เพราะ**ไม่มีสัญญาณเตือนใด ๆ ตอน compile** อาการที่พบคือ hardware "ไม่
+ตอบสนอง" หรือ "ตอบสนองแค่บางครั้ง" ทั้งที่โค้ด logic ดูถูกต้องทุกอย่าง
+
+สิ่งที่ compiler **ฟ้องได้** (และเป็นกับดักที่พบบ่อยกว่าในทางปฏิบัติสำหรับมือใหม่) คือการลืม `unsafe` block
+เอง ไม่ว่าจะ dereference raw pointer ตรง ๆ หรือเรียก `write_volatile` — สอง error จริงที่คัดลอกจากการรันใน
+สภาพแวดล้อมเขียนบทนี้:
+
+```
+error[E0133]: dereference of raw pointer is unsafe and requires unsafe function or block
+  --> src/main.rs:10:5
+   |
+10 |     *odr = 1 << 5;
+   |     ^^^^ dereference of raw pointer
+   |
+   = note: raw pointers may be null, dangling or unaligned; they can violate aliasing rules and cause data races: all of these are undefined behavior
+```
+
+```
+error[E0133]: call to unsafe function `write_volatile` is unsafe and requires unsafe function or block
+  --> src/main.rs:11:5
+   |
+11 |     write_volatile(odr, 1 << 5);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ call to unsafe function
+   |
+   = note: consult the function's documentation for information on how to avoid undefined behavior
+```
+
+แต่**ทั้งสอง error นี้แค่ตรวจว่าใส่ `unsafe` ครบหรือไม่** — มันไม่มีทางตรวจได้ว่าข้างใน `unsafe` block นั้น
+คุณเลือกใช้ `write_volatile` (ถูกต้อง) หรือ dereference ตรง ๆ แบบไม่ volatile (ผิด แต่ compile ผ่าน) เพราะ
+ทั้งสองแบบล้วนเป็น "การ dereference raw pointer ที่ถูกกำกับด้วย `unsafe` แล้ว" ในสายตาของ compiler เหมือนกัน
+ทุกประการ — วิธีป้องกันคือ**สร้างวินัยเขียนโค้ด**ให้เข้าถึง memory-mapped register ผ่าน `write_volatile`/
+`read_volatile` เสมอไม่มีข้อยกเว้น หรือดีกว่านั้นคือ**ใช้ PAC/HAL crate** (หัวข้อ 102.5.2) ที่ implement การ
+เข้าถึงแบบ volatile ให้ถูกต้องไว้เรียบร้อยแล้ว แทนการเขียน raw pointer เองทุกจุด
 
 ### 4. เลือก target ผิดกับ CPU core จริง
 

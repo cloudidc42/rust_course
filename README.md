@@ -24,8 +24,8 @@
 | 2 | ระดับกลาง (Intermediate) | 21–40 | ✅ เสร็จสมบูรณ์ |
 | 3 | ระดับสูง (Advanced) | 41–60 | ✅ เสร็จสมบูรณ์ |
 | 4 | การพัฒนาเว็บแอปพลิเคชัน (Web Development) | 61–85 | ✅ เสร็จสมบูรณ์ |
-| 5 | Full-Stack และ WebAssembly | 86–95 | 🚧 กำลังเขียน |
-| 6 | Production, DevOps และระดับมืออาชีพ | 96–110 | ⏳ รอดำเนินการ |
+| 5 | Full-Stack และ WebAssembly | 86–95 | ✅ เสร็จสมบูรณ์ |
+| 6 | Production, DevOps และระดับมืออาชีพ | 96–110 | 🚧 กำลังเขียน |
 
 ดูรายชื่อ Part ทั้งหมดแบบละเอียดที่ [`docs/curriculum.md`](./docs/curriculum.md)
 

@@ -149,7 +149,7 @@
 | 107 | Capstone: Building a Production-Grade CLI Tool | ⏳ |
 | 108 | Capstone: Building a Production-Grade Web Service | ⏳ |
 | 109 | Code Review, Refactoring และ Clean Code ใน Rust | ⏳ |
-| 110 | เตรียมตัวสัมภาษณ์งาน Rust Developer และแนวทางอาชีพ | ⏳ |
+| 110 | เตรียมตัวสัมภาษณ์งาน Rust Developer และแนวทางอาชีพ | ✅ |
 
 ---
 

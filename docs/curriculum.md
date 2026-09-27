@@ -96,10 +96,10 @@
 | 64 | Axum: State Management และ Extractors | ✅ |
 | 65 | Axum: Middleware (tower, tower-http) | ✅ |
 | 66 | Axum: Error Handling แบบมืออาชีพ | ⏳ |
-| 67 | แนะนำ Actix-web Framework | ⏳ |
-| 68 | Actix-web: Routing, Handlers, Middleware | ⏳ |
-| 69 | เปรียบเทียบ Axum vs Actix-web vs Rocket | ⏳ |
-| 70 | Database: เชื่อมต่อ PostgreSQL ด้วย SQLx | ⏳ |
+| 67 | แนะนำ Actix-web Framework | ✅ |
+| 68 | Actix-web: Routing, Handlers, Middleware | ✅ |
+| 69 | เปรียบเทียบ Axum vs Actix-web vs Rocket | ✅ |
+| 70 | Database: เชื่อมต่อ PostgreSQL ด้วย SQLx | ✅ |
 | 71 | SQLx: Queries, Migrations, Connection Pooling | ⏳ |
 | 72 | Diesel ORM เบื้องต้น | ⏳ |
 | 73 | SeaORM เบื้องต้น | ⏳ |

@@ -77,15 +77,23 @@ DOM มาคั่นกลาง และมี server function ที่เ�
 **Dioxus (อ่านว่า "ได-ออก-ซัส" ตามชื่อที่ทีมผู้พัฒนาออกเสียง) คือ Rust GUI framework ที่แยกส่วน "ตรรกะของ UI
 component" ออกจาก "ตัวเรนเดอร์จริง" (renderer)** ตัว component ที่คุณเขียนด้วย `rsx!` จะถูกแปลงเป็น
 `VirtualDom` ภายใน `dioxus-core` ซึ่งเป็น data structure ที่ไม่ผูกติดกับแพลตฟอร์มไหนเลย จากนั้นค่อยส่งต่อให้
-"renderer" ตัวหนึ่งใน 4-5 ตัวที่ Dioxus มีให้เลือก:
+"renderer" ตัวหนึ่งที่ Dioxus มีให้เลือก (ตรวจสอบตรงจาก `Cargo.toml` ของ crate `dioxus` 0.7.10 เองว่า
+feature ไหน map ไปที่ dependency ตัวไหนจริง):
 
-| Renderer crate | ใช้ทำอะไร | ทำงานอย่างไร |
-|---|---|---|
-| `dioxus-web` | เป้าหมายเว็บ (browser) | คอมไพล์เป็น `wasm32-unknown-unknown` แล้วใช้ `web-sys`/`wasm-bindgen` แก้ไข DOM จริงในเบราว์เซอร์ (เหมือนที่ Part 86-87 สอน) |
-| `dioxus-desktop` | เป้าหมาย desktop (Windows/macOS/Linux) | คอมไพล์เป็น native binary ของแต่ละ OS แล้วเปิดหน้าต่าง native ที่ฝัง **native webview ของระบบปฏิบัติการ** ไว้ข้างใน ผ่าน crate `wry` (จัดการ webview) และ `tao` (จัดการหน้าต่าง/event loop) |
-| `dioxus-mobile` | เป้าหมายมือถือ (iOS/Android) | ใช้แนวทางเดียวกับ desktop คือฝัง native webview ของระบบมือถือ (WKWebView บน iOS, Android System WebView บน Android) ผ่าน `wry`/`tao` เวอร์ชันที่รองรับมือถือ |
-| `dioxus-liveview` | Server-rendered UI ที่ diff ส่งผ่าน WebSocket | render บน server แล้วส่ง patch ไปอัปเดต DOM ฝั่ง client ผ่าน WebSocket (คล้ายแนวคิด Phoenix LiveView) |
-| `dioxus-ssr` | Server-side rendering ธรรมดา | render เป็น HTML string ตรง ๆ บน server (ใช้ต่อใน Part 91) |
+| Feature ที่ enable | Renderer crate ที่ถูกดึงมาจริง | ใช้ทำอะไร | ทำงานอย่างไร |
+|---|---|---|---|
+| `web` | `dioxus-web` | เป้าหมายเว็บ (browser) | คอมไพล์เป็น `wasm32-unknown-unknown` แล้วใช้ `web-sys`/`wasm-bindgen` แก้ไข DOM จริงในเบราว์เซอร์ (เหมือนที่ Part 86-87 สอน) |
+| `desktop` | `dioxus-desktop` | เป้าหมาย desktop (Windows/macOS/Linux) | คอมไพล์เป็น native binary ของแต่ละ OS แล้วเปิดหน้าต่าง native ที่ฝัง **native webview ของระบบปฏิบัติการ** ไว้ข้างใน ผ่าน crate `wry` (จัดการ webview) และ `tao` (จัดการหน้าต่าง/event loop) |
+| `mobile` | **`dioxus-desktop` ตัวเดียวกัน** (ตรวจสอบจาก `Cargo.toml` ของ `dioxus` 0.7.10 แล้วว่า `mobile = ["dep:dioxus-desktop"]` — ไม่มี crate `dioxus-mobile` แยกต่างหากเลย) | เป้าหมายมือถือ (iOS/Android) | ใช้ renderer เดียวกับ desktop เป๊ะ ๆ เพียงแต่คอมไพล์ข้าม (cross-compile) ไปยัง target triple ของมือถือ แล้วฝัง native webview ของระบบมือถือ (WKWebView บน iOS, Android System WebView บน Android ผ่าน `wry`/`tao`) แทนที่จะเป็นของ desktop OS |
+| `liveview` | `dioxus-liveview` | Server-rendered UI ที่ diff ส่งผ่าน WebSocket | render บน server แล้วส่ง patch ไปอัปเดต DOM ฝั่ง client ผ่าน WebSocket (คล้ายแนวคิด Phoenix LiveView) |
+| `ssr` | `dioxus-ssr` | Server-side rendering ธรรมดา | render เป็น HTML string ตรง ๆ บน server (ใช้ต่อใน Part 91) |
+
+จุดที่น่าสนใจและคนมักเข้าใจผิดคือ **"มือถือ" กับ "desktop" ของ Dioxus ไม่ใช่ renderer คนละตัวกัน** มันคือ
+`dioxus-desktop` crate เดียวกันเป๊ะ ที่ถูก cross-compile ไปยัง target ของมือถือแทน — เหตุผลที่ทำได้เพราะ
+`wry`/`tao` ทั้งคู่รองรับการคอมไพล์ข้าม target มือถือมาแต่ต้น (เป็น crate จากทีม Tauri ที่ต้อง support ทั้ง
+desktop และ mobile shell อยู่แล้ว) นี่คือหลักฐานเชิงสถาปัตยกรรมอีกชิ้นที่สนับสนุนสโลแกน "write once, render
+anywhere" ของ Dioxus ได้ตรงกว่าที่คิด — ไม่ใช่แค่ตัว component logic ที่แชร์กัน แต่ตัว **renderer** เองก็
+แชร์โค้ดข้าม desktop/mobile เกือบทั้งหมดด้วย
 
 จุดสำคัญคือ **ทุก renderer เหล่านี้กิน `VirtualDom` ตัวเดียวกัน** — โค้ด component ของคุณไม่ต้องรู้ด้วยซ้ำว่า
 กำลังถูกเรนเดอร์ด้วยตัวไหน สิ่งที่ component ต้องทำมีแค่ return ค่า `Element` ออกมาจาก `rsx!` เท่านั้น ส่วน
@@ -1184,10 +1192,11 @@ iOS ต้องมี Xcode และ macOS toolchain เท่านั้น 
 ไม่ใช่ macOS** จึงไม่สามารถ build หรือรันเป้าหมายมือถือได้เลยแม้แต่ขั้นตอน compile ต่างจาก desktop ที่อย่าง
 น้อยยัง compile ได้จริงในหัวข้อ 90.6
 
-สิ่งที่พอพูดได้อย่างมีเหตุผลรองรับ (จากการอ่าน dependency graph และ feature flag ของ `dioxus` crate เอง ที่
-เห็นชัดว่ามี feature `mobile` แยกต่างหากที่ดึง crate สำหรับ mobile renderer เข้ามาจริง ไม่ใช่ placeholder
-เปล่า ๆ) คือ **สถาปัตยกรรมเดียวกับ desktop (VirtualDom ตัวเดียวกัน + webview เป็น renderer) ถูกนำมาใช้กับ
-มือถือด้วยแนวคิดเดียวกัน** แต่ **ระดับความพร้อมใช้งานจริงในโปรดักชัน (production-readiness) ของ mobile
+สิ่งที่พอพูดได้อย่างมีเหตุผลรองรับ (จากการอ่าน `Cargo.toml` ของ `dioxus` crate เองตามที่ตรวจสอบไว้ในหัวข้อ
+90.1 ว่า `mobile = ["dep:dioxus-desktop"]` คือ feature `mobile` ดึง crate `dioxus-desktop` ตัวเดียวกับ
+desktop มาใช้ตรง ๆ ไม่ใช่ crate แยกต่างหาก) คือ **สถาปัตยกรรมเดียวกับ desktop (VirtualDom ตัวเดียวกัน +
+`wry`/`tao` เป็น renderer) ถูกนำมาใช้กับมือถือด้วยแนวคิดเดียวกันเป๊ะ ต่างกันแค่ target triple ที่คอมไพล์ข้าม
+ไปเท่านั้น** แต่ **ระดับความพร้อมใช้งานจริงในโปรดักชัน (production-readiness) ของ mobile
 target ยังมีรายงานจากชุมชนว่าห่างจากเว็บและ desktop อยู่พอสมควร** — ทั้งเรื่อง build time ที่ยาวกว่ามาก
 เรื่อง native plugin/permission ของมือถือที่ยังต้องเขียนเพิ่มเอง และเรื่องความเสถียรของ hot-reload บน
 emulator ที่ทีมพัฒนาเองก็ยังระบุว่าเป็นพื้นที่ที่พัฒนาต่อเนื่องอยู่ ถ้าจะนำไปใช้งานจริง **ควรทดสอบบน
@@ -1421,8 +1430,9 @@ shows.write().push(new_show); // ไม่มี guard ค้างแล้ว 
 บทนี้พาไปรู้จัก Dioxus ในฐานะเฟรมเวิร์ก Rust GUI ตัวที่สามของโมดูลนี้ ต่อจาก Yew (Part 88) และ Leptos
 (Part 89) โดยเน้นย้ำตลอดทั้งบทว่าจุดขายที่แท้จริงของมันไม่ใช่การเป็น "Yew ที่ดีกว่า" หรือ "Leptos ที่
 ง่ายกว่า" แต่คือ**ความสามารถในการข้ามแพลตฟอร์ม** — เขียน component logic และ markup ด้วย `rsx!` ครั้งเดียว
-แล้วสลับ renderer ไปเป็นเว็บ (`dioxus-web`), desktop (`dioxus-desktop` ผ่าน `wry`/`tao`), หรือมือถือ
-(`dioxus-mobile`) ได้จริง — พร้อมพิสูจน์ให้เห็นตรง ๆ ด้วยการ build และรันจริงว่าโค้ด component เดียวกัน
+แล้วสลับ renderer ไปเป็นเว็บ (`dioxus-web`) หรือ desktop/มือถือ (`dioxus-desktop` ตัวเดียวกัน ผ่าน
+`wry`/`tao` เพียงแต่คอมไพล์ข้าม target ต่างกัน) ได้จริง — พร้อมพิสูจน์ให้เห็นตรง ๆ ด้วยการ build และรันจริงว่า
+โค้ด component เดียวกัน
 คอมไพล์ผ่านทั้งเป้าหมายเว็บและ desktop โดยไม่ต้องแก้แม้แต่บรรทัดเดียว ขณะเดียวกันก็ซื่อสัตย์กับข้อจำกัดจริง
 ของสภาพแวดล้อม sandbox headless ที่ใช้เขียนบทนี้: ตรวจสอบเป้าหมายเว็บได้ครบทั้ง build และ interaction จริง
 ผ่าน headless Chromium แต่ตรวจสอบเป้าหมาย desktop ได้แค่ระดับ build/compile เท่านั้น เพราะไม่มี display

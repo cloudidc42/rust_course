@@ -458,6 +458,35 @@ innerHTML` ได้ผลลัพธ์จริง:
 จะเห็นว่าข้อมูลจาก `Book` struct (title, author, สถานะ) ไหลจาก component แม่ (`App`) ไปยัง component ลูก
 (`BookCard`) ผ่าน props แล้ว render ออกมาเป็น DOM จริงครบทุกจุด — ตรงกับที่คาดไว้จากโค้ดทุกประการ
 
+#### `AttrValue` แทน `String`: ทำไม official example ของ Yew ชอบใช้ type นี้
+
+props ที่ผ่านมาในบทนี้ใช้ `String` ตรง ๆ (เช่น `book.title: String`) ซึ่งใช้งานได้ถูกต้องเสมอ แต่ตัวอย่างทางการ
+ของ Yew เองมักใช้ **`yew::AttrValue`** แทน `String` สำหรับ prop ที่เป็นข้อความ:
+
+```rust
+use yew::prelude::*;
+
+#[derive(Properties, PartialEq)]
+struct GreetingProps {
+    name: AttrValue, // ไม่ใช่ String
+}
+
+#[function_component(Greeting)]
+fn greeting(props: &GreetingProps) -> Html {
+    html! { <p>{ format!("สวัสดี, {}!", props.name) }</p> }
+}
+```
+
+เหตุผลคือ `AttrValue` เป็น type ที่ภายในเป็น `Rc<str>` (หรือ `&'static str` สำหรับ string literal) ไม่ใช่
+`String` ที่เป็นเจ้าของ heap allocation ของตัวเอง — ทวนจาก Part 27-28 เรื่อง `Rc`: การ **clone** `AttrValue`
+คือแค่ increment reference count (ราคาคงที่ O(1)) ในขณะที่ clone `String` ต้อง copy ข้อมูล heap ทั้งก้อน (ราคา
+เป็นสัดส่วนกับความยาว string) เนื่องจาก Yew clone ค่าของ props **ทุกครั้งที่ re-render** เพื่อเก็บไว้เทียบรอบ
+ถัดไป (ทวนจากหัวข้อ 88.3) prop ที่เป็น `String` ยาว ๆ ที่ re-render ถี่ ๆ จะมี cost การ clone ที่สะสมได้จริง —
+`AttrValue` แก้ปัญหานี้ให้ ณ ระดับ type โดยตรง `<Greeting name="Rustacean" />` ใน `html!` ยังเขียนเหมือนเดิม
+ทุกประการ (string literal แปลงเป็น `AttrValue` ให้อัตโนมัติผ่าน `impl From<&'static str> for AttrValue`) —
+บทนี้เลือกใช้ `String` ตลอดเพื่อให้โฟกัสที่แนวคิดหลักของ component/props ก่อน แต่ในโปรเจกต์จริงที่ใส่ใจ
+performance ควรพิจารณาเปลี่ยน field ที่เป็นข้อความล้วนในโครงสร้าง props ให้เป็น `AttrValue`
+
 #### macro `classes!`: กำหนด CSS class แบบมีเงื่อนไข
 
 ตัวอย่าง `BookCard` ข้างบนใช้ `class="book-card"` เป็น string literal ตรง ๆ ซึ่งพอสำหรับ class คงที่ แต่บ่อยครั้ง
@@ -1722,7 +1751,8 @@ wrap ด้วย `{ }` เสมอ (เช่น `{ "สวัสดี " }`) 
 
 1. **(ง่าย)** สร้าง component `Greeting` ที่รับ prop `name: String` แล้วแสดงข้อความ `"สวัสดี, {name}!"` พร้อม
    ปุ่มที่กดแล้วเปลี่ยนสีตัวอักษรสลับกันระหว่างสีปกติกับสีแดง (ใช้ `use_state<bool>` เก็บสถานะว่ากำลัง
-   highlight อยู่หรือไม่ แล้วใช้ `classes!` หรือ inline style ตาม state นั้น)
+   highlight อยู่หรือไม่ แล้วใช้ `classes!` หรือ inline style ตาม state นั้น — ทำนองเดียวกับตัวอย่าง `Greeting`
+   ในหัวข้อ 88.3 แต่เปลี่ยนจาก toggle class เป็น toggle สีตัวอักษรแทน)
    *Hint*: ใช้ `use_state(|| false)` แล้ว toggle ด้วย `state.set(!*state)` ใน `onclick`
 
 2. **(กลาง)** ขยายตัวอย่าง `BookSearch` จากหัวข้อ 88.5 ให้เพิ่ม dropdown สำหรับเลือกเรียงลำดับผลลัพธ์ (เรียง

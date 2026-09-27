@@ -1217,7 +1217,7 @@ collector หมด)" — การ throw error ที่ชัดเจนค�
 
 #### 87.10.2 `mem::forget` และอันตรายของการ "ลืม" ที่ตั้งใจ
 
-ทวนจาก Part 15 (Drop trait) / Part 41: `std::mem::forget(value)` คือฟังก์ชันที่ทำให้ Rust **ไม่เรียก
+ทวนจาก Part 6 (ownership, move, drop) / Part 41: `std::mem::forget(value)` คือฟังก์ชันที่ทำให้ Rust **ไม่เรียก
 destructor ของ `value` เลย** โดยเจตนา — มันไม่ได้ปล่อยคืนความจำ แต่บอก compiler ว่า "ห้ามรัน `Drop::drop`
 สำหรับตัวนี้" เท่านั้น (ตัวความจำเองยังไม่ได้ปล่อยคืน ถ้าไม่มีใครปล่อยคืนอีก มันจะรั่วตลอดไปจนกว่าโปรแกรมจบ)
 
@@ -1315,7 +1315,7 @@ impl TodoList {
 ส่วนที่ซับซ้อนที่สุดของ capstone นี้คือการทำให้**ปุ่มกดจริงในหน้าเว็บ**เรียกกลับเข้าไปแก้ไข `TodoList`
 ได้ — ปัญหาคือ event listener ของ JavaScript ต้องมี callback ที่ **มีชีวิตอยู่ตราบเท่าที่ event ยังผูก
 อยู่กับ element** (อาจนานเท่ากับที่หน้าเว็บเปิดอยู่) แต่ `TodoList` ที่สร้างขึ้นในฟังก์ชัน setup ปกติจะถูก
-drop ทันทีที่ฟังก์ชันนั้น return — ต้องใช้ `Rc<RefCell<TodoList>>` (ทวนจาก Part 20-21: shared mutable
+drop ทันทีที่ฟังก์ชันนั้น return — ต้องใช้ `Rc<RefCell<TodoList>>` (ทวนจาก Part 28: shared mutable
 ownership) เพื่อให้ closure "share" การเข้าถึง `TodoList` ได้อย่างปลอดภัยตาม borrow rule ของ Rust
 (ตรวจสอบตอน runtime ผ่าน `RefCell` เพราะ closure อาจถูกเรียกได้หลายครั้งไม่รู้ล่วงหน้า จึงใช้ static
 borrow checking ตอน compile ไม่ได้):
@@ -1343,7 +1343,7 @@ pub fn setup_todo_app(input_id: &str, button_id: &str, list_id: &str) -> Result<
 
     // Rc<RefCell<TodoList>>: หลาย closure (ในแอปจริงอาจมีปุ่มลบ, ปุ่มแก้ไข ฯลฯ) share
     // การเข้าถึง TodoList ตัวเดียวกันได้ผ่าน Rc (reference counting) และแก้ไขได้ผ่าน
-    // RefCell (borrow checking แบบ runtime) — ตรงกับที่ Part 20-21 สอนไว้ทุกประการ
+    // RefCell (borrow checking แบบ runtime) — ตรงกับที่ Part 28 สอนไว้ทุกประการ
     let state = Rc::new(RefCell::new(TodoList::new()));
 
     let closure = Closure::wrap(Box::new(move |_event: Event| {
@@ -1707,6 +1707,37 @@ TypeError: expected a bigint argument, found number
 ทีละ 1 ในระบบที่ไม่มีทางมีข้อมูลเกินสิบล้านล้านแถว) การเปลี่ยนไปใช้ `u32`/`i32` แทนตั้งแต่ต้นก็เป็นตัวเลือก
 ที่ทำให้ฝั่ง JavaScript เขียนโค้ดง่ายขึ้นมากโดยไม่ต้องยุ่งกับ `BigInt` เลย
 
+### กับดักที่ 7: version ของ crate `wasm-bindgen` กับ `wasm-bindgen-cli` ไม่ตรงกัน
+
+`wasm-bindgen` เป็น crate ที่**ต้องมีสองส่วนที่ version ตรงกันเป๊ะเสมอ**: crate ที่อยู่ใน `Cargo.toml`
+(ที่ macro `#[wasm_bindgen]` ใช้ตอน compile ฝัง metadata ลงใน custom section ตามหัวข้อ 87.2) กับ
+โปรแกรม command-line `wasm-bindgen-cli` (ที่อ่าน metadata นั้นออกมาสร้าง glue code) — `wasm-pack` จัดการ
+เรื่องนี้ให้อัตโนมัติเสมอ (ติดตั้ง CLI เวอร์ชันที่ตรงกับ crate ให้เอง ตามที่เห็นในข้อความ `[INFO]: Installing
+wasm-bindgen...` ตลอดบทนี้) แต่ถ้าใครติดตั้ง `wasm-bindgen-cli` เองแยกต่างหากด้วย `cargo install
+wasm-bindgen-cli` โดยไม่ระบุ `--version` ให้ตรงกับที่ใช้ใน `Cargo.toml` (หรือลืมอัปเดต CLI ตอน bump
+version ของ crate) จะเจอ error จริงตอนรัน `wasm-bindgen` มือ (หรือผ่าน build script ที่เรียกมันตรง ๆ):
+
+```
+error:
+
+it looks like the Rust project used to create this Wasm file was linked against
+version of wasm-bindgen that uses a different bindgen format than this binary:
+
+  rust Wasm file schema version: 0.2.129
+     this binary schema version: 0.2.100
+
+Currently the bindgen format is unstable enough that these two schema versions
+must exactly match. You can accomplish this by either updating this binary or
+the wasm-bindgen dependency in the Rust project.
+```
+
+(ตัวเลขเวอร์ชันจริงในตัวอย่างนี้มาจากการจงใจติดตั้ง `wasm-bindgen-cli` เวอร์ชัน `0.2.100` แยกไว้คนละที่
+แล้วรันกับไฟล์ `.wasm` ที่ compile จาก crate ที่ใช้ `wasm-bindgen = "0.2.129"` — ตัวเลขจริงของคุณจะขึ้นกับ
+เวอร์ชันที่ระบุใน `Cargo.toml` ของโปรเจกต์คุณเอง) error message บอกวิธีแก้ไว้ตรง ๆ อยู่แล้วสองทาง: อัปเดต
+`wasm-bindgen` ใน `Cargo.toml` ให้ตรงกับ CLI หรืออัปเดต CLI ให้ตรงกับ crate — **แนวทางที่ปลอดภัยที่สุดคือ
+ใช้ `wasm-pack` เป็นตัวกลางเสมอแทนการเรียก `wasm-bindgen` CLI ตรง ๆ ด้วยมือ** เพราะมันจัดการ sync สอง
+เวอร์ชันนี้ให้อัตโนมัติทุกครั้งที่ build ไม่ต้องมาคอยเช็คเองเลย
+
 ## แบบฝึกหัด (Exercises)
 
 1. **โจทย์ระดับง่าย**: เขียนฟังก์ชัน `#[wasm_bindgen] pub fn to_uppercase(s: &str) -> String` ที่แปลง
@@ -1755,6 +1786,15 @@ Part ถัดไปจะนำพื้นฐานทั้งหมดนี
 แนวคิด component + virtual DOM แบบ React แต่เขียนด้วย Rust ล้วน ๆ ซ่อนการเรียก `web-sys`/`wasm-bindgen`
 มือ ๆ แบบที่เขียนในบทนี้ไว้เบื้องหลัง component macro ที่สะดวกกว่ามาก — แต่ทุกอย่างที่ Yew ทำข้างใน
 ก็ยังคงเป็นหลักการเดียวกับที่เรียนในบทนี้ทั้งหมด
+
+มองภาพรวมทั้งบทให้ชัดอีกครั้งหนึ่ง: ไม่ว่า framework ระดับสูงจะซ่อนอะไรไว้เบื้องหลังมากแค่ไหนในบทถัดไป ๆ
+(Yew, Leptos, Dioxus) สุดท้ายทุก call ที่ข้ามจาก JavaScript เข้าไปยัง Rust หรือจาก Rust ออกไปยัง JavaScript
+ก็ยังต้องผ่านกลไกเดียวกันที่เรียนในบทนี้เสมอ — proc macro ที่ฝัง metadata ลงใน custom section ของไฟล์
+`.wasm`, glue code ที่ `wasm-bindgen-cli` generate ให้จาก metadata นั้น, การ marshal ข้อมูลข้าม linear
+memory กับ JS heap ที่มีต้นทุนจริงเสมอ, และกฎเรื่อง lifecycle ของ handle ที่ต้องเข้าใจก่อนจะไว้ใจ framework
+ให้จัดการแทนได้อย่างมั่นใจ — เมื่อเจอบั๊กแปลก ๆ ในโปรเจกต์ Yew/Leptos จริงที่ error message ดูเหมือนมาจาก
+"ที่ไหนก็ไม่รู้" ความเข้าใจพื้นฐานจากบทนี้คือสิ่งที่จะช่วยไล่ตามไปจนถึงต้นตอได้จริง ไม่ใช่แค่เดาหรือ copy
+วิธีแก้จาก Stack Overflow โดยไม่เข้าใจว่าเกิดอะไรขึ้น
 
 ---
 

@@ -860,6 +860,8 @@ fn BookingButton(event_id: i64) -> impl IntoView {
 ตัวอย่างการเปลี่ยน `get_event` (ซึ่งเป็น query ล้วน ๆ ไม่มี side effect) ให้ใช้ `GetUrl` แทน `PostUrl` — ทำให้เรียกด้วย HTTP GET ธรรมดาได้ (เปิดทางให้ browser cache ผลลัพธ์ได้ถ้าต้องการ ต่างจาก `book_seat` ที่เป็น mutation และควรคงเป็น `POST` เพราะมี side effect เสมอ ตามหลักการ HTTP method semantics ที่ Part 61 สอนไว้):
 
 ```rust
+use leptos::server_fn::codec::GetUrl;
+
 #[server(endpoint = "get_event", input = GetUrl)]
 pub async fn get_event(event_id: i64) -> Result<EventSeats, ServerFnError> {
     // เนื้อโค้ดเหมือนเดิมทุกอย่าง — เปลี่ยนแค่ transport
@@ -867,10 +869,11 @@ pub async fn get_event(event_id: i64) -> Result<EventSeats, ServerFnError> {
 }
 ```
 
-หลังเปลี่ยน `curl` ที่ใช้ทดสอบก็ต้องเปลี่ยนตามให้ตรง (`GET` พร้อม query string แทน `POST` พร้อม body):
+หลังเปลี่ยน `curl` ที่ใช้ทดสอบก็ต้องเปลี่ยนตามให้ตรง (`GET` พร้อม query string แทน `POST` พร้อม body) — ทดสอบจริงแล้ว compile ผ่านและได้ผลลัพธ์ถูกต้องเหมือนเดิม:
 
 ```bash
-curl -sS "http://127.0.0.1:3009/api/get_event?event_id=1"
+$ curl -sS "http://127.0.0.1:3009/api/get_event?event_id=1"
+{"id":1,"name":"Rust Conf 2026","total_seats":100,"booked_seats":42}
 ```
 
 #### ทดสอบ server function โดยตรงแบบ unit test — ไม่ต้องมี HTTP request จริง
@@ -938,6 +941,26 @@ Hydration คือกลไกที่ทำให้ SSR ต่างจา�
 จุดสำคัญที่สุดคือ **hydration ไม่ทำลาย DOM เดิมแล้วสร้างใหม่** — มันแค่ "จับมือ" กับ DOM ที่มีอยู่แล้วให้กลายเป็น interactive ผู้ใช้จะไม่เห็นการกระพริบหรือ flash ของหน้าจอเลยระหว่างขั้นตอนนี้ (ต่างจากแนวทางเดิมสมัย React ก่อนมี hydration ที่บางครั้ง client ต้อง re-render ทับ HTML ที่ server ส่งมาทั้งหมด) นี่คือเหตุผลที่คำว่า "hydrate" (เติมน้ำ) ถูกเลือกใช้เป็นคำเปรียบเปรย: HTML ที่ server ส่งมาเป็นเหมือน "โครงแห้ง" (มีรูปร่างครบแต่ยังไม่มีชีวิต ยังกดปุ่มไม่ได้) ส่วน WASM ที่มา hydrate คือการ "เติมชีวิต" ให้โครงเดิมโดยไม่เปลี่ยนรูปร่างมันเลย
 
 การที่ SSR + hydration ทำงานร่วมกันได้ดีเป็นเรื่องที่ต้องอาศัยความร่วมมือจาก fine-grained reactivity โดยตรง — เพราะ Leptos รู้อยู่แล้วตั้งแต่ compile time ว่า signal ตัวไหนผูกกับ node ไหน (ตามที่พิสูจน์ในหัวข้อ 89.1) การ hydrate จึงทำได้แค่ "หา node ที่ตรงตำแหน่งแล้วผูก effect เข้าไป" โดยไม่ต้องสร้าง representation ใหม่มาเทียบกับ DOM เดิมก่อน (ถ้าใช้โมเดล Virtual DOM การ hydrate มักซับซ้อนกว่านี้ เพราะต้องมีขั้นตอน reconcile ต้นไม้ virtual กับ DOM จริงที่ server ส่งมา)
+
+#### ข้อแลกเปลี่ยนของแต่ละ mode
+
+ไม่มี rendering mode ใด "ดีที่สุด" แบบสัมบูรณ์ — แต่ละแบบแลกอะไรกับอะไรต่างกัน:
+
+| มิติ | CSR | SSR + Hydration | Islands (89.9) |
+|---|---|---|---|
+| เวลาที่ผู้ใช้เห็นเนื้อหาแรก | ช้าสุด (ต้องรอ WASM ทั้งก้อนโหลด+รันก่อน) | เร็ว (HTML มาตั้งแต่ response แรก) | เร็ว (เหมือน SSR) |
+| ขนาด WASM ที่ต้องส่งไปเบราว์เซอร์ | ทั้งแอป | ทั้งแอป (เพื่อ hydrate ทุกส่วน) | เฉพาะส่วนที่เป็น `#[island]` เท่านั้น |
+| ความซับซ้อนของ infrastructure | ต่ำสุด (เป็น static file ก็พอ, ขึ้น CDN ได้ตรง ๆ) | สูงขึ้น (ต้องมี server รันตลอดเวลา, มี state ฝั่ง server) | สูงสุด (ต้องแยก build pipeline ระหว่าง server component กับ island) |
+| SEO / เนื้อหาที่ crawler เห็น | แย่ (เห็นหน้าเปล่าถ้า crawler ไม่รัน JS) | ดี (เห็น HTML เต็ม ๆ ทันที) | ดี (เหมือน SSR) |
+| เหมาะกับ | Dashboard/แอปภายในที่ผู้ใช้ login แล้วเท่านั้น ไม่สน SEO | เว็บสาธารณะทั่วไปที่สน perceived performance และ SEO | เว็บที่มีเนื้อหา static เยอะมากแต่มี interactive widget เป็นจุด ๆ (เช่น blog ที่มีปุ่มโหวตไม่กี่ปุ่ม) |
+
+#### Streaming SSR: ไม่ต้องรอ resource ที่ช้าที่สุดก่อนส่ง HTML
+
+รายละเอียดอีกชั้นที่ควรรู้ (ยังอยู่ในระดับแนวคิด — จะลงลึกกว่านี้ใน Part 91): SSR ของ Leptos ไม่ได้ "render ทั้งหน้าเป็น string เดียวเสร็จสมบูรณ์ก่อนค่อยส่ง" เสมอไป ตรวจสอบจากซอร์สโค้ดจริงของ `leptos_axum-0.8.10/src/lib.rs` พบว่าฟังก์ชันหลักที่ใช้ (ซึ่งเป็นสิ่งที่ `.leptos_routes_with_context(...)` เรียกใช้ภายใน) มีชื่อว่า `render_app_to_stream` และคำอธิบายจริงจากซอร์สโค้ดบอกไว้ตรง ๆ ว่า:
+
+> "Returns an Axum Handler that listens for a `GET` request and tries to route it... serving an **HTML stream** of your application."
+
+และ return type ภายในคือ `PinnedHtmlStream` (`Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>`) — เป็น **stream ของ byte chunk** ไม่ใช่ `String` ก้อนเดียว หมายความว่าถ้าหน้าเว็บของคุณมีส่วนที่ต้องรอ async resource ช้า (เช่น query ฐานข้อมูลที่ใช้เวลานาน ห่อด้วย `<Suspense>`) ส่วนอื่นของหน้าที่พร้อมแล้วสามารถถูกส่งไปให้ browser ได้ก่อน โดยที่ส่วนที่ยังรออยู่จะตามมาทีหลังในสตรีมเดียวกัน — ผู้ใช้เห็น "โครงหน้าเว็บ" เร็วขึ้นแทนที่จะต้องรอ resource ที่ช้าที่สุดของทั้งหน้าก่อนเห็นอะไรเลยแม้แต่ส่วนที่ไม่เกี่ยวข้อง นี่คือเหตุผลที่ SSR ของ Leptos ไม่ใช่แค่ "print HTML string แล้วส่ง" แบบง่าย ๆ
 
 หัวข้อนี้เป็นการแนะนำแนวคิดเท่านั้น — **Part 91 จะลงรายละเอียด SSR แบบข้าม framework** (เปรียบเทียบวิธีที่ Yew, Leptos และ Dioxus (Part 90) ทำ SSR/hydration ต่างกันอย่างไร รวมถึงเรื่อง streaming SSR และ progressive hydration ที่ซับซ้อนกว่านี้) บทนี้ให้แค่ภาพรวมพอที่จะเข้าใจตัวอย่าง Axum integration ในหัวขัดต่อไป
 
@@ -1062,6 +1085,38 @@ $ curl -sS http://127.0.0.1:3009/healthz
 ```
 
 นี่คือข้อเท็จจริงที่ควรค่าแก่การเน้นย้ำ: การเรียนรู้ Axum อย่างละเอียดตั้งแต่ Module 4 **ไม่ใช่ความรู้ที่ต้องทิ้งไปตอนมาใช้ Leptos SSR** — `.route()`, middleware ผ่าน `tower`, `State<T>` extractor, และทุกอย่างที่ Part 62-66 สอนยังใช้งานได้ตรง ๆ ในโปรเจกต์เดียวกับ Leptos ส่วนที่ Leptos เพิ่มเข้ามาคือ `.leptos_routes_with_context(...)` ซึ่งก็เป็นแค่ method หนึ่งบน `Router` ที่ผูก route เพิ่มเข้าไป ไม่ต่างจาก `.route(...)` ธรรมดาในหลักการ
+
+#### สิ่งที่ `leptos_axum` ผูก context ให้อัตโนมัติเสมอ
+
+`.leptos_routes_with_context(...)` ที่ใช้ในตัวอย่างข้างบนนี้ generate handler ที่ภายในเรียก `render_app_to_stream` (ฟังก์ชันที่พูดถึงในหัวข้อ 89.7 เรื่อง streaming) — และตรวจสอบจากซอร์สโค้ดจริงของ `leptos_axum-0.8.10` (doc comment ของฟังก์ชันนั้น) พบว่านอกจาก `PgPool` ที่เราฉีดเข้าไปเองผ่าน closure ที่สอง Leptos **ผูก context บางอย่างให้อัตโนมัติเสมอ** ทุก request โดยไม่ต้องทำอะไรเพิ่ม:
+
+> "This function always provides context values including the following types: `Parts`, `ResponseOptions`, `ServerMetaContext`"
+
+หมายความว่าใน server function หรือ component ฝั่ง server คุณเรียก `use_context::<leptos_axum::ResponseOptions>()` ได้เลยเพื่อควบคุม HTTP response ที่กำลังจะส่งกลับ (เช่นตั้ง status code หรือ header เพิ่มเติมจากภายใน server function — มีประโยชน์มากตอนต้องคืน 404/403 จาก logic ข้างในแทนการ throw error ธรรมดา) โดยไม่ต้องผ่าน `provide_context` มือเองเหมือนที่ทำกับ `PgPool` — Leptos จัดการ "สิ่งที่เกี่ยวกับ HTTP request/response ดิบ ๆ" ให้ทุกครั้งอัตโนมัติ ส่วน "สิ่งที่เป็นของแอปคุณเอง" (เช่น connection pool, config เฉพาะแอป) คุณต้อง `provide_context` เพิ่มเองผ่าน closure ที่สองของ `.leptos_routes_with_context(...)` ตามที่ทำในตัวอย่างข้างบน
+
+#### อ้างอิง field สำคัญของ `LeptosOptions`
+
+ตัวอย่างข้างบนสร้าง `LeptosOptions` ด้วย `.builder()` ตรง ๆ (สร้างมือ ไม่ผ่าน `cargo-leptos`) เพื่อความง่ายในการควบคุม แต่ในโปรเจกต์จริงที่ใช้ `cargo leptos new` scaffolding ค่าพวกนี้จะมาจาก section `[package.metadata.leptos]` ใน `Cargo.toml` แทน (`leptos_config` ออกแบบให้ deserialize จาก TOML section นี้โดยตรง ตามที่ระบุไว้ในซอร์สโค้ดจริงว่า struct นี้ "shares keys with cargo-leptos, to allow for easy interoperability") ตรวจสอบจากซอร์สโค้ดจริงของ `leptos_config-0.8.10/src/lib.rs` field ที่ใช้บ่อยที่สุดมีดังนี้ (ชื่อ key ใน TOML เป็น kebab-case ตามที่ `#[serde(rename_all = "kebab-case")]` กำหนด):
+
+| Field (Rust) | Key ใน `Cargo.toml` | ความหมาย |
+|---|---|---|
+| `output_name` | `output-name` | ชื่อไฟล์ WASM/JS ที่ `wasm-bindgen` จะสร้าง (ต้องตรงกับชื่อที่ build จริงสร้างออกมา) |
+| `site_root` | `site-root` | โฟลเดอร์ปลายทางที่ `cargo-leptos` เอาไฟล์ที่ build เสร็จแล้วไปวาง (default `.`) |
+| `site_pkg_dir` | `site-pkg-dir` | โฟลเดอร์ย่อยที่เก็บไฟล์ WASM/JS จาก `wasm-bindgen` (default `pkg` — ตรงกับ convention ที่เห็นตอนใช้ `wasm-pack` เองในหัวข้อ 89.2) |
+| `site_addr` | `site-addr` | address:port ที่ server ฟัง (default `127.0.0.1:3000`) |
+| `env` | `env` | แยก dev/production (มีผลต่อ error message ที่ leptos แสดงเวลา panic — production ซ่อนรายละเอียดที่ dev โชว์เต็ม) |
+| `reload_port` | `reload-port` | port ของ WebSocket ที่ใช้ทำ hot-reload ตอน `cargo leptos watch` (คนละกลไกกับ reactive signal — นี่คือ dev-tool ล้วน ๆ) |
+
+ตัวอย่าง `[package.metadata.leptos]` ใน `Cargo.toml` ของโปรเจกต์ที่ผ่าน `cargo leptos new` (โครงสร้างตามที่ field ข้างบนกำหนด):
+
+```toml
+[package.metadata.leptos]
+output-name = "my_leptos_app"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+site-addr = "127.0.0.1:3000"
+env = "DEV"
+```
 
 ### 89.9 Islands Architecture: Partial Hydration (แนวคิดขั้นสูง)
 

@@ -12,6 +12,7 @@
 - นิยาม model struct สองแบบที่ Diesel แยกกันตามธรรมเนียม: `#[derive(Queryable, Selectable)]` สำหรับอ่านข้อมูล และ `#[derive(Insertable)]` สำหรับ struct "ข้อมูลใหม่" ที่ใช้ตอน insert (พร้อมอธิบายว่าทำไมต้องแยกกัน ไม่ใช้ struct เดียวกันทั้งอ่านทั้งเขียน)
 - เขียน CRUD เต็มรูปแบบผ่าน Diesel DSL บนโดเมนห้องสมุด (`books`/`shelves`) ที่ต่อยอดจาก Part 70-71: `.filter()`, `.select()`, `.order()`, `.limit()`, `.values()`, `.set()` พร้อมดู SQL จริงที่ Diesel generate ให้ผ่าน `diesel::debug_query!`
 - เขียน join แบบ one-to-many จริงด้วย `.inner_join()` และเข้าใจ error ตอน compile ที่เกิดขึ้นเมื่อ query DSL ผิด (คอลัมน์ไม่มีจริง หรือ type ไม่ตรง) รวมถึงตัดสินใจได้ว่าโปรเจกต์แบบไหนควรเลือก Diesel เทียบกับ SQLx (และ SeaORM ใน Part 73)
+- ใช้ **transaction** (`conn.transaction(|conn| { ... })`) จัดการ operation ที่ต้อง atomic หลายคำสั่งพร้อมกัน (ยืมหนังสือ: ลดจำนวนที่เหลือ + สร้าง record การยืม) พร้อมพิสูจน์ rollback จริง และรู้จัก batch insert/upsert (`.on_conflict().do_update()`), `#[derive(AsChangeset)]` สำหรับ partial update, `.into_boxed()` สำหรับ dynamic query, และ `diesel::sql_query` เป็น escape valve สุดท้ายเมื่อ DSL ไม่พอ
 
 ## ความรู้ที่ต้องมีมาก่อน
 
@@ -21,6 +22,8 @@
 - **Part 9 (Struct) และ Part 57 (Serde)**: บทนี้ยังใช้ struct เป็นตัวแทนแถวข้อมูลเหมือน Part 70 แต่ derive macro ของ Diesel เป็นระบบแยกจาก serde โดยสิ้นเชิง (แม้บาง project จะ derive ทั้งสองชุดพร้อมกันบน struct เดียว) — บทนี้จะชี้ให้เห็นตรงจุดที่ derive สองระบบนี้ทำงานคู่กันได้อย่างไรและต่างกันอย่างไรในระดับ mechanism
 - **Part 39 (Arc/Mutex) และ Part 64 (Axum State)**: connection pool ของ Diesel (ผ่าน `r2d2`) เก็บใน `AppState` ด้วย pattern เดียวกับที่ Part 64 สอน (`State<T>` extractor) เพียงแต่ pool ประเภทนี้เป็น**pool ของ synchronous connection** ที่ต้องส่งผ่าน `spawn_blocking` เข้าไปใช้ ต่างจาก `PgPool` ของ SQLx ที่ใช้ตรงในบล็อก async ได้เลย
 - **Part 12, 30-31 (Error Handling)**: การแปลง `diesel::result::Error` ให้เป็น error type ของแอปเองใช้หลักการ `impl From<...>` เดียวกับที่ Part 66 สอนไว้กับ `sqlx::Error`
+- **Part 32-33 (Testing: Unit และ Integration)**: หัวข้อเรื่อง `conn.begin_test_transaction()` ในบทนี้ต่อยอดแนวคิด integration test ที่ไม่ทิ้งข้อมูลตกค้างข้าม test ที่ Part 32-33 ปูพื้นไว้ (คู่กับที่ Part 70 สอน `#[sqlx::test]` ไว้แล้วในฝั่ง SQLx)
+- **Part 20-21 (Trait Objects และ Enum)**: หัวข้อเรื่อง Boxed Queries (`.into_boxed()`) ใช้หลักการ dynamic dispatch ผ่าน trait object ที่ Part 20-21 สอนไว้ (`Box<dyn Trait>`) มาช่วยให้ query ที่มีเงื่อนไข filter ไม่แน่นอนมี type เดียวกันตลอด
 - **พื้นฐาน SQL**: เหมือน Part 70 บทนี้ไม่สอน SQL ตั้งแต่ต้น สมมติว่าคุณอ่าน `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`JOIN` พื้นฐานออกแล้ว
 
 ## หมายเหตุเรื่องการตรวจสอบเนื้อหา (สำคัญ — อ่านก่อนเริ่ม)
@@ -100,6 +103,8 @@ let results: Vec<Book> = books
 | Error ที่เจอเมื่อเขียนผิด | Error จาก macro บอกตรง ๆ ว่า SQL/DB ไม่ตรง (มักอ่านง่าย) | Error จาก trait bound ของ Rust (มักยาวและซับซ้อนกว่า เพราะเป็น generic trait error ธรรมดา — หัวข้อ 72.9) |
 
 **ข้อสังเกตเชิงลึกที่มักถูกมองข้าม**: หลายคนเข้าใจผิดว่า Diesel "ปลอดภัยกว่า" SQLx เพราะไม่มี SQL string เลย แต่จริง ๆ แล้วทั้งสองฝั่งให้การันตีคนละแบบ — SQLx การันตีว่า **SQL string ที่คุณเขียนตรงกับ schema จริง ณ เวลาที่ build** (เชื่อมกับฐานข้อมูลจริงหรือ cache ที่มาจากฐานข้อมูลจริง) ส่วน Diesel การันตีว่า **โค้ด Rust ที่คุณเขียนตรงกับ `schema.rs` ที่มีอยู่ในโปรเจกต์** ซึ่งไฟล์นั้น**อาจไม่ตรงกับฐานข้อมูลจริง ณ ปัจจุบัน**ก็ได้ ถ้าใครลืมรัน `diesel print-schema` หลัง migration ใหม่ ๆ (Diesel compile ผ่านสนิท แต่พังตอน runtime จริงเมื่อ query ไปโดนคอลัมน์ที่ schema.rs จำผิด) — ทั้งสองแบบจึงมี "จุดอ่อนที่ผู้พัฒนาต้องรับผิดชอบเอง" คนละจุด ไม่มีฝั่งไหนสมบูรณ์แบบ 100%
+
+**ผลที่ตามมาต่อ compile time และ workflow ของทีม**: เพราะกลไกตรวจสอบต่างกันโดยพื้นฐาน ผลกระทบต่อ **ความเร็วในการ compile ในสถานการณ์ต่าง ๆ** ก็ต่างกันไปด้วย — โปรเจกต์ SQLx ที่ตั้งค่า `SQLX_OFFLINE=true` (Part 70) จะ compile ได้เร็วและสม่ำเสมอโดยไม่ต้องพึ่งความเร็ว/สถานะของฐานข้อมูลจริงเลย (อ่านจาก `.sqlx/` cache ไฟล์ธรรมดา) เช่นเดียวกับ Diesel ที่ compile จาก `schema.rs` (ไฟล์ Rust ธรรมดา) โดยไม่ต้องต่อฐานข้อมูลเลยเหมือนกัน — ทั้งสองจึงเท่าเทียมกันในโหมด "offline" นี้ ความต่างที่ชัดกว่าคือตอน **ตั้งโปรเจกต์ใหม่ครั้งแรก**: SQLx (โหมด default ที่ไม่ใช้ offline) ต้องมีฐานข้อมูลเชื่อมต่อได้ทุกครั้งที่ `cargo build` ตั้งแต่บรรทัดแรก ส่วน Diesel ต้องมีฐานข้อมูลแค่ตอน**รัน `diesel print-schema` เพียงครั้งเดียว** หลังจากนั้น compile ได้โดยไม่พึ่งฐานข้อมูลอีกเลยจนกว่า schema จะเปลี่ยน — ข้อแลกเปลี่ยนคือ **ต้องจำรัน `diesel print-schema` ใหม่เอง** ทุกครั้งที่ schema เปลี่ยน (ตามที่อธิบายไว้ข้างบน) ซึ่ง SQLx โหมด non-offline ไม่มีปัญหานี้เลยเพราะ macro คุยกับฐานข้อมูลจริงให้อัตโนมัติทุกครั้ง
 
 ### 72.2 Diesel เป็น Synchronous by Default: เหตุผลและผลกระทบใน Axum
 
@@ -447,6 +452,19 @@ file = "src/schema.rs"
 
 การตั้งค่านี้ทำให้ `diesel migration run` **เขียน `schema.rs` ให้อัตโนมัติทุกครั้งที่รัน migration สำเร็จ** — ลดความเสี่ยงเรื่อง schema.rs ไม่ sync ไปได้มาก (แต่ก็ยังไม่ 100% ถ้ามีใครแก้ฐานข้อมูลตรง ๆ ผ่าน `psql` โดยไม่ผ่าน migration ระบบนี้ก็จะไม่รู้เช่นกัน)
 
+#### Flag ที่มีประโยชน์ของ `diesel print-schema` และ `diesel database`
+
+`diesel print-schema --help` (ทดสอบจริง — คัดลอกผลลัพธ์จาก CLI ที่ติดตั้งไว้) แสดง flag ที่มีประโยชน์มากในระบบจริงหลายตัวที่ควรรู้จัก แม้บทนี้จะไม่ได้ใช้ทุกตัวกับโดเมนเล็ก ๆ ของบทนี้:
+
+- **`--except-tables <regex>`** — ยกเว้นบางตารางไม่ให้ปรากฏใน `schema.rs` ที่ generate ออกมา มีประโยชน์มากในฐานข้อมูลจริงที่มีตารางของระบบอื่นปนอยู่ (เช่นตารางของ message queue/job scheduler ที่ไม่ต้องการให้ Diesel DSL รู้จัก)
+- **`--locked-schema`** — ทำให้คำสั่งที่ปกติจะเขียน `schema.rs` ใหม่ (ผ่าน `print_schema.file` ใน `diesel.toml`) **error ทันทีถ้าผลลัพธ์จะต่างจากไฟล์ที่มีอยู่** แทนเขียนทับเงียบ ๆ — ตรงตามคำแนะนำในตัว help message เองว่า "recommended... when running migrations in CI or production" เพื่อป้องกันไม่ให้ CI pipeline แก้ไฟล์ `schema.rs` เองเงียบ ๆ โดยไม่มีใคร review การเปลี่ยนแปลงนั้นก่อน
+- **`--column-sorting <ordinal_position|name>`** — ควบคุมลำดับคอลัมน์ใน `table!` macro ที่ generate ให้ (ค่า default `ordinal_position` คือเรียงตามลำดับที่สร้างจริงในฐานข้อมูล) — ปกติไม่ต้องยุ่งกับ flag นี้ แต่ควรรู้ว่ามีอยู่ถ้าทีมต้องการความสม่ำเสมอที่ต่างออกไป (เช่นเรียงตามชื่อ คงที่ไม่ขึ้นกับลำดับ physical column)
+
+และคำสั่งกลุ่ม `diesel database` (`diesel db` เป็นชื่อย่อ) มีสองคำสั่งย่อยที่ควรรู้จักคู่กับ `diesel setup`:
+
+- **`diesel database setup`** — ทำแค่ส่วนสร้างฐานข้อมูล + รัน migration (เทียบเท่าที่ `diesel setup` ทำ แต่ `diesel setup` ทำงานเพิ่มอีกขั้น คือสร้างโฟลเดอร์ `migrations/` ให้ด้วยถ้ายังไม่มี)
+- **`diesel database reset`** — **`DROP` ฐานข้อมูลทั้งตัวทิ้ง แล้วสร้างใหม่ + รัน migration ทั้งหมดจากศูนย์** มีประโยชน์มากตอน dev ที่ schema เปลี่ยนบ่อยจนอยาก "เริ่มใหม่หมด" แต่ **ห้ามรันบน production เด็ดขาด** (ข้อมูลทั้งหมดหายจริง ไม่มีทางย้อนกลับ) เทียบเท่าหลักการเดียวกับที่ Part 70 เตือนไว้เรื่อง `sqlx migrate revert` บนฐานข้อมูลที่มีข้อมูลจริง
+
 ### 72.5 Models: `Queryable`/`Selectable` สำหรับอ่าน vs `Insertable` สำหรับเขียน
 
 #### struct สำหรับ**อ่าน**ข้อมูล: `#[derive(Queryable, Selectable)]`
@@ -623,6 +641,43 @@ RETURNING "books"."id", "books"."isbn", "books"."title", "books"."author",
 
 **จุดที่น่าสนใจ**: `available_copies.eq(available_copies - 1)` ไม่ได้ทำให้ Rust ไปคำนวณค่าตัวเลขก่อนแล้วส่งค่าคงที่ไป — มันคือการสร้าง **SQL expression** `"available_copies" - $1` ที่คำนวณจริง**ฝั่ง PostgreSQL** ตอน query รัน (เหมือนเขียน `SET available_copies = available_copies - 1` ตรง ๆ ใน SQL) นี่คือตัวอย่างที่ดีมากว่า DSL ของ Diesel ไม่ได้จำกัดคุณให้ทำงานแค่ "ส่งค่าคงที่ไปเทียบ" — มันให้สร้าง SQL expression ที่ซับซ้อนกว่านั้นได้ผ่าน operator overload บน column type เอง (`-`, `+`, `*` ถูก implement ไว้ให้ column ที่เป็นตัวเลขโดยตรง)
 
+#### `#[derive(AsChangeset)]`: UPDATE แบบ Partial (เหมาะกับ PATCH endpoint)
+
+ตัวอย่าง `.set(available_copies.eq(...))` ข้างบนอัปเดตแค่คอลัมน์เดียวที่รู้ล่วงหน้าแน่นอน — แต่ในสถานการณ์จริงแบบ **PATCH endpoint** (ผู้ใช้ส่ง JSON ที่มีแค่บาง field ที่ต้องการแก้ ไม่ใช่ทุก field) การเขียน `.set()` ทีละคอลัมน์แบบ hardcode ไม่พอ — Diesel มี `#[derive(AsChangeset)]` ที่ให้ struct หนึ่งตัวแทน "ชุดค่าที่จะ set" โดยอัตโนมัติ **ข้าม field ที่เป็น `None` ไปเลย** (ไม่ generate `SET` ให้คอลัมน์นั้นในคำสั่ง SQL แม้แต่นิดเดียว ไม่ใช่ set เป็น NULL):
+
+```rust
+#[derive(Debug, AsChangeset)]
+#[diesel(table_name = crate::schema::books)]
+struct BookPatch {
+    title: Option<String>,
+    author: Option<String>,
+    // คอลัมน์ nullable (published_year) ที่ต้องแยก "ไม่แก้เลย" ออกจาก "แก้เป็น NULL" ต้องใช้ Option<Option<T>>
+    published_year: Option<Option<i32>>,
+}
+
+fn patch_book(conn: &mut PgConnection, target_id: i64, patch: &BookPatch) -> QueryResult<Book> {
+    use crate::schema::books::dsl::{books, id};
+
+    diesel::update(books.filter(id.eq(target_id)))
+        .set(patch) // ส่ง &BookPatch เข้า .set() ตรง ๆ แทน .eq() ทีละคอลัมน์
+        .returning(Book::as_select())
+        .get_result(conn)
+}
+```
+
+**ทดสอบจริง** (เรียกด้วย `title: Some(...)`, `author: None`, `published_year: None`):
+
+```
+Generated SQL: UPDATE "books" SET "title" = $1 WHERE ("books"."id" = $2)
+RETURNING "books"."id", "books"."isbn", "books"."title", "books"."author",
+"books"."total_copies", "books"."available_copies", "books"."published_year",
+"books"."shelf_id", "books"."created_at" -- binds: ["Programming Rust (2nd Edition)", 1]
+
+after partial patch: Book { ..., title: "Programming Rust (2nd Edition)", author: "Jim Blandy", ... }
+```
+
+สังเกตว่า SQL ที่ได้มี `SET "title" = $1` **แค่คอลัมน์เดียว** — ไม่มี `author`/`published_year` ปรากฏใน `SET` เลย ต่อให้ `BookPatch` struct มี field เหล่านั้นอยู่ก็ตาม เพราะเป็น `None` ทั้งคู่ — ผลคือ `author`/`published_year` **ไม่ถูกแตะเลย** ยังคงเป็นค่าเดิม (`"Jim Blandy"`, `Some(2021)`) ตามที่คาด — เทียบกับ SQLx (Part 71) ที่ปกติต้องเขียน SQL แบบ dynamic ด้วย `QueryBuilder` เองเพื่อให้ได้พฤติกรรมเดียวกัน (สร้าง `SET` clause ทีละคอลัมน์ตามเงื่อนไข runtime) `AsChangeset` ของ Diesel ทำสิ่งนี้ให้อัตโนมัติเพียงแค่ derive บน struct ที่ทุก field เป็น `Option<T>` — เป็นอีกจุดที่ DSL ของ Diesel ได้เปรียบเรื่อง ergonomics สำหรับ pattern ที่พบบ่อยแบบนี้โดยเฉพาะ
+
 #### DELETE
 
 ```rust
@@ -711,7 +766,17 @@ available_copies: 7, ... }
 
 #### Error Handling: `diesel::result::Error` และการแปลงเป็น `AppError`
 
-จาก Part 66 คุณรู้แล้วว่าการแปลง error ของ database driver ให้เป็น error type ของแอปเอง (`AppError`) เป็นขั้นตอนที่จำเป็นเพื่อคืน HTTP status code ที่เหมาะสม — `diesel::result::Error` มี variant สำคัญที่ควรรู้จักคล้ายกับ `sqlx::Error` ใน Part 70:
+จาก Part 66 คุณรู้แล้วว่าการแปลง error ของ database driver ให้เป็น error type ของแอปเอง (`AppError`) เป็นขั้นตอนที่จำเป็นเพื่อคืน HTTP status code ที่เหมาะสม — `diesel::result::Error` มี variant สำคัญที่ควรรู้จักคล้ายกับ `sqlx::Error` ใน Part 70 ตามตารางเทียบนี้:
+
+| สถานการณ์ | `diesel::result::Error` (บทนี้) | `sqlx::Error` (Part 70) | HTTP status ที่ควรแปลงเป็น |
+|---|---|---|---|
+| ไม่พบแถวที่ query หา | `Error::NotFound` | `Error::RowNotFound` | 404 |
+| ละเมิด `UNIQUE` constraint | `Error::DatabaseError(DatabaseErrorKind::UniqueViolation, info)` | `Error::Database(e)` ที่ `e.is_unique_violation()` | 409 |
+| ละเมิด `FOREIGN KEY` constraint | `Error::DatabaseError(DatabaseErrorKind::ForeignKeyViolation, info)` | `Error::Database(e)` ที่ `e.is_foreign_key_violation()` | 409 |
+| ละเมิด `CHECK` constraint | `Error::DatabaseError(DatabaseErrorKind::CheckViolation, info)` | `Error::Database(e)` ที่ `e.is_check_violation()` | 400/409 |
+| Connection หลุด/timeout | `Error::DatabaseError(DatabaseErrorKind::UnableToSendCommand, ...)` หรือ error จาก `r2d2::Error` ตอน `.get()` | `Error::Io(...)`/`Error::PoolTimedOut` | 500/503 |
+
+สังเกตว่าโครงสร้างเทียบกันได้เกือบทุกจุด — ทั้งสอง driver ออกแบบ error type ตามปัญหาเดียวกันที่ PostgreSQL ส่งกลับมาจริง (SQLSTATE code มาตรฐานของ PostgreSQL เอง) เพียงแต่ห่อเป็น Rust enum คนละรูปแบบเท่านั้น ตัวอย่างการแปลง `AppError` ต่อไปนี้ครอบคลุมกรณีที่พบบ่อยที่สุดสองกรณีแรกของตาราง:
 
 ```rust
 use diesel::result::{DatabaseErrorKind, Error as DieselError};
@@ -794,6 +859,43 @@ fn count_books_per_shelf(conn: &mut PgConnection) -> QueryResult<Vec<ShelfBookCo
 ```
 
 **ข้อสังเกตสำคัญที่เชื่อมกลับไปหัวข้อ 72.1 โดยตรง**: `sql_query()` รับ `&str` เป็น SQL ดิบล้วน ๆ **เหมือน SQLx ทุกประการ** — จุดนี้คือที่ที่ Diesel "ยืม" แนวทางของ SQLx มาใช้ชั่วคราวเมื่อ DSL ไม่พอ แต่ต่างจาก SQLx ตรงที่**ไม่มีการตรวจสอบ SQL string นี้กับฐานข้อมูลจริงตอน compile เลย** (ไม่มี macro แบบ `query!` มาช่วย) — ความปลอดภัยที่ยังพอได้กลับมาคือแค่ระดับ **"ชนิดข้อมูลที่ struct ประกาศไว้ตรงกับที่ query คืนมาไหม"** ผ่าน `#[diesel(sql_type = ...)]` ที่ต้องระบุมือทุกคอลัมน์ (ตรวจแค่ตอน**รัน**ถ้าระบุ SQL type ผิด ไม่ใช่ตอน compile) — เท่ากับว่า `sql_query` สูญเสียจุดขายหลักของ Diesel (compile-time DSL safety) ไปเกือบทั้งหมด แลกกับความยืดหยุ่นของ SQL ดิบ **ควรใช้เป็นทางเลือกสุดท้าย** เฉพาะกรณีที่ DSL ปกติเขียนไม่ได้จริง ๆ เท่านั้น (คล้ายกับที่หัวข้อ 70.4 ของ Part 70 แนะนำเรื่อง `sqlx::Row`/`.try_get()` แบบ dynamic — เป็น pattern เดียวกันในทั้งสอง ecosystem: มี "ทางลัดที่สูญเสีย safety" ไว้เผื่อสถานการณ์ที่ abstraction หลักไม่พอ)
+
+#### Boxed Queries: สร้าง Query แบบ Dynamic โดยไม่ทิ้ง Type-Safety
+
+Part 71 สอนไว้ว่า SQLx มี `QueryBuilder` สำหรับสร้าง SQL แบบ dynamic อย่างปลอดภัย (เช่น endpoint ค้นหาที่มีเงื่อนไข filter หลายตัวแบบ optional — ผู้ใช้จะส่ง filter ไหนมาก็ได้ ไม่แน่นอนว่าจะมีกี่เงื่อนไข) Diesel มีปัญหาแบบเดียวกันแต่แก้ด้วยวิธีที่ต่างออกไป เพราะ **query DSL แต่ละแบบมี type ที่ต่างกันจริง ๆ** ในระดับ Rust type system (การ `.filter()` เพิ่มแต่ละครั้งเปลี่ยน type ของ query object ไปเรื่อย ๆ ตามจำนวน/ชนิดของเงื่อนไขที่ผูกเข้าไป) ทำให้เขียนฟังก์ชันที่คืนค่า query object แบบเงื่อนไขไม่แน่นอนตรง ๆ ไม่ได้ (compiler ต้องรู้ type ที่แน่นอนล่วงหน้าเสมอ) — ทางแก้คือ **`.into_boxed()`** ที่แปลง query ให้เป็น type เดียวกันเสมอ (`BoxedSelectStatement<...>`) ไม่ว่าจะต่อ `.filter()` กี่ครั้งก็ตาม:
+
+```rust
+fn search_books_dynamic(
+    conn: &mut PgConnection,
+    title_query: Option<&str>,
+    min_available: Option<i32>,
+) -> QueryResult<Vec<Book>> {
+    use crate::schema::books::dsl::*;
+
+    // .into_boxed() ทำให้ query มี type เดียวกันตลอด ไม่ว่าจะต่อ .filter() เพิ่มกี่ครั้งก็ตาม
+    let mut query = books.select(Book::as_select()).into_boxed();
+
+    if let Some(t) = title_query {
+        query = query.filter(title.like(format!("%{t}%")));
+    }
+    if let Some(min) = min_available {
+        query = query.filter(available_copies.ge(min));
+    }
+
+    query.load(conn)
+}
+```
+
+**ทดสอบจริง** — เรียกฟังก์ชันเดียวกันสามแบบ (มี/ไม่มี filter ต่างกัน):
+
+```
+=== search title=Programming, min=None -> 1 result(s) ===
+  Programming Rust
+=== search title=None, min=10 -> 0 result(s) ===
+=== search title=None, min=None -> 1 result(s) ===
+```
+
+**อธิบายกลไก**: `let mut query = ...into_boxed();` ทำให้ `query` เป็นตัวแปรที่**ประเภทเดียวกันเสมอ** (ข้างในถูก box/heap-allocate เป็น trait object ที่ implement `QueryFragment` — คล้ายหลักการ `Box<dyn Trait>` ที่ Part 20-21 สอนไว้เรื่อง trait object กับ dynamic dispatch) แม้เนื้อหาจริงของมันจะเปลี่ยนไปตามเงื่อนไข `if let` — โค้ดจึง reassign `query = query.filter(...)` ในแต่ละ `if` ได้ตรงไปตรงมาโดยไม่ชน type mismatch จาก compiler เลย เทียบกับ `QueryBuilder` ของ SQLx ที่ต่อ SQL string เป็นชิ้น ๆ ด้วยมือ (ยังคง compile-time safety ระดับ column/type ผ่าน `.push_bind()` แต่ไม่ได้ผ่าน trait bound ของ query DSL เต็มรูปแบบแบบนี้) — ข้อแลกเปลี่ยนของ `.into_boxed()` คือมี **overhead เล็กน้อยจาก heap allocation/dynamic dispatch** (แทน static dispatch ปกติของ DSL) ซึ่งในทางปฏิบัติเล็กน้อยมากเทียบกับ cost ของ network round-trip ไปฐานข้อมูล จึงไม่ใช่ปัญหาจริงในสถานการณ์ทั่วไป
 
 ### 72.7 Transaction: การันตี Atomicity ด้วย `conn.transaction()`
 
@@ -953,6 +1055,8 @@ The Rust Programming Language -> shelf A2
 
 **หมายเหตุเรื่อง `#[diesel(select_expression = ...)]`**: attribute นี้ (เพิ่มเข้ามาในเวอร์ชันใหม่ ๆ ของ `diesel_derives`) ให้ struct หนึ่งตัวรวมคอลัมน์จากหลายตารางเข้าด้วยกันตอนใช้ `Selectable`/`as_select()` กับ query ที่ join — ถ้าไม่ต้องการความสะดวกนี้ ใช้วิธีที่ตรงไปตรงกว่า (แบบในตัวอย่างฟังก์ชัน `list_books_with_shelf` ที่ `.select((books::title, shelves::code))` แล้ว `.load::<(String, String)>()` เป็น tuple ตรง ๆ) ก็ได้ผลลัพธ์เดียวกัน เพียงแต่ไม่ได้ struct ที่มีชื่อ field ให้อ่านง่าย
 
+**หมายเหตุประวัติศาสตร์ที่ควรรู้: `#[belongs_to]` เทียบกับ `joinable!`/`.inner_join()`**: ถ้าคุณเจอตัวอย่างโค้ด Diesel เก่า (Diesel 1.x หรือ tutorial ที่เขียนไว้นานแล้ว) อาจเห็น attribute `#[belongs_to(Shelf)]` บน struct `Book` ประกอบกับ trait `BelongsTo`/method `.load::<Book>(conn)?.grouped_by(&shelves)` เป็น pattern การประกาศความสัมพันธ์แบบเก่าที่ผูกไว้ที่ **struct model** ตรง ๆ — ใน Diesel 2.x (เวอร์ชันที่บทนี้ใช้) แนวทางหลักเปลี่ยนมาเป็น `diesel::joinable!` ที่ประกาศไว้ที่ **`schema.rs`** ระดับตาราง (ไม่ผูกกับ struct ใดเจาะจง) แล้วใช้ `.inner_join()`/`.left_join()` ตรง ๆ ตามที่บทนี้สอนไว้ทั้งหมด — เหตุผลของการเปลี่ยนแนวทางคือทำให้ **schema.rs ยังเป็น single source of truth เพียงจุดเดียว** สำหรับทั้งคอลัมน์และความสัมพันธ์ (ตามหลักการที่หัวข้อ 72.4 อธิบายไว้) ไม่ต้องกระจายการประกาศความสัมพันธ์ไปไว้ที่ struct หลายตัวทั่วโปรเจกต์เหมือนแนวทางเก่า — ถ้าเจอโค้ดเก่าที่ใช้ `#[belongs_to]` ควรเข้าใจว่าเป็นแนวทางที่ยังใช้งานได้ในบางเวอร์ชัน แต่ **ไม่ใช่แนวทางที่แนะนำสำหรับโปรเจกต์ใหม่** อีกต่อไป
+
 ### 72.9 Compile-Time Query Safety ในทางปฏิบัติ: อ่าน Error จริงของ Diesel
 
 นี่คือจุดขายหลักของ Diesel — มาดูว่าเมื่อเขียน query ผิดจริง ๆ จะเกิดอะไรขึ้น สองกรณีคลาสสิกที่สุด: **พิมพ์ชื่อคอลัมน์ผิด** และ **เทียบ type ผิด**
@@ -1086,6 +1190,8 @@ fn create_pool(database_url: &str) -> DbPool {
 
 **การขอ connection จาก pool** (`.get()`) ก็เป็น synchronous เช่นกัน — **บล็อก thread ปัจจุบันจนกว่าจะมี connection ว่างให้ยืม** (เทียบเท่า `pool.acquire().await` ของ SQLx ที่เป็น async รอ) — นี่คือเหตุผลอีกจุดที่การใช้ Diesel pool ต้องอยู่ใน `spawn_blocking` เสมอ ไม่ใช่แค่ตัว query เท่านั้นที่ block แต่ขั้นตอน "ขอ connection จาก pool" ก็ block ด้วย
 
+**ข้อสังเกตเรื่อง `PooledConnection<ConnectionManager<PgConnection>>` และ `Deref`**: ค่าที่ `.get()` คืนมาไม่ใช่ `PgConnection` ตรง ๆ แต่เป็น `PooledConnection<ConnectionManager<PgConnection>>` (wrapper ที่คืน connection กลับเข้า pool อัตโนมัติตอน `Drop` — หลักการเดียวกับ smart pointer ที่ Part 27 สอนไว้เรื่อง `Box<T>`) สิ่งที่ทำให้ใช้งานสะดวกจนไม่รู้สึกถึงความต่างนี้เลยคือ `PooledConnection` implement trait `Deref`/`DerefMut` ให้ deref ไปเป็น `PgConnection` ได้ตรง ๆ — ทุกฟังก์ชันที่บทนี้เขียนไว้ (เช่น `find_available_books(conn: &mut PgConnection, ...)`) จึงรับ `&mut *pooled_conn` ได้อัตโนมัติผ่าน **deref coercion** โดยไม่ต้อง unwrap/แปลง type เองเลยแม้แต่นิดเดียว (ทดสอบจริงแล้วในหัวข้อ 72.10 ตอนเขียน Axum handler — `pool.get()?` แล้วส่ง `&mut conn` เข้า `books.filter(...).load(&mut conn)` ตรง ๆ ได้เลยโดยไม่มี error เรื่อง type ไม่ตรงกัน)
+
 #### ตารางเปรียบเทียบ `r2d2` (Diesel) กับ pool ของ SQLx
 
 | ประเด็น | `r2d2` + `ConnectionManager` (Diesel) | `PgPoolOptions`/`PgPool` (SQLx, Part 70) |
@@ -1156,6 +1262,10 @@ fn app(pool: DbPool) -> Router {
 ผลลัพธ์นี้สอดคล้องกับสถานะข้อมูลจริงที่ทดสอบไว้ในหัวข้อ 72.6 ทุกจุด (หนังสือเล่มที่ `available_copies = 0` และเล่มที่ถูก `DELETE` ไปแล้วไม่ปรากฏใน response ตามที่คาด) — ยืนยันว่า pattern `spawn_blocking` + `r2d2` pool ทำงานได้จริงกับ Axum ตามที่บทนี้อธิบายไว้ทุกขั้นตอน ทั้ง `serde::Serialize` บน `Book` struct ก็ทำงานคู่กับ `Queryable`/`Selectable` ได้ปกติตามที่หัวข้อ 72.5 อธิบายไว้ (derive สองระบบบน struct เดียวกัน)
 
 **สิ่งที่ต้องสังเกต**: ทุก handler ที่ใช้ Diesel ในระบบจริงจะมีรูปแบบซ้ำ ๆ แบบนี้เสมอ (`spawn_blocking` + `pool.get()` + query + `.await` สองชั้น) ต่างจาก SQLx handler ของ Part 70 ที่เขียน `pool.fetch_all(...).await?` บรรทัดเดียวตรง ๆ ในบล็อก async ได้เลย — นี่คือ**ภาระทางไวยากรณ์ (syntactic overhead) ที่แลกมากับการได้ query DSL แบบ type-safe เต็มรูปแบบของ Diesel** ในโปรเจกต์จริงหลายทีมเขียน helper function กลาง ๆ ที่ห่อ pattern นี้ไว้ให้ (เช่น `async fn run_blocking<F, T>(pool: DbPool, f: F) -> Result<T, AppError> where F: FnOnce(&mut PgConnection) -> QueryResult<T> + Send + 'static, T: Send + 'static`) เพื่อไม่ต้องเขียน `spawn_blocking` boilerplate ซ้ำทุก handler
+
+#### `diesel-async` และ pool แบบ async: ภาพรวมระดับรู้จัก (ไม่ใช่ core ของบทนี้)
+
+หัวข้อ 72.2 กล่าวถึง `diesel-async` ไว้ในระดับรู้จัก — ในด้าน pooling ก็เช่นกัน: ถ้าเลือกใช้ `diesel-async` (ที่มี `AsyncPgConnection` เป็น connection แบบ async จริง ไม่ต้องผ่าน `spawn_blocking`) จะ**ใช้ `r2d2` ต่อไม่ได้** เพราะ `r2d2` ถูกออกแบบมาเป็น synchronous pool โดยเฉพาะ (`.get()` เป็น blocking call ตามที่อธิบายไว้ข้างบน) — ระบบที่เลือกทาง `diesel-async` เต็มรูปแบบมักหันไปใช้ pool แบบ async-native อย่าง `bb8` หรือ `deadpool` แทน (ทั้งสองเป็น general-purpose async connection pool คล้าย `r2d2` แต่ `.get()` คืน `Future` ที่ `.await` ได้ตรง ๆ) ผสานกับ adapter ที่ `diesel-async` เตรียมไว้ให้ (`diesel_async::pooled_connection::bb8`/`deadpool`) — เมื่อเลือกทางนี้เต็มรูปแบบ ทุกอย่างในระบบจะกลับไปเป็น async ทั้งชุดคล้าย SQLx (ไม่ต้อง `spawn_blocking` ที่ไหนอีกเลย) แต่แลกกับความ mature/adoption ที่น้อยกว่า core Diesel + `r2d2` ที่บทนี้ใช้สอน (ซึ่งผ่านการทดสอบจากโปรเจกต์จริงมานานกว่ามาก) — บทนี้เลือกสอน `r2d2` + `spawn_blocking` เป็นแนวทางหลักเพราะเป็นแนวทางที่ mature และพบเห็นบ่อยที่สุดในโปรเจกต์ Diesel จริงปัจจุบัน
 
 ### 72.11 เมื่อไหร่ควรเลือก Diesel เมื่อไหร่ควรเลือก SQLx
 

@@ -38,7 +38,8 @@
 - ทดสอบ `sqlx::postgres::PgListener` จริงแบบ end-to-end: เปิด listener, spawn task แยกส่ง `pg_notify()`, listener อีกฝั่งรับ payload จริงได้ถูกต้อง
 - ทดสอบ pattern "เปิด transaction ในทุก test แล้วไม่ commit เลย" จริงด้วย `#[tokio::test]` สองตัวที่รันพร้อมกัน พิสูจน์ว่าข้อมูลไม่หลุดออกจาก transaction ที่ไม่ commit
 - สร้าง Axum server จริง (`capstone_server.rs`) รวม pagination+filtering endpoint และ N+1-avoiding endpoint เข้าด้วยกัน แล้วยิง `curl` จริงหลายกรณี
-- จงใจทำผิดสองจุดเพื่อจับ error จริง: `ALTER TABLE ... ADD COLUMN ... NOT NULL` (ไม่มี `DEFAULT`) บนตารางที่มีข้อมูลอยู่แล้ว, และ `sqlx::query!` ที่อ้างถึงคอลัมน์ที่ยังไม่มี migration รองรับ
+- จงใจทำผิดสามจุดเพื่อจับ error จริง: ต่อ SQL string เองแทน `QueryBuilder` (`SqlSafeStr` error), `ALTER TABLE ... ADD COLUMN ... NOT NULL` (ไม่มี `DEFAULT`) บนตารางที่มีข้อมูลอยู่แล้ว, และ `sqlx::query!` ที่อ้างถึงคอลัมน์ที่ยังไม่มี migration รองรับ
+- ทดสอบเทคนิคเสริมเพิ่มเติมทั้งหมดด้วยการรันจริงเช่นกัน: `QueryBuilder::push_values` เทียบกับ `UNNEST` (bulk insert อีกแบบ), `INSERT ... ON CONFLICT DO UPDATE` (upsert), GIN index กับ containment operator `@>` บน JSONB (ตรวจสอบด้วย `EXPLAIN` จริงว่า planner เลือกใช้ index), `pool.size()`/`pool.num_idle()` สำหรับ monitor สถานะ pool, connection ของ `PgListener` ที่แยกจาก pool อย่างสิ้นเชิง (พิสูจน์ด้วย `pool.size()` ที่ไม่ขยับ), การตั้งค่าเสริมของ `PgListener` (`eager_reconnect`, `ignore_pool_close_event`, `unlisten`), N+1 แบบ aggregation (`COUNT` ทีละแถวเทียบกับ `GROUP BY`), keyset/cursor-based pagination เทียบกับ `OFFSET` ลึกบนข้อมูล 50,000 แถว, การค้นหาแบบ `OR`/`ILIKE` ข้ามหลายคอลัมน์ผ่าน `QueryBuilder`, การอ่านข้อมูลแบบ stream ด้วย `.fetch()`, error runtime จริงจาก `QueryBuilder` ที่มีชื่อ column ผิด, และ `#[sqlx::test]` กับฟังก์ชันที่ใช้ `QueryBuilder`
 
 เวอร์ชัน `sqlx`/`sqlx-cli` ที่ใช้คือ `0.9.0` เดียวกับ Part 70 (ตรวจสอบด้วย `cargo add`/`sqlx --version` ในเครื่องจริงตอนเขียนบทนี้) — เช่นเดียวกับที่ Part 70 เตือนไว้ ถ้า ecosystem อัปเดตเวอร์ชันใหม่กว่านี้ตอนคุณอ่าน ให้ยึดผลลัพธ์จาก `cargo add`/`cargo build` ในเครื่องคุณเป็นความจริงล่าสุดเสมอ
 
@@ -204,6 +205,47 @@ generated sql = SqlStr(ArcString("SELECT id FROM books WHERE 1 = 1 AND category 
 
 สังเกตว่า placeholder `$1`, `$2`, `$3` ถูกวางให้ถูกตำแหน่งอัตโนมัติตามลำดับที่เรียก `.push_bind()` — ไม่ต้องนับเลขเองแบบที่ต้องทำถ้าเขียน `$1, $2, ...` ด้วยมือ (ข้อดีเสริมของ `QueryBuilder` ที่ไม่ใช่แค่เรื่องความปลอดภัยอย่างเดียว)
 
+#### กรณีที่ซับซ้อนขึ้น: ค้นหาด้วย `OR` ข้ามหลายคอลัมน์
+
+สถานการณ์ที่พบบ่อยอีกแบบคือ endpoint ค้นหา (search box) ที่ผู้ใช้พิมพ์คำค้นคำเดียว แต่ต้องการให้ match ได้ทั้ง `title` **หรือ** `author` — ต่างจากตัวอย่างก่อนหน้าที่เชื่อมเงื่อนไขด้วย `AND` (กรองให้แคบลงเรื่อย ๆ) กรณีนี้ต้องเชื่อมด้วย `OR` (กว้างขึ้น — match แค่ตัวใดตัวหนึ่งก็พอ) และใช้ `ILIKE` (case-insensitive pattern match ของ PostgreSQL) แทน `=` เพื่อค้นแบบ "มีคำนี้อยู่บ้าง" ไม่ต้องตรงทั้งหมด:
+
+```rust
+async fn search_books(pool: &sqlx::PgPool, keyword: &str) -> Result<Vec<BookSearch>, sqlx::Error> {
+    // ประกอบ pattern "%keyword%" ได้ตามปกติ เพราะค่านี้จะถูกส่งผ่าน .push_bind() ไม่ใช่ .push()
+    // (ไม่ต่างจากการ .bind() ค่าปกติ — % ที่ประกอบเองไม่ใช่ SQL syntax จึงไม่มีความเสี่ยง injection)
+    let pattern = format!("%{keyword}%");
+
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT id, title, author FROM books WHERE (title ILIKE ",
+    );
+    qb.push_bind(pattern.clone());
+    qb.push(" OR author ILIKE ");
+    qb.push_bind(pattern);
+    qb.push(") ORDER BY id");
+
+    qb.build_query_as().fetch_all(pool).await
+}
+```
+
+**อธิบายจุดที่ต้องระวัง**: `format!("%{keyword}%")` ในบรรทัดแรก **ไม่ใช่** SQL injection แม้จะใช้ `format!()` ก็ตาม — เพราะผลลัพธ์ที่ได้ (`pattern`) ถูกส่งผ่าน `.push_bind()` เป็น**ค่าข้อมูล** ไม่ใช่ต่อเข้า SQL string ตรง ๆ ผ่าน `.push()` (จุดที่ทำให้ไม่ปลอดภัยไม่ใช่การใช้ `format!()` เอง แต่คือการเอาผลลัพธ์ที่ได้ไปต่อกับ SQL syntax ตรง ๆ — `%` ในที่นี้เป็นแค่ตัวอักษรธรรมดาสำหรับ PostgreSQL `LIKE`/`ILIKE` ที่ถูกส่งเป็นส่วนหนึ่งของ**ค่าที่ bind** เท่านั้น) — นี่คือจุดที่มือใหม่มักสับสน: กฎไม่ใช่ "ห้ามใช้ `format!()` เด็ดขาด" แต่คือ **"ห้ามเอาผลลัพธ์จาก `format!()`/input ผู้ใช้ไปต่อเข้า SQL string ที่ไม่ผ่าน bind parameter"**
+
+ผู้เขียนรันจริงกับข้อมูล seed 40 เล่ม (ที่มี `author` วนซ้ำทุก 7 เล่มตามที่หัวข้อ 71.1 seed ไว้):
+
+```
+ค้น 'Author 0': 6 แถว
+  id=1 title=Seed Book 0 author=Author 0
+  id=8 title=Seed Book 7 author=Author 0
+  id=15 title=Seed Book 14 author=Author 0
+  id=22 title=Seed Book 21 author=Author 0
+  id=29 title=Seed Book 28 author=Author 0
+ค้น 'Seed Book 1': 11 แถว
+  id=2 title=Seed Book 1 author=Author 1
+  id=11 title=Seed Book 10 author=Author 3
+  ...
+```
+
+สังเกตว่าค้นหา `"Seed Book 1"` ได้ **11 แถว** (ไม่ใช่แค่ 1 แถว) เพราะ `ILIKE '%Seed Book 1%'` match ทั้ง `"Seed Book 1"` ตัวเดียวกันเป๊ะ **และ** `"Seed Book 10"` ถึง `"Seed Book 19"` ทั้งหมด (เพราะ `"Seed Book 1"` เป็น substring ของทุกชื่อเหล่านั้นด้วย) — พฤติกรรมนี้ถูกต้องตาม pattern match ที่ตั้งใจ (ค้นแบบ "มีคำนี้อยู่บ้าง") แต่เป็นสิ่งที่ต้องอธิบายให้ product owner/ผู้ใช้เข้าใจก่อน ถ้าต้องการค้นแบบ "ตรงทั้งหมด" เท่านั้นต้องใช้ `=` ธรรมดา ไม่ใช่ `ILIKE` กับ `%...%`
+
 ### 71.3 Pagination ขั้นสูง: `LIMIT`/`OFFSET` รวมกับ `COUNT(*) OVER()`
 
 #### ปัญหาของ pagination แบบเดิม: ต้อง query สองรอบ
@@ -284,6 +326,18 @@ page3 (after id=6): [(7, "Seed Book 6"), (8, "Seed Book 7"), (9, "Seed Book 8")]
 
 **เหตุผลที่เร็วกว่า `OFFSET` สำหรับตารางใหญ่**: `WHERE id > $1 ORDER BY id LIMIT $2` ใช้ประโยชน์จาก **index บน `id`** (btree ของ primary key ที่มีอยู่แล้วเสมอ) โดยตรง — PostgreSQL หา "จุดที่ id มากกว่า cursor" ผ่าน index ได้ในเวลาคงที่ (ไม่ขึ้นกับว่าอยู่หน้าที่เท่าไร) แล้วอ่านต่อไปแค่ `limit` แถว จบ ในขณะที่ `OFFSET 100000 LIMIT 10` ต้อง**อ่านผ่าน**ทั้ง 100,000 แถวก่อนจะถึงแถวที่ 100,001 ที่ต้องการจริง
 
+ผู้เขียนวัดจริงเพิ่มเติมเพื่อพิสูจน์ว่าความต่างนี้ไม่ใช่แค่ทฤษฎี — seed ข้อมูล **50,000 แถว** (ด้วย `UNNEST` ตามหัวข้อ 71.4 เพื่อความเร็ว) แล้วเทียบ `OFFSET` ที่ลึกมาก (`OFFSET 49980` — เกือบสุดตาราง) กับ keyset ที่ตำแหน่งเดียวกัน:
+
+```
+seeded 50000 แถวสำหรับ benchmark
+OFFSET 49980 LIMIT 10: 26.96ms
+keyset (id > 56026) LIMIT 10: 4.89ms
+speedup ของ keyset เทียบกับ OFFSET ลึก = 5.5x
+OFFSET 0 (หน้าแรก) LIMIT 10: 9.17ms
+```
+
+`OFFSET` ที่ลึกมาก (**26.96ms**) ช้ากว่า keyset ที่ตำแหน่งเดียวกัน (**4.89ms**) ถึง **5.5 เท่า** แม้จะเป็นตารางขนาด 50,000 แถวที่ไม่ใหญ่มากนักในมาตรฐานระบบจริง (ตารางที่มีหลักล้าน-สิบล้านแถวจะเห็นความต่างที่มากกว่านี้อีกมาก เพราะ `OFFSET` แย่ลงเป็นเส้นตรงตามความลึกของหน้า ในขณะที่ keyset คงที่เสมอ) — สังเกตด้วยว่า `OFFSET 0` (หน้าแรก) ใช้เวลา **9.17ms** ซึ่ง**เร็วกว่า** `OFFSET` ที่ลึกมากถึง 3 เท่า ทั้งที่เป็นคำสั่งรูปแบบเดียวกัน ต่างกันแค่ค่า `OFFSET` — นี่คือหลักฐานที่ชัดเจนที่สุดว่า **ความช้าของ `OFFSET` ไม่ได้มาจาก query ที่ซับซ้อนขึ้น แต่มาจากความลึกของหน้าที่ขอโดยตรง** ตรงกับกลไกที่อธิบายไว้ (ต้องอ่านข้ามแถวที่ถูก skip ทุกแถวก่อนถึงตำแหน่งที่ต้องการ)
+
 **ข้อแลกเปลี่ยนที่ต้องรู้**: keyset pagination **ไม่รองรับการ "กระโดดไปหน้าที่ N โดยตรง"** ได้ตามธรรมชาติ (เช่น "ไปหน้า 50 เลย" โดยไม่ต้องเปิดหน้า 1-49 ก่อน) เพราะ cursor ต้องมาจากแถวสุดท้ายของหน้าก่อนหน้าเสมอ (ต่างจาก `OFFSET` ที่คำนวณ `offset = page_size * page_number` ได้ตรง ๆ ไม่ว่าจะข้ามไปหน้าไหนก็ตาม) เหมาะกับ UI แบบ "infinite scroll"/"โหลดเพิ่มเติม" ที่ผู้ใช้เลื่อนไปข้างหน้าเรื่อย ๆ มากกว่า UI แบบตัวเลขหน้าที่กระโดดไปมาได้ (pagination ที่มีเลขหน้าให้กดตรง ๆ ยังต้องพึ่ง `OFFSET`/`COUNT(*) OVER()` ตามหัวข้อก่อนหน้าอยู่ดี) — เลือกใช้ตามที่ UX ของระบบต้องการจริง ไม่ใช่เลือกเพราะ "เร็วกว่า" เพียงอย่างเดียว และไม่มี `COUNT(*) OVER()` ที่ใช้คู่กับ keyset pagination ได้ตรง ๆ แบบเดียวกับ `OFFSET` (เพราะไม่มี concept ของ "หน้าที่ N" ที่ต้องรู้จำนวนรวมล่วงหน้า) ถ้าต้องการทั้งจำนวนรวมและ infinite scroll พร้อมกัน มักต้องยิง query แยกสำหรับจำนวนรวม (ยอมรับ round-trip ที่สองเป็นข้อแลกเปลี่ยน)
 
 ### 71.4 Batch Operations: Bulk Insert ด้วย `UNNEST` เทียบกับ Insert ทีละแถว
@@ -356,6 +410,39 @@ total bench rows after both inserts = 4000 (should be 4000)
 
 **หลักการที่ต้องจำ**: เมื่อต้อง insert ข้อมูลมากกว่าหยิบมือหนึ่ง (มากกว่าสิบ-ยี่สิบแถว) ในครั้งเดียว **ควรใช้เทคนิค bulk insert เสมอ** — `UNNEST` เป็นหนึ่งในเทคนิคที่ SQLx bind `Vec<T>` เป็น PostgreSQL array ให้ได้ตรง ๆ (ไม่ต้อง feature เพิ่มเติมใด ๆ) ทำให้ใช้งานสะดวกจาก Rust ฝั่งเดียว (ทางเลือกอื่นที่ PostgreSQL รองรับคือ `COPY` ที่เร็วกว่า `INSERT` แบบ `UNNEST` อีกสำหรับข้อมูลขนาดใหญ่มาก ๆ ระดับหลักแสน-หลักล้านแถว แต่ SQLx ไม่มี high-level API สำหรับ `COPY` ให้ตรง ๆ ในเวอร์ชันนี้ ต้องเข้าถึงผ่าน `PgConnection` แบบ low-level กว่า — เกินขอบเขตบทนี้ แต่ควรรู้ไว้เป็นตัวเลือกขั้นถัดไปถ้า `UNNEST` ยังไม่พอสำหรับ scale ที่ต้องการ)
 
+#### ด้านตรงข้ามของ Bulk: อ่านข้อมูลจำนวนมากด้วย `.fetch()` แบบ Stream
+
+`UNNEST` แก้ปัญหาการ**เขียน**ข้อมูลจำนวนมากอย่างมีประสิทธิภาพ — แต่การ**อ่าน**ข้อมูลจำนวนมาก (เช่น export ข้อมูลทั้งตารางออกเป็นไฟล์ หรือประมวลผลข้อมูลทีละแถวแบบ streaming) ก็มีข้อควรระวังเชิง memory คนละแบบ: `.fetch_all()` ที่ใช้มาตลอดบทนี้ **โหลดผลลัพธ์ทั้งหมดเข้า `Vec` ใน memory พร้อมกัน** — ถ้าตารางมีหลักล้านแถว การเรียก `.fetch_all()` ตรง ๆ อาจทำให้โปรแกรมใช้ memory สูงเกินจำเป็นหรือถึงกับ crash ได้
+
+SQLx มีเมธอด **`.fetch()`** ที่คืนค่าเป็น **`Stream`** (ตาม Part 46-48 ที่แนะนำแนวคิด async stream ไว้แล้ว) แทน `Vec` ทั้งก้อน — ประมวลผลได้ทีละแถวโดยไม่ต้องรอให้ query ทั้งหมดเสร็จหรือเก็บทุกแถวไว้ในหน่วยความจำพร้อมกัน:
+
+```rust
+use futures::TryStreamExt; // .try_next() มาจาก trait นี้
+
+async fn process_all_books_streaming(pool: &sqlx::PgPool) -> Result<u32, sqlx::Error> {
+    // .fetch() คืน Stream แทน Vec ทั้งก้อน — ประมวลผลทีละแถวโดยไม่ต้องเก็บทุกแถวไว้ใน memory พร้อมกัน
+    let mut stream = sqlx::query!("SELECT id, title FROM books ORDER BY id").fetch(pool);
+
+    let mut count = 0u32;
+    while let Some(row) = stream.try_next().await? {
+        count += 1;
+        // ประมวลผล row.id / row.title ทีละแถวที่นี่ (เช่น เขียนลงไฟล์ทีละบรรทัด)
+    }
+    Ok(count)
+}
+```
+
+ผู้เขียนรันจริงบนข้อมูล 40 เล่ม ได้ผลลัพธ์ถูกต้อง:
+
+```
+row: id=1 title=Seed Book 0
+row: id=2 title=Seed Book 1
+row: id=3 title=Seed Book 2
+ประมวลผลทั้งหมด 40 แถว ผ่าน stream (ไม่ได้เก็บทุกแถวใน Vec เดียวพร้อมกัน)
+```
+
+**หลักการเลือกใช้**: `.fetch_all()` เหมาะกับกรณีส่วนใหญ่ที่ผลลัพธ์มีขนาดจำกัดพอสมควร (เช่น หน้าเดียวของ pagination ที่ `LIMIT` ไว้ไม่เกินร้อยแถว) — ใช้ `.fetch()` แบบ stream เมื่อต้องประมวลผลข้อมูล**ทั้งตาราง**หรือจำนวนที่ไม่รู้ขนาดล่วงหน้าและอาจมีมาก (batch job, export, data migration ระหว่างระบบ) หลักการเดียวกับที่ Part 46-48 สอนเรื่อง stream ทั่วไป: ประมวลผลแบบ incremental ดีกว่าการรอ collect ทุกอย่างเข้า memory ก่อนเริ่มทำงานเสมอเมื่อขนาดข้อมูลไม่แน่นอนหรืออาจใหญ่มาก
+
 #### `WHERE id = ANY($1)`: bulk fetch แทนวน loop ทีละ id
 
 ปัญหาแบบเดียวกันเกิดขึ้นได้กับการ**อ่าน**ข้อมูลด้วย: ถ้ามีลิสต์ของ id ที่ต้องการดึงข้อมูล (เช่น id ของหนังสือที่เกี่ยวข้องกับ `borrow_records` หลายแถว) การวน loop query ทีละ id คือปัญหาเดียวกับหัวข้อ 71.11 (N+1) — วิธีที่ถูกต้องคือส่ง**อาร์เรย์ของ id ทั้งหมด** เข้า query เดียวผ่าน `= ANY($1)`:
@@ -421,6 +508,43 @@ insert via QueryBuilder::push_values (2000 rows): 20.76ms
 ```
 
 `push_values` (20.76ms) ช้ากว่า `UNNEST` (11.58ms) เล็กน้อย (เหตุผลที่เป็นไปได้คือ SQL statement ของ `push_values` มีความยาวมากกว่ามาก — ต้องเขียน placeholder `$1` ถึง `$12000` สำหรับ 2,000 แถว × 6 คอลัมน์ ในขณะที่ `UNNEST` ใช้แค่ 3 placeholder เสมอไม่ว่าจะมีกี่แถว เพราะส่งเป็นอาร์เรย์) แต่ทั้งคู่ยังเร็วกว่าการ insert ทีละแถวอย่างมหาศาล (**39 เท่า** สำหรับ `push_values`, **70 เท่า** สำหรับ `UNNEST`) — **หลักการเลือกใช้**: ถ้า SQL เป็น literal ที่ตายตัวอยู่แล้ว ใช้ `UNNEST` ตรง ๆ กับ `query!` (เร็วกว่าเล็กน้อย และยังได้ compile-time check) ถ้าอยู่ในบริบทที่ต้องใช้ `QueryBuilder` แบบ dynamic อยู่แล้ว (เช่น จำนวนคอลัมน์ที่จะ insert ไม่แน่นอน) `push_values` สะดวกกว่าเพราะไม่ต้องแปลง `Vec<T>` เป็นหลายอาร์เรย์แยกคอลัมน์เองแบบที่ `UNNEST` ต้องทำ
+
+#### Upsert: `INSERT ... ON CONFLICT DO UPDATE` สำหรับข้อมูล Import ที่อาจซ้ำ
+
+สถานการณ์ที่พบบ่อยคู่กับ bulk insert คือการ **import ข้อมูลที่อาจมีบางแถวซ้ำกับที่มีอยู่แล้ว** (เช่น sync ข้อมูลจาก API ภายนอกที่รันซ้ำทุกวัน — หนังสือเล่มเดิมอาจถูกส่งมาอีกครั้งพร้อมข้อมูลที่อัปเดต) วิธีที่ไม่มีประสิทธิภาพคือเช็คก่อนว่ามีอยู่แล้วไหม (`SELECT` หนึ่ง query) แล้วค่อยตัดสินใจว่าจะ `INSERT` หรือ `UPDATE` (อีกหนึ่ง query) — สองคำสั่งแยกกันสำหรับงานเดียว (คล้ายปัญหา round-trip ที่พูดถึงมาตลอดบทนี้) แถมยังมี **race condition** ได้ถ้ามีหลาย task ทำพร้อมกัน (สองคำสั่งไม่ atomic ร่วมกัน — เช็คว่าไม่มีอยู่ แล้วมี task อื่น insert แซงไปก่อนพอดี ก็จะ insert ซ้ำจนละเมิด `UNIQUE` constraint)
+
+PostgreSQL มี **`ON CONFLICT DO UPDATE`** (บางครั้งเรียก "upsert" — update+insert) ที่ทำทั้งสองอย่างในคำสั่งเดียวแบบ atomic:
+
+```rust
+async fn upsert_book(pool: &sqlx::PgPool, isbn: &str, title: &str, total_copies: i32) -> Result<Book, sqlx::Error> {
+    sqlx::query_as!(
+        Book,
+        r#"
+        INSERT INTO books (isbn, title, author, total_copies, available_copies, category)
+        VALUES ($1, $2, 'Unknown', $3, $3, 'general')
+        ON CONFLICT (isbn) DO UPDATE
+            SET title = EXCLUDED.title, total_copies = EXCLUDED.total_copies
+        RETURNING id, isbn, title, total_copies
+        "#,
+        isbn,
+        title,
+        total_copies,
+    )
+    .fetch_one(pool)
+    .await
+}
+```
+
+**อธิบาย**: `ON CONFLICT (isbn)` ระบุว่า "ถ้า insert นี้จะละเมิด constraint ที่ผูกกับคอลัมน์ `isbn`" (ในที่นี้คือ `UNIQUE` constraint ที่ Part 70 สร้างไว้) ให้ทำ `DO UPDATE` แทนที่จะ error — **`EXCLUDED`** คือ pseudo-table พิเศษที่อ้างถึง**ค่าที่พยายามจะ insert** (ค่าจาก `VALUES (...)` ที่ conflict) ทำให้เขียน `SET title = EXCLUDED.title` ได้ตรง ๆ (แปลว่า "ใช้ค่า title ใหม่ที่ส่งมาทับของเดิม") ผู้เขียนรันจริงเรียกฟังก์ชันนี้สองครั้งด้วย `isbn` เดียวกัน:
+
+```
+ครั้งที่ 1 (insert ใหม่): Book { id: 6045, isbn: "978-upsert-1", title: "First Title", total_copies: 3 }
+ครั้งที่ 2 (upsert ทับของเดิม isbn เดียวกัน): Book { id: 6045, isbn: "978-upsert-1", title: "Updated Title", total_copies: 5 }
+ยืนยัน: id เดิม (6045) แต่ title/total_copies ถูกอัปเดตแล้ว
+จำนวนแถวที่มี isbn นี้ = 1 (ต้องเป็น 1 ไม่ใช่ 2)
+```
+
+สังเกตว่า **`id` เท่ากันทั้งสองครั้ง** (`6045`) — พิสูจน์ว่าครั้งที่สองคือการ **update แถวเดิม** ไม่ใช่สร้างแถวใหม่ (ถ้าเป็นแถวใหม่ `id` จะเปลี่ยนไปเพราะมาจาก `BIGSERIAL` ที่เพิ่มขึ้นเรื่อย ๆ) และจำนวนแถวที่มี `isbn` นี้ยังคงเป็น `1` เสมอไม่ว่าจะเรียกกี่ครั้งก็ตาม — นี่คือ atomic operation เดียวที่แทนที่ pattern "เช็คก่อน insert/update" สองคำสั่งแยกกันได้อย่างปลอดภัยและไม่มี race condition (PostgreSQL จัดการ locking ที่จำเป็นให้ภายในคำสั่งเดียวนี้เองทั้งหมด) — ผสมกับเทคนิค `UNNEST` ของหัวข้อก่อนหน้าได้ด้วย (`INSERT ... SELECT * FROM UNNEST(...) ... ON CONFLICT ...`) สำหรับ upsert ข้อมูลจำนวนมากพร้อมกันในคำสั่งเดียว เหมาะมากกับงาน sync ข้อมูลจาก external API เป็นประจำ
 
 ### 71.5 ข้อมูลแบบยืดหยุ่นด้วย `JSONB` และ `sqlx::types::Json<T>`
 
@@ -690,6 +814,33 @@ Part 70 หัวข้อ 70.5 แนะนำใส่ `-r` เสมอเพ
 
 โปรเจกต์ที่พัฒนามานานหลายปีอาจสะสม migration ไฟล์หลักร้อยไฟล์ — การรัน migration ทั้งหมดตั้งแต่ไฟล์แรกทุกครั้งที่ตั้งฐานข้อมูลใหม่ (เช่น environment สำหรับ test/CI ที่สร้างขึ้นใหม่บ่อย ๆ) ใช้เวลานานขึ้นเรื่อย ๆ ตามจำนวนไฟล์ที่สะสม แนวทางที่ทีมใหญ่ใช้กันคือ **squash migration**: รวม migration เก่าจำนวนมากที่ apply ไปแล้วในทุก environment ที่สำคัญ (ไม่มี environment ไหนเหลือค้างที่ยังไม่ได้ apply ไฟล์เก่าเหล่านั้นแล้ว) ให้เหลือเป็นไฟล์เดียวที่สร้าง schema สุดท้ายตรง ๆ (เหมือน `pg_dump --schema-only` ของ schema ปัจจุบัน) แล้ว**ลบไฟล์เก่าที่ถูก squash ไปทั้งหมด** — SQLx เองไม่มีคำสั่ง squash อัตโนมัติให้ (ต่างจากบางเครื่องมือ migration ของภาษาอื่น) ต้องทำด้วยมือ: `pg_dump --schema-only` ฐานข้อมูลที่มี schema ล่าสุด แล้ววาง SQL ที่ได้ในไฟล์ migration ใหม่ไฟล์เดียว จากนั้นต้อง**อัปเดตตาราง `_sqlx_migrations` เองด้วยมือ**ในทุกฐานข้อมูลที่มีอยู่แล้ว (insert แถวที่บอกว่า migration ใหม่ตัวนี้ "ถูก apply แล้ว" พร้อม checksum ที่ตรงกับไฟล์ใหม่) เพื่อไม่ให้ `sqlx migrate run` พยายามรันไฟล์ใหม่ตัวนี้ทับฐานข้อมูลที่มี schema นี้อยู่แล้ว — เป็นกระบวนการที่ต้องระวังมาก ควรทำเฉพาะเมื่อจำนวนไฟล์ migration เริ่มเป็นปัญหาจริงจังต่อความเร็วในการตั้ง environment ใหม่เท่านั้น ไม่ใช่ทำเป็นประจำ
 
+#### คำสั่งกลุ่ม `sqlx database`: ตั้งฐานข้อมูลใหม่ในคำสั่งเดียวสำหรับ CI/Dev
+
+นอกจากกลุ่มคำสั่ง `sqlx migrate` ที่ใช้มาตลอดบทนี้และ Part 70 `sqlx-cli` ยังมีกลุ่มคำสั่ง **`sqlx database`** ที่จัดการตัวฐานข้อมูลเองโดยตรง (ไม่ใช่แค่ schema ข้างใน):
+
+```
+$ sqlx database --help
+Group of commands for creating and dropping your database
+
+Commands:
+  create  Creates the database specified in your DATABASE_URL
+  drop    Drops the database specified in your DATABASE_URL
+  reset   Drops the database specified in your DATABASE_URL, re-creates it, and runs any pending migrations
+  setup   Creates the database specified in your DATABASE_URL and runs any pending migrations
+```
+
+`sqlx database setup` มีประโยชน์มากสำหรับ environment ที่ตั้งขึ้นมาใหม่ (dev คนใหม่ในทีม, CI pipeline ที่สร้าง container ใหม่ทุกครั้ง) — รวมสองขั้นตอน (`CREATE DATABASE` + รัน migration ทั้งหมด) เป็นคำสั่งเดียว ไม่ต้องจำลำดับคำสั่งหลายตัว ส่วน **`sqlx database reset`** มีประโยชน์มากตอน dev ที่ต้องการฐานข้อมูล "สะอาด" กลับมาใหม่ทั้งหมด (ลบข้อมูลทดสอบที่สะสมไว้ทิ้งไปเลย) — ผู้เขียนรันจริง (`-y` ข้ามการยืนยันเพื่อความสะดวกในสคริปต์อัตโนมัติ):
+
+```
+$ sqlx database reset -y
+Applied 20260927002748/migrate create books table (9.697743ms)
+Applied 20260927002805/migrate add category and metadata (2.403345ms)
+```
+
+หลังรันเสร็จ ตรวจสอบด้วย `SELECT COUNT(*) FROM books` ยืนยันว่าข้อมูลถูกล้างจริง (`count = 0`) แต่ schema ยังครบถ้วนตามที่ migration สร้างไว้ (ยืนยันด้วย `sqlx migrate info` ที่ยังแสดง `installed` ทั้งสอง migration) — **ข้อควรระวังสำคัญที่สุด**: `sqlx database reset`/`drop` **ลบข้อมูลทิ้งถาวรไม่มีทางกู้กลับ** ห้ามรันบน production หรือ environment ที่มีข้อมูลสำคัญโดยไม่ตรวจสอบ `DATABASE_URL` ให้แน่ใจก่อนทุกครั้งว่าชี้ไปยังฐานข้อมูลที่ตั้งใจจะลบจริง ๆ (เหตุการณ์ "รันคำสั่งลบผิดฐานข้อมูลเพราะ `DATABASE_URL` ตั้งค่าผิด environment" เป็นสาเหตุของ incident ร้ายแรงที่เกิดขึ้นจริงในหลายทีม — ควรมี safeguard เช่นชื่อ environment variable ที่ต่างกันชัดเจนระหว่าง dev/staging/production หรือ confirmation step ที่ไม่ใช่แค่ `-y` แบบข้ามอัตโนมัติสำหรับ environment ที่สำคัญ)
+
+**เชื่อมกับหัวข้อ 71.10**: `sqlx database reset` เหมาะสำหรับรีเซ็ตฐานข้อมูล**ระหว่างรอบการพัฒนา** (dev เขียนโค้ดไปเรื่อย ๆ อยากได้ข้อมูลสะอาดกลับมาเป็นระยะ) แต่**ไม่ใช่**กลไกที่ใช้แทน test isolation ระหว่าง test function แต่ละตัวได้ (ช้าเกินไปที่จะเรียกก่อน/หลังทุก test — ต้อง `DROP`/`CREATE DATABASE` ทั้งลูกทุกครั้ง) นี่คือเหตุผลที่ `#[sqlx::test]`/pattern transaction-rollback ในหัวข้อ 71.10 ยังจำเป็นสำหรับ test isolation ระดับ function แม้จะมีคำสั่ง `sqlx database reset` ที่ทำงานคล้ายกันในระดับที่หยาบกว่า (ทั้งฐานข้อมูล ไม่ใช่ทั้ง test function)
+
 ### 71.7 Connection Pool Tuning เชิงลึก: ผูกกับ Tokio Task Concurrency
 
 Part 70 หัวข้อ 70.3/70.11 สอน `PgPoolOptions` พื้นฐานและพิสูจน์พฤติกรรม pool exhaustion (รอจนกว่าจะมี connection ว่างหรือ timeout) ไปแล้ว — หัวข้อนี้ตอบคำถามที่ทีมจริงต้องเจอบ่อยที่สุด: **"ตั้ง `max_connections` เท่าไรดี และทำไม API ของฉันถึงเริ่ม timeout พร้อมกันหมดตอน traffic สูงขึ้น?"**
@@ -919,6 +1070,20 @@ producer: ส่ง NOTIFY แล้ว
 - **ขนาด payload จำกัด** — PostgreSQL จำกัดขนาด payload ของ `NOTIFY` ไว้ที่ 8000 byte (ค่านี้ผูกกับ `NAMEDATALEN`/การตั้งค่าภายในของ PostgreSQL) ไม่เหมาะกับข้อมูลขนาดใหญ่
 - **connection ของ `PgListener` แยกจาก pool** — ไม่ถูกนับรวมกับ `max_connections` ของ `PgPoolOptions` แต่ยังคงเป็น connection จริงหนึ่งตัวที่กิน resource ฝั่ง PostgreSQL เหมือน connection ปกติทุกประการ ต้องบริหารจัดการจำนวน listener ที่เปิดไว้อย่างมีสติเช่นกัน (ไม่ใช่ "ฟรี" เพียงเพราะไม่ได้มาจาก pool)
 
+#### Config เพิ่มเติมของ `PgListener` ที่ควรรู้จัก
+
+```rust
+let mut listener = PgListener::connect_with(&pool).await?;
+listener.listen("cfg_channel").await?;
+
+listener.eager_reconnect(true);           // พยายาม reconnect ทันทีถ้า connection หลุด (ค่า default คือ true อยู่แล้ว)
+listener.ignore_pool_close_event(true);   // ไม่ต้อง stop listener แม้ pool หลักถูก .close() ไปแล้ว (เชื่อมกับข้อควรรู้ข้างบน)
+
+listener.unlisten("cfg_channel").await?;  // เลิกฟัง channel นี้ (ยังเปิด connection อยู่ ฟัง channel อื่นต่อได้)
+```
+
+**อธิบายสั้น ๆ**: `eager_reconnect(bool)` คุมว่าเมื่อ connection ของ listener หลุดไปกลางทาง (network hiccup, PostgreSQL restart) มันควรพยายามต่อใหม่**ทันที**ในเบื้องหลังไหม (ค่า default คือ `true` — เหมาะกับ use case ส่วนใหญ่ที่อยากให้ listener กลับมาทำงานเร็วที่สุด) `ignore_pool_close_event(bool)` คุมว่า listener ควรสนใจสัญญาณตอน pool หลัก (`&PgPool` ที่ใช้เปิด listener ตอนแรก) ถูก `.close()` ไหม — ค่า default คือ `false` (listener จะหยุดทำงานตามไปด้วยถ้า pool หลักถูกปิด) ตั้งเป็น `true` ถ้าต้องการให้ listener **ทำงานต่อไปอย่างอิสระ**ไม่ขึ้นกับ lifecycle ของ pool หลักเลย (เหมาะกับสถาปัตยกรรมที่ listener เป็น background service แยกจาก request-handling pool อย่างชัดเจน อย่างตัวอย่าง SSE forwarder ก่อนหน้านี้) `unlisten(channel)` เลิกฟัง channel ที่ระบุโดยไม่ต้องปิด connection ทั้งตัว (มี `unlisten_all()` คู่กันสำหรับเลิกฟังทุก channel พร้อมกัน) — ผู้เขียนรันจริงทั้งสามเมธอดครบ ทำงานตามที่คาดไว้ไม่มี error
+
 ด้วยข้อจำกัดเหล่านี้ `LISTEN`/`NOTIFY` **ไม่ใช่ตัวแทนของ message queue เต็มรูปแบบ** (เช่น RabbitMQ, Kafka, หรือ SQS ที่ Part 82 จะสอนในหลักสูตรต่อไป) ที่ต้องมี delivery guarantee, persistent buffer, retry mechanism, และ ordering ที่เข้มงวดกว่านี้มาก — ควรมองมันเป็น**ทางเลือกที่เบากว่ามาก**สำหรับกรณีง่าย ๆ ที่ยอมรับได้ว่าข้อความอาจหายได้บ้างเป็นบางครั้ง (best-effort) โดยไม่ต้องเพิ่ม infrastructure ใหม่เข้าระบบ (ไม่ต้องตั้ง message broker แยก ใช้ PostgreSQL ที่มีอยู่แล้วได้ทันที) — เมื่อความต้องการซับซ้อนขึ้น (ต้องการันตีการส่งถึง, ต้องรองรับ throughput สูงมาก, ต้องมี consumer group หลายตัวแบ่งงานกัน) ควรย้ายไปใช้ message queue จริงตามที่ Part 82 จะสอน
 
 #### ตัวอย่างประยุกต์: ส่ง Notification ต่อไปยัง Client ผ่าน SSE (ระดับแนวคิด)
@@ -1081,6 +1246,56 @@ async fn example_using_helper() {
 
 **อธิบาย**: `tokio::sync::OnceCell` (ตาม Part 39/48 เรื่องการแชร์ state ข้าม task อย่างปลอดภัย) เปิด pool เพียง**ครั้งเดียว**ตลอดทั้ง test binary (ไม่ว่าจะมี test function กี่ตัวเรียก `begin_test_tx()` ก็ตาม) แล้ว pool ตัวนั้นถูกใช้ซ้ำข้าม test — เพราะแต่ละ test ทำงานใน transaction ของตัวเองที่ไม่เคย commit การแชร์ pool เดียวกันจึงไม่ทำให้ test ชนกันเลย (ตรงกันข้ามกับการแชร์ pool แบบเดียวกันถ้าไม่มี transaction คั่นไว้ ซึ่งจะชนกันแน่นอน) — pattern นี้ทำให้แต่ละ test function สั้นลงมาก เหลือแค่ `let mut tx = begin_test_tx().await;` บรรทัดแรก แล้วเขียน logic ของ test ต่อได้เลยโดยไม่ต้องยุ่งกับ boilerplate การเปิด pool ซ้ำทุกครั้ง
 
+#### ทดสอบฟังก์ชันที่ใช้ `QueryBuilder` ด้วย `#[sqlx::test]`
+
+ฟังก์ชันที่สร้าง SQL แบบ dynamic ผ่าน `QueryBuilder` (หัวข้อ 71.2) **ไม่มีการตรวจสอบ compile-time** เลยอย่างที่บอกไว้แล้ว — นี่คือเหตุผลที่ต้องมี integration test ที่ครอบคลุมชดเชยจริง ๆ ไม่ใช่แค่พูดผ่าน ๆ มาลองเขียน test จริงให้ `list_books_dynamic` จากหัวข้อ 71.2/71.12 ด้วย `#[sqlx::test]` (ตาม Part 70 หัวข้อ 70.13):
+
+```rust
+use sqlx::PgPool;
+
+#[sqlx::test(migrations = "./migrations")]
+async fn empty_table_returns_empty_vec(pool: PgPool) -> sqlx::Result<()> {
+    let results = list_books_dynamic(&pool, &ListParams { limit: 10, ..Default::default() }).await?;
+    assert!(results.is_empty(), "ตารางว่าง ต้องได้ Vec ว่าง ไม่ error");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn filter_by_category_returns_only_matching_rows(pool: PgPool) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO books (isbn, title, author, total_copies, available_copies, category)
+         VALUES ($1, $2, $3, 1, 1, 'fiction'), ($4, $5, $6, 1, 1, 'programming')",
+        "978-t1", "Fiction Book", "A",
+        "978-t2", "Prog Book", "B",
+    )
+    .execute(&pool)
+    .await?;
+
+    let results = list_books_dynamic(
+        &pool,
+        &ListParams { category: Some("fiction".to_string()), limit: 10, ..Default::default() },
+    )
+    .await?;
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].category, "fiction");
+    assert_eq!(results[0].total_count, 1);
+    Ok(())
+}
+```
+
+ผู้เขียนรันจริงทั้งสอง test ผ่าน `#[sqlx::test]` (ที่สร้างฐานข้อมูลใหม่ทั้งลูกให้แต่ละ test ตาม Part 70 หัวข้อ 70.13):
+
+```
+running 2 tests
+test empty_table_returns_empty_vec ... ok
+test filter_by_category_returns_only_matching_rows ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+```
+
+**ทำไม test แรกสำคัญมากกว่าที่คิด**: `empty_table_returns_empty_vec` ทดสอบกรณี edge case ที่มือใหม่มักลืม — ตารางที่**ไม่มีข้อมูลเลย** ต้องได้ `Vec` ว่าง ไม่ error และไม่ panic (ลองสมมติว่าโค้ดเขียนผิดเป็น `.fetch_one()` แทน `.fetch_all()` — test นี้จะจับได้ทันทีเพราะ `.fetch_one()` จะคืน `RowNotFound` เมื่อไม่มีแถวเลย ในขณะที่ endpoint list ควรคืน `[]` ไม่ใช่ 404) ส่วน test ที่สองยืนยันว่าเงื่อนไข `AND category = $1` ที่ `QueryBuilder` ประกอบให้ทำงานถูกต้องจริง (กรองได้แค่ 1 แถวจาก 2 แถวที่ insert ไว้ และ `total_count` เท่ากับ 1 ตรงตามที่ควรเป็นหลังกรอง) — ทั้งสอง test ครอบคลุม path สำคัญที่สุดสองเส้นทางของฟังก์ชันที่ไม่มี compile-time safety net คอยช่วยอยู่แล้ว
+
 ### 71.11 ปัญหา N+1 Query: พิสูจน์ด้วยตัวเลขจริง
 
 #### โค้ดที่ "ดูปกติ" แต่ซ่อนปัญหาประสิทธิภาพร้ายแรง
@@ -1220,6 +1435,13 @@ speedup = 21.4x, query ลดจาก 41 เหลือ 1
 ### 71.12 Capstone: รวมทุกอย่างเข้ากับ Axum
 
 มาผูกทุกหัวข้อของบทนี้เข้าด้วยกันเป็น endpoint จริงที่ต่อยอดจาก Axum server ของ Part 70 หัวข้อ 70.10 ตรง ๆ — เพิ่ม endpoint `GET /books` เวอร์ชันใหม่ที่รวม filter+sort+pagination (หัวข้อ 71.2/71.3) เข้ากับ migration ที่เพิ่ม `category`/index (หัวข้อ 71.6) และเพิ่ม endpoint `GET /books/borrowed` ที่หลีกเลี่ยง N+1 อย่างชัดเจน (หัวข้อ 71.11)
+
+**สิ่งที่ server นี้ทำต่างจาก Part 70 หัวข้อ 70.10 อย่างชัดเจน**:
+
+- `AppState`/`PgPool` pattern เดียวกันทุกประการ (ไม่ห่อ `Arc` ซ้ำ ตามที่พิสูจน์ไว้แล้วใน Part 70) — บทนี้ไม่เปลี่ยนอะไรเรื่อง state management เลย เพราะไม่มีอะไรต้องเปลี่ยน
+- `list_books` แทนที่ `list_books`/`get_book` แบบเดิมของ Part 70 ที่ query ทุกแถวตรง ๆ ไม่มี filter/pagination — เวอร์ชันใหม่รับ query parameter ผ่าน `Query<ListBooksQuery>` extractor (ตาม Part 63-64 ที่สอน extractor ของ Axum ไว้แล้ว) แล้วส่งต่อให้ `QueryBuilder` ประกอบ SQL ตามหัวข้อ 71.2
+- `list_currently_borrowed` คือ endpoint ใหม่ที่ไม่มีใน Part 70 เลย — ออกแบบมาเพื่อโชว์ pattern ที่หลีกเลี่ยง N+1 ตั้งแต่การออกแบบ (`JOIN` ตรง ๆ ในคำสั่งเดียว) ไม่ใช่เขียนแบบ naive ก่อนแล้วมาแก้ทีหลัง
+- `AppError` ในตัวอย่างนี้เหลือแค่ variant `Internal` เดียว (เพื่อความกระชับของตัวอย่าง) — ระบบจริงควรรวม `AppError` แบบเต็มจาก Part 70 หัวข้อ 70.7 ที่แยก `NotFound`/`Conflict`/`Internal` ครบ
 
 ```rust
 use axum::{
@@ -1381,7 +1603,22 @@ $ curl -s "http://127.0.0.1:4071/books/borrowed" | head -c 300
 
 ทุก endpoint ทำงานตรงตามที่ออกแบบ: `total` เปลี่ยนตาม filter ที่ใช้จริง (`40` ไม่กรอง, `10` กรอง `fiction`), `sort=desc` เรียง id จากมากไปน้อยจริง (`37, 33, 29`), และ `/books/borrowed` คืนข้อมูลที่ join มาจากทั้ง `borrow_records` และ `books` ในคำสั่งเดียว (query เดียว ไม่มี N+1) — นี่คือตัวอย่างที่รวมทุกเทคนิคของบทนี้ (`QueryBuilder`, `COUNT(*) OVER()`, migration ที่เพิ่ม `category`/index, และการหลีกเลี่ยง N+1 ด้วย `JOIN`) เข้าเป็นระบบเดียวที่ทำงานได้จริงครบวงจร ต่อยอดจาก `AppState`/`PgPool` pattern เดียวกันกับ Part 70 ทุกประการ
 
-### 71.13 เลือกเทคนิคให้เหมาะกับสถานการณ์: ตารางสรุปการตัดสินใจ
+### 71.13 สรุปตัวเลขที่วัดได้จริงตลอดบทนี้
+
+ก่อนไปถึงตารางเลือกใช้เทคนิค มารวมตัวเลขที่วัดได้จริงทุกตัวในบทนี้ไว้ที่เดียว (ตามหลักการ Part 54 ที่เน้นว่าการวัดที่แท้จริงต้องเห็นภาพรวม ไม่ใช่จำตัวเลขแยกส่วนแบบไม่มีบริบท) — ทุกตัวเลขนี้รันบนเครื่องเดียวกัน ฐานข้อมูล PostgreSQL 16.13 ตัวเดียวกัน (localhost) ในเซสชันการเขียนบทนี้:
+
+| การเปรียบเทียบ | วิธีที่ช้ากว่า | วิธีที่เร็วกว่า | ปัจจัยความต่าง |
+|---|---|---|---|
+| Bulk insert 2,000 แถว | Insert ทีละแถวในลูป: 813.06ms | `UNNEST`: 11.58ms | **70.2 เท่า** |
+| Bulk insert 2,000 แถว (ทางเลือก) | Insert ทีละแถวในลูป: 813.06ms | `QueryBuilder::push_values`: 20.76ms | **39.2 เท่า** |
+| N+1 (รายละเอียดต่อแถว) 200 แถว | Naive loop: 201 queries, 27.67ms | `JOIN` เดียว: 1 query, 1.10ms | **25.2 เท่า**, query ลด 201x |
+| N+1 (aggregation/count) 40 แถว | Naive loop: 41 queries, 24.49ms | `GROUP BY` เดียว: 1 query, 1.14ms | **21.4 เท่า**, query ลด 41x |
+| Concurrent task 12 ตัว ชิง pool | `max_connections=2`: 614.90ms รวม | `max_connections=12`: 115.24ms รวม | **5.3 เท่า** |
+| Pagination หน้าลึก (50,000 แถว) | `OFFSET 49980`: 26.96ms | Keyset (`id > cursor`): 4.89ms | **5.5 เท่า** |
+
+**ข้อสังเกตที่เชื่อมทุกแถวในตารางนี้เข้าด้วยกัน**: ทุกกรณีมีรูปแบบเดียวกันคือ**ลดจำนวน round-trip ไปยังฐานข้อมูล** (จาก N ครั้งเหลือ 1 ครั้ง หรือจากการรอคิวยาวเหลือการรันพร้อมกัน) — นี่คือธีมที่แท้จริงของบทนี้ทั้งบท ไม่ว่าจะเป็นเรื่อง bulk insert, N+1, หรือ connection pool: **round-trip ไปยังฐานข้อมูลคือต้นทุนที่แพงที่สุดในระบบส่วนใหญ่ ไม่ใช่ตัว query เองที่รันช้า** (query แต่ละตัวในทุกกรณีข้างบนเร็วมากอยู่แล้วในเชิง execution — ปัญหาอยู่ที่**จำนวนครั้ง**ที่ต้องเดินทางไปมาระหว่างแอปกับฐานข้อมูลต่างหาก) หลักการนี้ควรติดอยู่ในหัวเสมอเมื่อออกแบบ query pattern ใหม่ ๆ ในโค้ดของตัวเอง: "งานนี้ทำในคำสั่งเดียวได้ไหม" ควรเป็นคำถามแรกที่ถามตัวเองก่อนเขียนโค้ดที่มี query มากกว่าหนึ่งคำสั่งสำหรับงานเดียวเสมอ
+
+### 71.14 เลือกเทคนิคให้เหมาะกับสถานการณ์: ตารางสรุปการตัดสินใจ
 
 บทนี้ผ่านเทคนิคมาหลายตัวที่แก้ปัญหาคล้ายกันในรายละเอียดต่างกัน — ตารางนี้สรุปเป็น "ถ้าเจอสถานการณ์แบบนี้ ให้นึกถึงเทคนิคนี้ก่อน" เพื่อใช้เป็นจุดเริ่มต้นตัดสินใจเร็ว ๆ ในงานจริง (ไม่ใช่กฎตายตัวที่ใช้ได้ทุกกรณีเสมอไป แต่เป็นจุดเริ่มต้นที่ดีก่อนตัดสินใจลงรายละเอียด):
 
@@ -1391,6 +1628,7 @@ $ curl -s "http://127.0.0.1:4071/books/borrowed" | head -c 300
 | ต้อง list ข้อมูลพร้อมจำนวนรวมทั้งหมด | `COUNT(*) OVER()` แทนสอง query แยก | ลด round-trip จาก 2 เหลือ 1 โดยไม่เสีย correctness |
 | Insert/update ข้อมูลมากกว่า ~20 แถวพร้อมกัน | `UNNEST` (SQL literal ตายตัว) หรือ `QueryBuilder::push_values` (ถ้าต้อง dynamic อยู่แล้ว) | ลด round-trip จาก N ครั้งเหลือ 1 ครั้ง — วัดจริงเร็วขึ้น 39-70 เท่า |
 | ต้อง fetch หลายแถวจาก id ที่รู้อยู่แล้วเป็นลิสต์ | `WHERE id = ANY($1)` | ไม่ต้องสร้าง SQL แบบ dynamic ตามจำนวน id เหมือน `IN (...)` |
+| Import ข้อมูลที่อาจซ้ำกับที่มีอยู่แล้ว (sync จาก API ภายนอก) | `INSERT ... ON CONFLICT DO UPDATE` | atomic ในคำสั่งเดียว ไม่มี race condition แบบ "เช็คก่อนแล้วค่อย insert/update" |
 | ข้อมูล metadata ที่ shape ต่างกันตามประเภท | `sqlx::types::Json<T>` กับ enum ที่ tag ด้วย serde | ได้ type-safety เต็มรูปแบบ ดีกว่า `serde_json::Value` แบบ dynamic เมื่อรู้ shape ล่วงหน้า |
 | ต้อง filter/ค้นภายใน JSONB บ่อย ๆ บนตารางใหญ่ | GIN index + operator `@>` | `->>`  ธรรมดาต้องสแกนทั้งตารางเสมอ ไม่มีทาง index ช่วยตรง ๆ |
 | เพิ่มคอลัมน์ใหม่บนตารางที่มีข้อมูลอยู่แล้ว | `ADD COLUMN ... DEFAULT ...` เสมอถ้าเป็น `NOT NULL` | ไม่มี default จะ error ทันทีถ้าตารางไม่ว่าง |
@@ -1504,15 +1742,45 @@ pool.size() หลังเปิด listener = 1 (ไม่เพิ่ม — 
 
 **อธิบาย**: แม้ `PgListener::connect_with(&pool)` จะรับ `&PgPool` เป็น argument (ทำให้ดูเหมือนว่ามันยืม connection จาก pool ตัวนั้น) แต่จริง ๆ แล้วมันแค่**อ่าน connection config** จาก pool (host, port, user, password, database) มาใช้เปิด **connection ใหม่ของตัวเอง** ที่แยกออกไปต่างหากอย่างสิ้นเชิง — connection ของ `PgListener` จึงไม่ถูกนับรวมกับ `max_connections` ของ pool เลย (พิสูจน์แล้วจาก `pool.size()` ที่ไม่ขยับ) แต่**ยังคงเป็น connection จริงหนึ่งตัว**ที่กิน resource ฝั่ง PostgreSQL เหมือน connection ปกติทุกประการ (ปรากฏใน `pg_stat_activity` เหมือนกัน) — ผลที่ตามมาอีกจุดที่ต้องรู้: `pool.close()` (Part 70 หัวข้อ 70.12) **ไม่ได้ปิด connection ของ `PgListener` ไปด้วย** เพราะมันไม่ได้เป็นส่วนหนึ่งของ pool ตั้งแต่แรก — ถ้าเปิด `PgListener` ไว้แล้วต้อง shutdown แอปอย่างเป็นระเบียบ ต้องปิด `listener` เอง (หรือปล่อยให้ `Drop` ของมันทำงานตามธรรมชาติเมื่อ scope จบ) แยกจากการเรียก `pool.close()` **วิธีแก้/ข้อควรจำ**: นับจำนวน `PgListener` ที่เปิดไว้ในระบบแยกจากการคำนวณ `max_connections` ของ pool เสมอ (ถ้าเปิด listener หลายตัวโดยไม่ได้ตั้งใจ เช่น เปิดใหม่ทุกครั้งที่ handler ถูกเรียกโดยไม่ปิดตัวเก่า จะสร้าง connection รั่วไหลสะสมที่ไม่มีทาง track ผ่าน `pool.size()` ได้เลย)
 
+### 7. พิมพ์ชื่อ Column ผิดใน `QueryBuilder` — ไม่มี Compile-Time Check มาช่วยจับ
+
+```rust
+#[derive(sqlx::FromRow)]
+struct BookRow {
+    id: i64,
+    titel: String, // ❌ พิมพ์ผิด (ควรเป็น "title") — แต่ QueryBuilder ไม่ตรวจให้เลย
+}
+
+let mut qb: QueryBuilder<Postgres> = QueryBuilder::new("SELECT id, titel FROM books WHERE 1 = 1");
+qb.push(" LIMIT 1");
+let result = qb.build_query_as::<BookRow>().fetch_all(&pool).await; // compile ผ่านสนิท!
+```
+
+`cargo build` **ผ่านสนิทไม่มี error เลย** (ต่างจาก `query_as!` ที่ Part 70 พิสูจน์ไว้ว่าจะจับพิมพ์ผิดแบบนี้ได้ตั้งแต่ compile time) — error เกิดขึ้นตอน**รันจริง**เท่านั้น ตอนที่ query ถูกส่งไปยัง PostgreSQL:
+
+```
+runtime error จาก QueryBuilder ที่มี SQL ผิด: error returned from database: column "titel" does not exist
+```
+
+**อธิบาย**: นี่คือข้อแลกเปลี่ยนที่หัวข้อ 71.2 เตือนไว้แล้วตั้งแต่ต้น — `QueryBuilder` แลกความยืดหยุ่นเรื่อง SQL แบบ dynamic กับการเสีย compile-time check ไปทั้งหมด (`build_query_as::<BookRow>()` ไม่มีทางรู้ตอน compile ว่า column `titel` มีอยู่จริงในตารางไหม เพราะ SQL ถูกประกอบขึ้นมาตอน runtime) ความผิดพลาดแบบนี้จะไม่ถูกจับจนกว่าจะมีคนรัน path ของโค้ดที่ผิดจริง ๆ (ซึ่งอาจเป็น production ถ้า test ไม่ครอบคลุมพอ) **วิธีแก้/ป้องกัน**: เขียน integration test ที่ครอบคลุมทุก branch ของเงื่อนไข dynamic ให้ครบ (ตามที่หัวข้อ 71.10 สาธิตด้วย `#[sqlx::test]` กับฟังก์ชัน `list_books_dynamic`) — สำหรับ SQL ส่วนที่**ไม่จำเป็นต้อง dynamic จริง ๆ** (คอลัมน์หลักที่ query เสมอไม่เปลี่ยนตามเงื่อนไข) ควรพิจารณาแยกออกมาเป็น `query_as!` แบบ compile-time checked ต่างหาก แล้วใช้ `QueryBuilder` เฉพาะส่วนที่จำเป็นต้อง dynamic จริง ๆ เท่านั้น (ลดพื้นที่เสี่ยงที่ไม่มี compile-time safety net คอยช่วย)
+
 ## แบบฝึกหัด (Exercises)
 
 1. **(ง่าย)** เพิ่ม field `min_total_copies: Option<i32>` เข้า `ListParams`/`ListBooksQuery` ของหัวข้อ 71.2/71.12 (กรองหนังสือที่มี `total_copies` มากกว่าหรือเท่ากับค่าที่ระบุ) — Hint: เพิ่ม `if let Some(...)` อีกหนึ่งบล็อกในฟังก์ชัน `list_books_dynamic`/`list_books` ตามรูปแบบเดียวกับ `min_available` ที่มีอยู่แล้ว ระวังอย่าลืม `.push_bind()` (ไม่ใช่ `.push()`) สำหรับค่าที่มาจาก query parameter
 
+   เพิ่มความยาก: เขียน `#[sqlx::test]` สองตัวยืนยันว่า filter ใหม่ทำงานถูกต้องทั้งกรณีที่ match และไม่ match ตามแนวทางหัวข้อ 71.10 — ฝึกความเคยชินในการ test ฟังก์ชันที่ใช้ `QueryBuilder` ทุกครั้งที่แก้ไข เพราะไม่มี compile-time check มาช่วยจับความผิดพลาด
+
 2. **(กลาง)** เขียนฟังก์ชัน `bulk_update_category(pool: &PgPool, updates: &[(i64, String)]) -> Result<u64, sqlx::Error>` ที่รับลิสต์ของ `(book_id, new_category)` แล้วอัปเดต `category` ของหลายเล่มพร้อมกันในคำสั่งเดียว (ห้ามวน loop เรียก `UPDATE` ทีละแถว) — Hint: ใช้เทคนิคคล้าย `UNNEST` ของหัวข้อ 71.4 ผสมกับ `UPDATE ... FROM UNNEST(...)`: `UPDATE books SET category = t.new_category FROM UNNEST($1::bigint[], $2::text[]) AS t(id, new_category) WHERE books.id = t.id` — ทดสอบด้วยการวัดเวลาเทียบกับวิธี loop ทีละแถวแบบหัวข้อ 71.4 ตัวเลขที่ได้ควรต่างกันในทิศทางเดียวกับที่บทนี้วัดไว้
 
-3. **(ยาก)** เพิ่ม endpoint `GET /books/:id/history` ที่คืนประวัติการยืม-คืนของหนังสือเล่มหนึ่ง **พร้อมชื่อผู้ยืมทุกคน** โดยต้องไม่มี N+1 เลย (คำนวณจำนวน query ที่ใช้จริงด้วยการนับ manual หรือเปิด PostgreSQL query log แล้วนับ) จากนั้นเพิ่ม migration ใหม่ที่สร้าง index บน `borrow_records (book_id, borrowed_at DESC)` (composite index สำหรับ query pattern "หาประวัติของหนังสือเล่มหนึ่ง เรียงจากล่าสุด") — Hint: query เดียวที่มี `WHERE book_id = $1 ORDER BY borrowed_at DESC` เพียงพอแล้ว ไม่ต้อง `JOIN` อะไรเพิ่มเพราะข้อมูลอยู่ในตารางเดียว ส่วน index ให้ทดสอบด้วย `EXPLAIN ANALYZE` ก่อน/หลังสร้าง index เทียบว่า query planner เลือกใช้ index scan แทน sequential scan หรือไม่ (ต้องมีข้อมูลมากพอสมควรก่อน PostgreSQL จะเลือกใช้ index จริง ๆ — ตารางที่มีข้อมูลน้อยมาก ๆ อาจยังเลือก sequential scan เพราะเร็วกว่าในทางปฏิบัติ)
+   เพิ่มความยาก: ลองใช้ `INSERT ... ON CONFLICT` แทน `UPDATE ... FROM UNNEST` ดูว่าเป็นไปได้ไหมสำหรับ use case นี้ (คำตอบคือทำได้ยากกว่าเพราะ `updates` ไม่ใช่แถวใหม่ที่จะ insert แต่เป็นการแก้แถวที่มีอยู่แล้วเท่านั้น — ช่วยฝึกแยกแยะว่าเมื่อไรควรใช้เทคนิคไหนจากตารางสรุปหัวข้อ 71.14)
+
+3. **(ยาก)** เพิ่ม endpoint `GET /books/{id}/history` ที่คืนประวัติการยืม-คืนของหนังสือเล่มหนึ่ง **พร้อมชื่อผู้ยืมทุกคน** โดยต้องไม่มี N+1 เลย (คำนวณจำนวน query ที่ใช้จริงด้วยการนับ manual หรือเปิด PostgreSQL query log แล้วนับ) จากนั้นเพิ่ม migration ใหม่ที่สร้าง index บน `borrow_records (book_id, borrowed_at DESC)` (composite index สำหรับ query pattern "หาประวัติของหนังสือเล่มหนึ่ง เรียงจากล่าสุด") — Hint: query เดียวที่มี `WHERE book_id = $1 ORDER BY borrowed_at DESC` เพียงพอแล้ว ไม่ต้อง `JOIN` อะไรเพิ่มเพราะข้อมูลอยู่ในตารางเดียว ส่วน index ให้ทดสอบด้วย `EXPLAIN ANALYZE` ก่อน/หลังสร้าง index เทียบว่า query planner เลือกใช้ index scan แทน sequential scan หรือไม่ (ต้องมีข้อมูลมากพอสมควรก่อน PostgreSQL จะเลือกใช้ index จริง ๆ — ตารางที่มีข้อมูลน้อยมาก ๆ อาจยังเลือก sequential scan เพราะเร็วกว่าในทางปฏิบัติ)
+
+   เพิ่มความยาก: ทำให้ endpoint นี้รองรับ keyset pagination ตามหัวข้อ 71.3 ด้วย (ประวัติของหนังสือที่ถูกยืมบ่อยมากอาจมีหลายร้อยแถว) — สังเกตว่า cursor ในกรณีนี้ต้องเป็น `borrowed_at` (คอลัมน์ที่ sort อยู่) ไม่ใช่ `id` เหมือนตัวอย่างในบทนี้ ลองคิดว่าถ้ามีสองแถวที่ `borrowed_at` เท่ากันเป๊ะจะเกิดปัญหาอะไร และจะแก้ด้วย composite cursor (`(borrowed_at, id)`) อย่างไร
 
 4. **(ยาก/ประยุกต์ใช้งานจริง)** สร้างระบบแจ้งเตือนแบบง่ายด้วย `PgListener` (หัวข้อ 71.9): ทุกครั้งที่มีการสร้าง `borrow_records` ใหม่ ให้ trigger PostgreSQL (`CREATE TRIGGER` + `CREATE FUNCTION` ที่เรียก `pg_notify()`) ส่ง notification ไปยัง channel `borrow_events` โดยอัตโนมัติ (ไม่ต้องพึ่งโค้ด Rust เรียก `pg_notify()` เอง) แล้วเขียนโปรแกรม Rust ที่ `LISTEN` channel นี้และพิมพ์ log ทุกครั้งที่มีการยืมหนังสือเกิดขึ้นจริง (ไม่ว่าการยืมนั้นจะมาจาก endpoint ไหนของระบบก็ตาม) — Hint: `CREATE FUNCTION notify_borrow() RETURNS TRIGGER AS $$ BEGIN PERFORM pg_notify('borrow_events', NEW.id::text); RETURN NEW; END; $$ LANGUAGE plpgsql;` แล้ว `CREATE TRIGGER borrow_notify_trigger AFTER INSERT ON borrow_records FOR EACH ROW EXECUTE FUNCTION notify_borrow();` — ลองทดสอบด้วยการ insert ผ่าน `psql` ตรง ๆ (ไม่ผ่านโค้ด Rust เลย) แล้วดูว่าโปรแกรม listener ยังรับ notification ได้ไหม (คำตอบคือได้ เพราะ trigger ทำงานที่ระดับฐานข้อมูล ไม่ว่า insert จะมาจากไหน) — นี่คือข้อแตกต่างสำคัญจากการเรียก `pg_notify()` จากโค้ด Rust เองตรง ๆ ตามตัวอย่างในบทนี้
+
+   เพิ่มความยาก: ทดสอบพฤติกรรมตอน listener หลุดการเชื่อมต่อ (เช่น restart PostgreSQL หรือปิด listener ทิ้งกลางทางด้วย `pg_terminate_backend()` จาก `psql` อีก session หนึ่ง) แล้วสังเกตว่าเกิดอะไรขึ้นกับ notification ที่ถูกส่งระหว่างที่ listener หลุดอยู่ (ควรพบว่าหายไปเลย ไม่มีทาง replay — ตรงตามข้อจำกัด "no delivery guarantee" ที่หัวข้อ 71.9 อธิบายไว้) นี่คือวิธีพิสูจน์ข้อจำกัดของ `LISTEN`/`NOTIFY` ด้วยตัวเองแทนการเชื่อคำอธิบายเฉย ๆ
 
 ## สรุป
 
@@ -1520,7 +1788,7 @@ pool.size() หลังเปิด listener = 1 (ไม่เพิ่ม — 
 
 - **`sqlx::QueryBuilder`** สร้าง SQL แบบ dynamic ได้อย่างปลอดภัยเท่ากับ `query!`/`query_as!` — กฎเดียวที่ต้องจำ: `.push()` สำหรับ SQL fragment ที่เขียนเอง, `.push_bind()` สำหรับค่าจาก input ผู้ใช้**ทุกตัวโดยไม่มีข้อยกเว้น** ไม่มีเหตุผลใดที่ต้องกลับไปต่อ string เองอีก
 - **`COUNT(*) OVER()`** ให้ทั้งข้อมูลหน้าปัจจุบันและจำนวนแถวทั้งหมดในคำสั่ง SQL เดียว ลด round-trip จากสองครั้งเหลือครั้งเดียวสำหรับ pagination — ต้องมี `ORDER BY` ที่ deterministic เสมอคู่กับ `LIMIT`/`OFFSET`
-- **Bulk insert ด้วย `UNNEST` เร็วกว่า insert ทีละแถวในลูปถึง 70 เท่า** จากการวัดจริง (2,000 แถว) — ใช้ `= ANY($1)` แทนวน loop query ทีละ id เมื่อต้อง fetch หลายรายการพร้อมกันด้วยเหตุผลเดียวกัน
+- **Bulk insert ด้วย `UNNEST` เร็วกว่า insert ทีละแถวในลูปถึง 70 เท่า** จากการวัดจริง (2,000 แถว) — ใช้ `= ANY($1)` แทนวน loop query ทีละ id เมื่อต้อง fetch หลายรายการพร้อมกันด้วยเหตุผลเดียวกัน และใช้ `INSERT ... ON CONFLICT DO UPDATE` (upsert) แทน pattern "เช็คก่อนแล้วค่อย insert/update" สองคำสั่งแยกกันที่มี race condition
 - **`sqlx::types::Json<T>`** ผูก `JSONB` เข้ากับ struct/enum ของ Rust ตรง ๆ ได้ type-safety เต็มรูปแบบ (ดีกว่า `serde_json::Value` แบบ dynamic เมื่อ shape ของข้อมูลรู้ล่วงหน้าตามประเภท) — query เข้าไปข้างในผ่าน operator `->>`/`->` ของ PostgreSQL ได้โดยไม่ต้องดึงทุกแถวมา filter ฝั่ง Rust
 - **`ALTER TABLE ... ADD COLUMN ... NOT NULL` ต้องมี `DEFAULT` เสมอ** บนตารางที่อาจมีข้อมูลอยู่แล้ว — พิสูจน์ด้วย error จริงถ้าลืม ตาราง **`_sqlx_migrations`** เก็บ version/checksum/execution_time ของทุก migration ที่รันไปแล้ว เป็นแหล่งความจริงเดียวว่าฐานข้อมูลอยู่ที่ schema เวอร์ชันไหน
 - **`max_connections` ผูกตรงกับจำนวน concurrent task ที่คุยกับฐานข้อมูลได้พร้อมกัน** — pool เล็กเกินไปทำให้ request ต้องรอเข้าคิวยาวขึ้นเรื่อย ๆ ตอน traffic สูง (พิสูจน์ด้วยตัวเลขจริง: 614.90ms เทียบกับ 115.24ms สำหรับ pool เล็ก/ใหญ่พอ) จนอาจเกิน timeout พร้อมกันเป็นชุดใหญ่ — นี่คือกลไกที่แท้จริงเบื้องหลังอาการ "API timeout พร้อมกันหมดตอน traffic สูง"

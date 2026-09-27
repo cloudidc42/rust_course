@@ -937,6 +937,16 @@ comment marker คู่ที่ตรงกัน ลบเนื้อหา�
 crawler บางตัวที่ไม่รัน JS) จะเห็นแค่ fallback แช่นิ่งอยู่ (แต่เนื้อหาที่แท้จริงก็ยังอยู่ในไฟล์ HTML ที่ได้รับ
 ในรูป `<template>`/JSON ที่ serialize ไว้ ถ้า crawler ฉลาดพอจะ parse ได้อยู่ดี)
 
+ยังมีอีกจุดที่ควรอธิบายจาก raw response ข้างบน: บรรทัดสุดท้าย `__RESOLVED_RESOURCES[0] = "[{\"id\":1,...`
+คือค่าที่ `Resource` คำนวณได้ (รายการหนังสือทั้งหมด) ที่ถูก **serialize เป็น JSON string แล้วฝังไว้ใน HTML
+เลย** — เหตุผลที่ต้องทำแบบนี้คือ: ถ้าแอปตัวนี้มี hydrate WASM จริงด้วย (ตัวอย่างนี้ตัดส่วน hydrate ออกเพื่อ
+โฟกัสที่ streaming ล้วน ๆ ตามที่บอกไว้ตอนต้นหัวข้อ 91.4) ตอน hydrate ฝั่ง client ที่มี `Resource` ตัวเดียวกันนี้
+**จะไม่ยิง HTTP request ไปขอข้อมูลซ้ำอีกรอบ** — มันจะอ่านค่าที่ server serialize ไว้ใน `__RESOLVED_RESOURCES`
+ตรงนี้แทน (คล้ายกับที่ Part 89 หัวข้อ 89.6 อธิบายเรื่อง server function ที่ serialize ค่าไปมาระหว่าง client/
+server ผ่าน `Serialize`/`Deserialize`) นี่คือ optimization ที่สำคัญมาก: ไม่มี "double fetch" (fetch ครั้งแรก
+ตอน server render, fetch ครั้งที่สองตอน client hydrate) เกิดขึ้นเลย — ข้อมูลถูกส่งมาครั้งเดียวพร้อมกับ HTML
+เอง
+
 #### `SsrMode` ห้าแบบ: streaming ไม่ใช่ตัวเลือกเดียว
 
 `OutOfOrder` (ค่า default ที่ตัวอย่างข้างบนใช้อยู่) เป็นแค่หนึ่งในห้าโหมดที่ `leptos_router`/`leptos_axum`
@@ -993,6 +1003,47 @@ component และเห็นได้แม้จาก `curl` ตรง ๆ 
 `<head>` — มันไม่ได้ทำให้แอป "SEO-friendly" แบบสมบูรณ์อัตโนมัติ (ยังต้องคิดเรื่อง semantic HTML, `alt` ของ
 รูปภาพ, structured data แบบ JSON-LD ถ้าต้องการ rich snippet, sitemap.xml ฯลฯ เอง) — สิ่งที่มันแก้ได้ตรง ๆ
 คือปัญหาที่ CSR แก้ไม่ได้เลยคือ "crawler ที่ไม่รัน JS เห็นหน้าเปล่า"
+
+#### กลไกจริงเบื้องหลัง `<MetaTags/>`: ไม่ใช่ DOM patch แต่เป็น "string surgery"
+
+สังเกตจาก raw HTML ที่ `curl` ได้ในหัวข้อ 91.4 ว่ามี comment แปลก ๆ โผล่มา: `<!--HEAD-->` — นี่ไม่ใช่ noise
+แต่คือกลไกจริงของ `<MetaTags/>` ไล่ดูซอร์สโค้ดจริงของ `leptos_meta-0.8.7/src/lib.rs` พบว่า `<MetaTags/>`
+render ออกมาเป็น **string literal ธรรมดา** ตรง ๆ:
+
+```rust
+// จากซอร์สโค้ดจริง — leptos_meta-0.8.7/src/lib.rs
+fn to_html_with_buf(self, buf: &mut String, ...) {
+    buf.push_str("<!--HEAD-->");
+}
+```
+
+ส่วน `<Title>`/`<Meta>` ที่ถูกวางไว้ *ที่ไหนก็ได้* ในต้นไม้ component (ไม่จำเป็นต้องอยู่ใน `<head>` เลย — สังเกต
+ในหัวข้อ 91.4 ที่วางไว้ข้าง ๆ `<meta charset="utf-8">` ใน `<head>` ก็จริง แต่หลักการเดียวกันนี้ใช้ได้แม้วางไว้
+ลึกใน component tree) จะแค่ "ลงทะเบียน" ตัวเองไว้ใน `MetaContext` แทนที่จะ render HTML ตรงตำแหน่งนั้นทันที
+จากนั้นก่อนที่ chunk แรกของ response จะถูกส่งออกไปจริง ๆ leptos_meta จะทำ **string surgery** บน HTML buffer
+ที่ render ไว้แล้ว — หา `<!--HEAD-->` marker ตำแหน่งไหนก็ตาม แล้วแทรก `<title>`/`<meta>` ที่รวบรวมมาได้ทั้งหมด
+เข้าไป**ตรงจุดนั้น**ก่อนส่ง (ตรวจสอบจริงจากซอร์สโค้ด):
+
+```rust
+// จากซอร์สโค้ดจริง — leptos_meta-0.8.7/src/lib.rs (ย่อ)
+let marker_loc = first_chunk
+    .find("<!--HEAD-->")
+    .map(|pos| pos + "<!--HEAD-->".len())
+    .unwrap_or_else(|| first_chunk.find("</head>").unwrap_or(head_loc));
+let (before_marker, after_marker) = first_chunk.split_at_mut(marker_loc);
+buf.push_str(before_marker);
+buf.push_str(&meta_buf);   // <meta> ทั้งหมดที่ลงทะเบียนไว้จากทุกที่ในต้นไม้ component
+if let Some(title) = title {
+    buf.push_str("<title>");
+    buf.push_str(&title);
+    buf.push_str("</title>");
+}
+```
+
+นี่คือเหตุผลเชิงกลไกที่ทำให้ `<Title>`/`<Meta>` "ยืดหยุ่น" ได้มากกว่าที่คิด — component ลูกที่อยู่ลึกมาก (เช่น
+component แสดงรายละเอียดหนังสือที่ซ่อนอยู่หลาย layer) สามารถกำหนด `<Title>` ของทั้งหน้าได้เลย โดยไม่ต้องส่ง
+ค่ากลับขึ้นไปให้ component แม่แล้วให้แม่เป็นคนวางใน `<head>` เอง — มันคือ pattern ที่คล้าย "context ที่เขียน
+ได้จากทุกที่" มากกว่า "prop ที่ต้องส่งขึ้นไปข้างบน"
 
 ### 91.7 Performance จริง: TTFB เทียบกับ TTI
 
@@ -1216,6 +1267,36 @@ route รันอยู่ใน **Axum process เดียวกัน ใช
 ระบบ SSG ระดับ production จริง (เช่น Next.js ISR, หรือ build pipeline ที่ trigger rebuild อัตโนมัติเมื่อ
 เนื้อหาเปลี่ยนใน CMS) มีกลไก invalidation ที่ซับซ้อนกว่านี้มาก — ตัวอย่างในบทนี้ทำให้เห็นแค่หลักการพื้นฐาน
 ("render ครั้งเดียว cache ไว้") ไม่ใช่ระบบ SSG แบบสมบูรณ์สำหรับ production
+
+#### ขยายแนวคิด: cache invalidation แบบ time-based (พื้นฐานของ ISR)
+
+ตัวอย่างในหัวข้อนี้ cache ค่า `about_html` ไว้แบบ "ตายตัว" (ต้อง restart server ถึงจะอัปเดต) — ขั้นถัดไปที่
+ใกล้เคียงกับ **Incremental Static Regeneration (ISR)** ของ framework อื่น ๆ ในโลก JavaScript คือการทำให้
+cache **หมดอายุอัตโนมัติตามเวลา** โดยไม่ต้อง restart process เลย แนวคิดคร่าว ๆ (ให้รายละเอียดเต็มไว้เป็น
+แบบฝึกหัดข้อ 4 ท้ายบท) คือเปลี่ยนจาก `String` ตายตัว เป็น `Arc<RwLock<String>>` ที่มี background task
+(`tokio::spawn`) คอย re-render ทับค่าเดิมเป็นระยะ:
+
+```rust
+// แนวคิดคร่าว ๆ (รายละเอียดเต็มเป็นแบบฝึกหัดข้อ 4)
+let about_html: Arc<RwLock<String>> = Arc::new(RwLock::new(render_about(&pool).await));
+
+let about_html_bg = about_html.clone();
+let pool_bg = pool.clone();
+tokio::spawn(async move {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let fresh = render_about(&pool_bg).await;
+        *about_html_bg.write().await = fresh;
+    }
+});
+```
+
+ทุก request ที่เข้ามาที่ `/about` จะอ่านค่าล่าสุดจาก `RwLock` (เร็วมาก แค่ clone `String` ที่มีอยู่แล้ว ไม่ต้อง
+query database เลย) ในขณะที่ background task เป็นตัวเดียวที่ query database และ re-render จริง ทุก ๆ 60
+วินาที — ผู้ใช้จะไม่มีวัน "รอ" การ render เลยแม้แต่ request เดียว (ต่างจาก SSR เต็มรูปแบบที่ทุก request ต้อง
+รอ render) แต่ข้อมูลก็ไม่ได้ "ค้าง" ตลอดไปแบบตัวอย่างเดิม (ต่างจาก SSG แท้ ๆ ที่ต้อง rebuild ใหม่ทั้งระบบ)
+— นี่คือจุดกึ่งกลางที่แท้จริงระหว่าง SSG กับ SSR ในทางปฏิบัติ และเป็นเหตุผลที่ real-world framework หลายตัว
+เลือกทำ ISR แทนที่จะให้เลือกแค่ SSG หรือ SSR เพียวๆ
 
 ## กับดักที่พบบ่อย (Common Pitfalls)
 

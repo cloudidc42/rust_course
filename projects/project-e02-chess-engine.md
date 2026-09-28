@@ -1445,6 +1445,510 @@ extern "C" {
 
 **เป้าหมาย:** engine เล่น KQK, KRK, KBBK, KBNK สมบูรณ์แบบ 100%
 
+## Source Code สมบูรณ์ — ส่วนเพิ่มเติม
+
+### `src/board.rs` ส่วน `make_move` และ Special Moves
+
+การทำ move บน board สมบูรณ์ต้องจัดการ:
+
+1. **ย้าย piece จาก from → to**
+2. **ลบ captured piece** (ถ้ามี)
+3. **En passant capture** — ลบเบี้ยที่ถูก capture ซึ่งอยู่คนละ square กับ to
+4. **Castling** — ย้าย rook ไปด้วย
+5. **Promotion** — เปลี่ยน piece type
+6. **อัปเดต castling rights** — ถ้า king หรือ rook เคลื่อน
+7. **อัปเดต en passant file** — มีแค่ถ้าทำ double pawn push
+8. **Flip side to move**
+
+```rust
+pub fn apply(self, board: &Board) -> Board {
+    let mut b = board.clone();
+    let from = self.from() as usize;
+    let to = self.to() as usize;
+    let flags = self.flags();
+    let us = b.side_to_move as usize;
+    let them = 1 - us;
+
+    // 1. หา piece ที่กำลังเคลื่อน
+    let moving_piece = (0..6)
+        .find(|&p| b.pieces[us][p] & (1u64 << from) != 0)
+        .expect("no piece at from square");
+
+    // 2. ลบ piece จาก square เดิม
+    b.pieces[us][moving_piece] &= !(1u64 << from);
+
+    // 3. ลบ captured piece (ถ้าเป็น normal capture)
+    if flags == FLAG_CAPTURE || flags >= FLAG_PROMO_CAP_N {
+        for p in 0..6 {
+            b.pieces[them][p] &= !(1u64 << to);
+        }
+    }
+
+    // 4. En passant capture — เบี้ยที่ถูก capture อยู่ rank ก่อนหน้า
+    if flags == FLAG_EP_CAPTURE {
+        let captured_pawn_sq = if b.side_to_move == Color::White {
+            to - 8  // เบี้ยดำอยู่ rank ด้านล่าง to square
+        } else {
+            to + 8  // เบี้ยขาวอยู่ rank ด้านบน to square
+        };
+        b.pieces[them][PAWN] &= !(1u64 << captured_pawn_sq);
+    }
+
+    // 5. วาง piece ที่ to square (promotion เปลี่ยน piece type)
+    let placed = if flags >= FLAG_PROMO_N { self.promo_piece() } else { moving_piece };
+    b.pieces[us][placed] |= 1u64 << to;
+
+    // 6. Castling: ย้าย rook ไปด้วย
+    match flags {
+        FLAG_KS_CASTLE => {
+            let (rook_from, rook_to) = if us == 0 { (7, 5) } else { (63, 61) };
+            b.pieces[us][ROOK] &= !(1u64 << rook_from);
+            b.pieces[us][ROOK] |= 1u64 << rook_to;
+        }
+        FLAG_QS_CASTLE => {
+            let (rook_from, rook_to) = if us == 0 { (0, 3) } else { (56, 59) };
+            b.pieces[us][ROOK] &= !(1u64 << rook_from);
+            b.pieces[us][ROOK] |= 1u64 << rook_to;
+        }
+        _ => {}
+    }
+
+    // 7. อัปเดต castling rights
+    // ถ้า king เคลื่อน: ลบ castling rights ของฝ่ายนั้นทั้งคู่
+    if moving_piece == KING {
+        if us == 0 { b.castling_rights &= !3; }   // clear WK, WQ
+        else       { b.castling_rights &= !12; }   // clear BK, BQ
+    }
+    // ถ้า rook เคลื่อนหรือถูก capture: ลบ specific right
+    // from square
+    match from { 0  => b.castling_rights &= !2, 7  => b.castling_rights &= !1,
+                 56 => b.castling_rights &= !8, 63 => b.castling_rights &= !4, _ => {} }
+    // to square (capture)
+    match to   { 0  => b.castling_rights &= !2, 7  => b.castling_rights &= !1,
+                 56 => b.castling_rights &= !8, 63 => b.castling_rights &= !4, _ => {} }
+
+    // 8. อัปเดต en passant
+    b.en_passant_file = if flags == FLAG_DOUBLE_PUSH {
+        Some((from % 8) as u8)
+    } else {
+        None
+    };
+
+    // 9. Halfmove clock
+    b.halfmove_clock = if moving_piece == PAWN || self.is_capture() { 0 }
+                       else { b.halfmove_clock + 1 };
+
+    // 10. Fullmove number (increment หลัง black เคลื่อน)
+    if b.side_to_move == Color::Black { b.fullmove_number += 1; }
+
+    // 11. Flip side to move
+    b.side_to_move = b.side_to_move.flip();
+    b
+}
+```
+
+### `src/search.rs` — Transposition Table Lookup/Store
+
+```rust
+fn negamax_with_tt(
+    &mut self,
+    board: &Board,
+    depth: u32,
+    mut alpha: i32,
+    beta: i32,
+    ply: usize,
+    hasher: &ZobristHasher,
+) -> i32 {
+    let hash = hasher.hash(board);
+
+    // ─── TT Probe ───────────────────────────────────────────────
+    let mut tt_move: Option<Move> = None;
+    if let Some(entry) = self.tt.get(&hash) {
+        if entry.depth >= depth {
+            match entry.flag {
+                TTFlag::Exact      => return entry.score,
+                TTFlag::LowerBound => {
+                    if entry.score >= beta { return entry.score; }
+                    alpha = alpha.max(entry.score);
+                }
+                TTFlag::UpperBound => {
+                    if entry.score <= alpha { return entry.score; }
+                    // (beta = beta.min(...) ถ้าใช้ fail-soft)
+                }
+            }
+        }
+        tt_move = entry.best_move;
+    }
+
+    if depth == 0 {
+        return self.quiescence(board, alpha, beta);
+    }
+
+    let mut moves = generate_moves(board);
+    if moves.is_empty() {
+        return if king_in_check(board, board.side_to_move) {
+            -(MATE_SCORE - ply as i32)
+        } else {
+            0
+        };
+    }
+
+    self.order_moves(&mut moves, board, tt_move, ply);
+
+    let original_alpha = alpha;
+    let mut best_score = -INF;
+    let mut best_move  = None;
+
+    for m in &moves {
+        let child = m.apply(board);
+        let score = -self.negamax_with_tt(&child, depth - 1, -beta, -alpha, ply + 1, hasher);
+
+        if score > best_score {
+            best_score = score;
+            best_move  = Some(*m);
+        }
+        if score > alpha {
+            alpha = score;
+        }
+        if alpha >= beta {
+            // Killer move update
+            if !m.is_capture() && ply < 64 {
+                self.killer_moves[ply][1] = self.killer_moves[ply][0];
+                self.killer_moves[ply][0] = Some(*m);
+            }
+            break; // Beta cutoff
+        }
+    }
+
+    // ─── TT Store ───────────────────────────────────────────────
+    let flag = if best_score <= original_alpha {
+        TTFlag::UpperBound  // fail-low: ค่าจริงอาจต่ำกว่านี้
+    } else if best_score >= beta {
+        TTFlag::LowerBound  // fail-high: ค่าจริงอาจสูงกว่านี้
+    } else {
+        TTFlag::Exact       // ค่าแน่นอน
+    };
+
+    self.tt.insert(hash, TTEntry {
+        depth,
+        score: best_score,
+        flag,
+        best_move,
+    });
+
+    best_score
+}
+```
+
+### `src/evaluation.rs` — Mobility Bonus
+
+นอกจาก material และ PST ยังสามารถเพิ่ม **mobility** — จำนวน legal moves ที่มี:
+
+```rust
+/// Mobility score: bonus ต่อจำนวน moves ที่แต่ละ piece มีได้
+fn mobility_score(board: &Board) -> i32 {
+    let mut score = 0i32;
+
+    // White mobility (ยิ่งมี moves มาก ยิ่งมีทางเลือก)
+    let white_board = Board { side_to_move: Color::White, ..board.clone() };
+    let white_moves = generate_pseudo_legal(&white_board);
+    score += white_moves.len() as i32 * 2;  // +2 centipawns ต่อ move
+
+    // Black mobility
+    let black_board = Board { side_to_move: Color::Black, ..board.clone() };
+    let black_moves = generate_pseudo_legal(&black_board);
+    score -= black_moves.len() as i32 * 2;
+
+    if board.side_to_move == Color::White { score } else { -score }
+}
+
+/// Pawn structure: ตรวจจับ doubled pawns, isolated pawns
+fn pawn_structure_score(board: &Board) -> i32 {
+    let mut score = 0i32;
+
+    for color in 0..2usize {
+        let sign = if color == 0 { 1 } else { -1 };
+        let pawns = board.pieces[color][PAWN];
+
+        for file in 0..8u8 {
+            let file_mask = FILE_A << file;
+            let pawns_on_file = count(pawns & file_mask);
+
+            // Doubled pawns penalty: สอง pawn บน file เดียว
+            if pawns_on_file >= 2 {
+                score += sign * -20 * (pawns_on_file as i32 - 1);
+            }
+
+            // Isolated pawn: ไม่มี pawn บน adjacent files
+            if pawns_on_file > 0 {
+                let left_file  = if file > 0 { pawns & (FILE_A << (file - 1)) } else { 0 };
+                let right_file = if file < 7 { pawns & (FILE_A << (file + 1)) } else { 0 };
+                if left_file == 0 && right_file == 0 {
+                    score += sign * -15;  // isolated pawn penalty
+                }
+            }
+        }
+    }
+    if board.side_to_move == Color::White { score } else { -score }
+}
+```
+
+### Special Moves — รายละเอียดเพิ่มเติม
+
+#### Castling
+
+```
+ก่อน White Kingside Castle:
+8 ♜ ♞ ♝ ♛ ♚ ♝ ♞ ♜
+7 ♟ ♟ ♟ ♟ ♟ ♟ ♟ ♟
+6 .  .  .  .  .  .  .  .
+5 .  .  .  .  .  .  .  .
+4 .  .  .  .  .  .  .  .
+3 .  .  .  .  .  .  .  .
+2 ♙ ♙ ♙ ♙ ♙ ♙ ♙ ♙
+1 ♖ .  .  .  ♔ .  .  ♖
+  a  b  c  d  e  f  g  h
+
+หลัง e1g1 (Kingside Castle):
+1 ♖ .  .  .  .  ♖ ♔ .
+  a  b  c  d  e  f  g  h
+  King: e1 → g1
+  Rook: h1 → f1
+```
+
+```
+ก่อน White Queenside Castle:
+1 ♖ .  .  .  ♔ .  .  ♖
+
+หลัง e1c1 (Queenside Castle):
+1 .  ♔ ♖ .  .  .  .  ♖
+  King: e1 → c1
+  Rook: a1 → d1
+```
+
+เงื่อนไขเพิ่มเติมที่ต้องจำ:
+- b1 ต้อง empty (queenside) แต่ไม่ต้องเป็น "ไม่ถูก attack"
+- King ต้องไม่ผ่าน attacked square แม้แต่ชั่วคราว
+- ถ้า rook ถูก capture ต้อง clear castling rights ทันที
+
+#### En Passant
+
+```
+ตำแหน่งก่อน en passant:
+5 .  .  .  ♟ ♙ .  .  .   (Black เพิ่ง double-push d7→d5)
+  a  b  c  d  e  f  g  h
+
+หลัง exd6 (en passant):
+6 .  .  .  ♙ .  .  .  .   (White pawn ไป d6)
+5 .  .  .  .  .  .  .  .   (Black pawn หายไปจาก d5!)
+```
+
+```rust
+// สำคัญ: en passant file ต้องเซ็ตแค่ 1 ply
+// หลังจาก opponent เคลื่อนอะไรก็ตาม ต้อง clear
+b.en_passant_file = if flags == FLAG_DOUBLE_PUSH {
+    Some((from % 8) as u8)
+} else {
+    None  // ← ต้องเป็น None แม้ previous ep ยังไม่ถูก capture
+};
+```
+
+#### Pawn Promotion
+
+```
+ตำแหน่งก่อน promotion:
+7 .  ♙ .  ♛ .  .  .  .
+  a  b  c  d  e  f  g  h
+
+White เลือก b7b8q (promote to Queen):
+8 .  ♕ .  ♛ .  .  .  .
+
+หรือ b7c8n (capture + promote to Knight):
+8 .  .  ♘ .  .  .  .  .  (ถ้ามี black piece ที่ c8)
+```
+
+Engine ควร generate ทุก 4 choices (N/B/R/Q) ด้วย เพราะบางครั้ง underpromotion ดีกว่า:
+- **Underpromotion เป็น Knight** มีประโยชน์เมื่อ Knight fork ทำให้ชนะทันที ขณะที่ Queen ทำให้เสมอ (stalemate)
+- **Underpromotion เป็น Rook** บางครั้ง Queen ทำ stalemate แต่ Rook ไม่ทำ
+
+## ประวัติ Chess Engine Programming
+
+การพัฒนา chess engine เป็น field ที่มีประวัติยาวนานใน computer science:
+
+### Timeline สำคัญ
+
+| ปี | เหตุการณ์ |
+|----|----------|
+| 1950 | Claude Shannon เสนอ alpha-beta search ใน "Programming a Computer for Playing Chess" |
+| 1957 | Alex Bernstein เขียน chess program แรกบน IBM 704 |
+| 1967 | MAC Hack VI — chess program แรกที่เล่น tournament จริง |
+| 1988 | Deep Thought ชนะ Grandmaster เป็นครั้งแรก |
+| 1997 | Deep Blue ชนะ Kasparov match ที่ 6 games |
+| 2005 | Fruit ใช้ alpha-beta + history heuristic เปิดเผย source code |
+| 2008 | Stockfish เริ่มพัฒนา — ยังคงแข็งแกร่งที่สุดในปัจจุบัน |
+| 2017 | AlphaZero ของ DeepMind เล่น self-play 4 ชั่วโมง แล้วชนะ Stockfish 8 |
+| 2019 | Leela Chess Zero (LC0) — open-source MCTS + neural network |
+| 2020 | Stockfish เพิ่ม NNUE (Efficiently Updatable Neural Network) |
+
+### วิธีการหลักของ Modern Engines
+
+1. **Traditional alpha-beta** (Stockfish จนถึงปี 2019): search tree + handcrafted evaluation
+2. **MCTS + Neural Net** (AlphaZero, LC0): Monte Carlo Tree Search ผสม policy/value network
+3. **Alpha-beta + NNUE** (Stockfish 12+): classical search + neural network evaluation ที่ update แบบ incremental
+
+Engine ใน tutorial นี้ใช้วิธี 1 ซึ่งยังคงเป็นพื้นฐานที่ดีที่สุดสำหรับเรียนรู้
+
+## การ Debug Move Generator
+
+เมื่อ perft ได้ค่าผิด วิธี systematic debug:
+
+### Step 1: perft_divide
+
+เปรียบเทียบ perft_divide output กับ reference (เช่น Stockfish):
+
+```bash
+# รัน engine ของเรา
+./chess-engine perft --depth 3 2>&1 | head -30
+
+# Expected output structure:
+# a2a3: 380
+# a2a4: 420
+# b2b3: 420
+# ...
+# Total: 8902
+
+# เปรียบเทียบกับ Stockfish:
+# echo "position startpos\nd\nperft 3" | stockfish
+```
+
+### Step 2: หา divergent node
+
+ถ้า `a2a3: 380` แต่ Stockfish ได้ `a2a3: 400` — บั๊กอยู่ใน subtree หลัง a2a3
+
+```bash
+./chess-engine perft --fen "rnbqkbnr/pppppppp/8/8/8/P7/1PPPPPPP/RNBQKBNR b KQkq - 0 1" --depth 2
+```
+
+### Step 3: ลด depth จนหา position ผิด
+
+วน loop จนได้ position ที่ depth 1 ผิด — นั่นคือ exact position ที่มี bug
+
+### ตาราง perft reference positions
+
+```
+Position 2 (Kiwipete) — ทดสอบ castling + EP + promotion:
+FEN: r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1
+perft(1) = 48
+perft(2) = 2039
+perft(3) = 97862
+
+Position 3 — ทดสอบ EP capture edge cases:
+FEN: 8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1
+perft(1) = 14
+perft(2) = 191
+perft(3) = 2812
+
+Position 4 (mirror) — ทดสอบ promotion + check:
+FEN: r3k2r/Pppp1ppp/1b3nbN/nPB5/B1p1P3/3P1N2/PpPP1PPP/R3K2R b KQkq - 0 1
+perft(1) = 6
+perft(2) = 264
+perft(3) = 9467
+```
+
+## การ Profile และ Optimize
+
+### Profiling ด้วย `perf` (Linux)
+
+```bash
+# Build with debug symbols (ใน release)
+cargo build --release --features debug-symbols
+
+# Profile perft(5)
+perf record ./target/release/chess-engine perft --depth 5
+perf report --stdio | head -30
+
+# Output คาดหวัง:
+# Overhead  Command       Shared Object     Symbol
+#   45.23%  chess-engine  chess-engine      [.] bishop_attacks
+#   23.11%  chess-engine  chess-engine      [.] rook_attacks
+#   15.40%  chess-engine  chess-engine      [.] is_attacked
+#    8.92%  chess-engine  chess-engine      [.] generate_pseudo_legal
+```
+
+hotspot คือ sliding piece attacks → นั่นคือเหตุผลที่ magic bitboards สำคัญ
+
+### Inline Hints
+
+```rust
+// เพิ่ม #[inline(always)] สำหรับ hot functions
+#[inline(always)]
+pub fn pop_lsb(bb: &mut Bitboard) -> u8 {
+    let sq = bb.trailing_zeros() as u8;
+    *bb &= *bb - 1;
+    sq
+}
+
+#[inline(always)]
+pub fn knight_attacks(sq: u8) -> Bitboard {
+    KNIGHT_ATTACKS[sq as usize]  // precomputed array เร็วกว่า compute
+}
+
+// Precompute ทั้ง 64 squares ที่ startup
+static KNIGHT_ATTACKS: [u64; 64] = {
+    // const evaluation ใน Rust 1.65+
+    let mut table = [0u64; 64];
+    let mut i = 0;
+    while i < 64 {
+        table[i] = compute_knight_attacks(i as u8);
+        i += 1;
+    }
+    table
+};
+```
+
+### ใช้ `Vec` Pre-allocated
+
+```rust
+// แทนที่ Vec::new() ทุกครั้ง, reuse buffer
+pub struct MoveList {
+    moves: Vec<Move>,
+}
+
+impl MoveList {
+    pub fn new() -> Self { MoveList { moves: Vec::with_capacity(256) } }
+    pub fn clear_and_generate(&mut self, board: &Board) {
+        self.moves.clear();
+        // fill self.moves...
+    }
+}
+```
+
+## เปรียบเทียบ Algorithm Variants
+
+### Alpha-Beta Variants
+
+| Variant | ข้อดี | ข้อเสีย | ใช้เมื่อ |
+|---------|-------|---------|----------|
+| Fail-hard | simple, no re-search | บางครั้งเสีย info | เรียนรู้ |
+| Fail-soft | better root score | code ซับซ้อนกว่า | production |
+| PVS (Principal Variation Search) | เร็วขึ้น ~10-15% | debug ยากกว่า | tournament |
+| MTD(f) | ประหยัด nodes มาก | oscillation ปัญหา | เฉพาะบาง engine |
+
+### Move Ordering Impact
+
+ตัวเลขนี้แสดงว่า ordering ดีแค่ไหนสร้าง cutoff ได้มากแค่ไหน (depth 5):
+
+```
+Random ordering:    ~11,000,000 nodes
+Captures first:      ~1,200,000 nodes
+MVV-LVA:               ~850,000 nodes
++ Killer moves:        ~620,000 nodes
++ History heuristic:   ~480,000 nodes
++ TT move:             ~180,000 nodes
+```
+
+การ order moves ดีช่วยลด nodes ลงกว่า 60x!
+
 ## สรุป
 
 โปรเจคนี้สอน pattern สำคัญหลายอย่างที่ใช้ได้นอกเหนือจาก chess:
@@ -1457,7 +1961,46 @@ extern "C" {
 
 **ประสิทธิภาพ:** implementation นี้ใช้ classical bitboard (ไม่ใช่ magic) สามารถ search ได้ประมาณ depth 6-8 ใน 1 วินาที (ขึ้นกับ position) เครื่อง engine ระดับ production อย่าง Stockfish ใช้เวลา ~1ms สำหรับ depth 20+ เพราะใช้ magic bitboard, NNUE evaluation, multithreading, และ opening book
 
+**ทักษะ Rust ที่ฝึกได้:** pattern matching กับ enum flags, `u16` bit packing, `inline(always)` performance hints, `HashMap` ใน hot path, `Vec::with_capacity` เพื่อลด allocation, clone-on-write board state แทน undo-move, module organization สำหรับ project ขนาดกลาง
+
 **โปรเจคถัดไป** (project-e03-physics-engine.md) จะสร้าง 2D physics engine ด้วย rigid body dynamics, collision detection, และ constraint solver — ซึ่งจะนำ numeric computing และ iterative algorithm ที่เรียนรู้ที่นี่ไปประยุกต์ใช้
+
+---
+
+## อ้างอิงและแหล่งเรียนรู้เพิ่มเติม
+
+- **Chess Programming Wiki** — https://www.chessprogramming.org/  
+  แหล่ง reference สำคัญที่สุดสำหรับ chess engine: bitboards, magic numbers, search algorithms, evaluation
+- **Stockfish source code** — https://github.com/official-stockfish/Stockfish  
+  อ่านโค้ด engine ระดับ world-class; มี comment อธิบายอย่างดี
+- **Mediocre Chess Blog** — http://mediocrechess.blogspot.com/  
+  series บทความ step-by-step พัฒนา engine ตั้งแต่ต้น
+- **TalkChess Forum** — http://talkchess.com/  
+  community ของ chess programmers; ถามคำถามได้โดยตรง
+- **Perft Results** — https://www.chessprogramming.org/Perft_Results  
+  ค่า reference perft สำหรับ positions มาตรฐาน
+
+## Checklist สำหรับ Production-Ready Engine
+
+- [ ] perft(1)=20, perft(2)=400, perft(3)=8902 จาก startpos ผ่าน
+- [ ] Kiwipete position perft(3)=97862 ผ่าน (ครอบคลุม castling + EP)
+- [ ] UCI handshake (`uci` → `uciok`, `isready` → `readyok`) ทำงาน
+- [ ] `position startpos moves ...` parse และ apply ได้ถูกต้อง
+- [ ] `go depth N` ส่ง `bestmove` กลับมาได้
+- [ ] Castling rights อัปเดตถูกต้องเมื่อ king/rook เคลื่อน
+- [ ] En passant ทำงานได้ทั้ง generate และ apply
+- [ ] Promotion generate ครบ 4 choices (N/B/R/Q) รวม capture+promotion
+- [ ] King ไม่สามารถ castle ขณะอยู่ใน check หรือผ่าน attacked square
+- [ ] Stalemate detect และคืนค่า 0 (draw)
+- [ ] Checkmate detect และคืนค่า mate score (ไม่ใช่ evaluate)
+- [ ] Zobrist hash consistent: same position → same hash จากทุก path
+- [ ] TT entries ไม่ทำให้ engine เล่นผิด (flag ใช้ถูกต้อง)
+- [ ] Quiescence search ป้องกัน horizon effect
+- [ ] Move ordering: TT > MVV-LVA > killer > history ตามลำดับ
+- [ ] `cargo test` ผ่านทุก test
+- [ ] `cargo clippy` ไม่มี warning สำคัญ
+- [ ] `cargo build --release` สร้าง binary ได้
+- [ ] Binary ทำงานใน Arena/Cute Chess ผ่าน UCI
 
 ---
 

@@ -1415,6 +1415,60 @@ pub fn renew(&self, token: &LockToken, extend_ms: u64) -> Result<LockToken, Lock
 
 ---
 
+## ความแตกต่างจาก Mutex ใน Standard Library
+
+เพื่อให้เห็นภาพชัดว่า distributed lock แตกต่างจาก `std::sync::Mutex` อย่างไร:
+
+| Feature | `std::sync::Mutex` | Distributed Lock |
+|---|---|---|
+| Scope | Process เดียว | หลาย process / node |
+| Auto-release เมื่อ crash | ✅ (RAII Drop) | ต้องใช้ TTL |
+| Fencing token | ไม่จำเป็น | จำเป็นสำหรับ split-brain |
+| Network partition | N/A | ต้องออกแบบ explicitly |
+| Performance | Nanoseconds | Milliseconds (network) |
+| Reentrant | ต้องใช้ `parking_lot::ReentrantMutex` | ต้องสร้าง logic เอง |
+
+กฎสำคัญ: **ใช้ distributed lock เฉพาะเมื่อจำเป็น** — ถ้า operation เกิดขึ้นใน process เดียว `Mutex` ธรรมดาดีกว่าเสมอ เพราะไม่มี network overhead และ RAII ทำให้ไม่มี lock leak
+
+### เมื่อไหร่ควรใช้ Distributed Lock
+
+```
+✅ ใช้เมื่อ:
+- หลาย process/service ต้องเข้าถึง shared resource พร้อมกัน
+- ต้องการ leader election
+- ต้องการ rate limiting แบบ cluster-wide
+
+❌ ไม่ควรใช้เมื่อ:
+- Single process (ใช้ Mutex แทน)
+- ต้องการ throughput สูง (lock คือ bottleneck)
+- Operation idempotent อยู่แล้ว (ไม่จำเป็นต้องป้องกัน)
+```
+
+---
+
+### การเปรียบเทียบกับ Redis SETNX
+
+ในทางปฏิบัติ Redis ถูกใช้เป็น distributed lock backend ผ่าน `SET key value NX PX ttl`:
+
+```
+# Redis command
+SET payment:lock "holder-abc" NX PX 5000
+
+# ถ้า return "OK" → ได้ lock
+# ถ้า return (nil) → lock ถูกถือโดยคนอื่น
+```
+
+Redlock ขยายความคิดนี้ไปยัง N Redis instances โดยต้อง SET สำเร็จบน majority — โปรเจคนี้จำลอง behavior เดียวกันใน memory โดยใช้ `DashMap` แทน Redis instance
+
+ข้อจำกัดของ Redlock ที่ Martin Kleppmann ชี้ให้เห็น (ดู "How to do distributed locking" บล็อก 2016):
+1. **Fencing token ไม่ได้รับประกันโดย Redlock** — Redlock ไม่ออก monotonic token ให้ client ใช้ validate
+2. **Clock assumption** — Redlock assume clocks ไม่ drift เกินกว่า TTL ซึ่งในทางปฏิบัติอาจเกิดได้
+3. **Process pause** — GC หรือ OS scheduling pause อาจทำให้ lock expired ระหว่างที่ client กำลังทำงาน
+
+โปรเจคนี้แก้ข้อ 1 ด้วย fencing token และ `validate_fence()` ซึ่ง storage layer ต้องใช้ก่อน accept write
+
+---
+
 ## สรุป
 
 โปรเจคนี้สร้าง distributed lock manager ที่ครอบคลุม pattern สำคัญใน distributed systems:
@@ -1435,8 +1489,14 @@ pub fn renew(&self, token: &LockToken, extend_ms: u64) -> Result<LockToken, Lock
 - **Condvar** — blocking notification primitive ของ Rust standard library
 - **Drop-before-mutate** — pattern สำคัญเมื่อใช้ `DashMap::get()` ร่วมกับ `remove()`
 
+**Pattern ที่นำไปใช้ต่อได้ทันที:**
+- `DashMap` + `Arc<AtomicU64>` per-key counter → ใช้ได้กับ rate limiter, sequence number generator
+- TTL expiry via `Instant::elapsed()` → ใช้กับ cache, session store, temporary token
+- Majority voting → ใช้กับ leader election, distributed configuration
+- `Condvar` wake pattern → ใช้กับ job queue, event bus
+
 **เชื่อมโยงกับโปรเจคถัดไป:**
-โปรเจค F04: Circuit Breaker จะต่อยอดจากแนวคิด failure detection และ state machine ที่ใช้ใน `LockNode::failure_rate` โดยสร้างระบบที่ตรวจจับ service failures อัตโนมัติ และ "เปิดวงจร" เพื่อป้องกัน cascading failures ในระบบ microservices
+โปรเจค F04: Circuit Breaker จะต่อยอดจากแนวคิด failure detection และ state machine ที่ใช้ใน `LockNode::failure_rate` โดยสร้างระบบที่ตรวจจับ service failures อัตโนมัติ และ "เปิดวงจร" เพื่อป้องกัน cascading failures ในระบบ microservices — การที่ `DistributedLockManager` ต้องจัดการ partial failures ในโปรเจคนี้เป็นรากฐานของแนวคิดเดียวกัน
 
 ---
 
